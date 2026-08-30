@@ -1,0 +1,9 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+    "COSMOS_ENDPOINT": "https://your-account.documents.azure.com:443/",
+    "COSMOS_DATABASE": "eos",
+    "COSMOS_CONTAINER": "workspace"
+  }
+}

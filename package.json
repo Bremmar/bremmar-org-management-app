@@ -1,0 +1,29 @@
+{
+  "name": "eos-l10-hub",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A multi-team EOS Level 10 operating hub.",
+  "workspaces": [
+    "apps/web",
+    "apps/api"
+  ],
+  "scripts": {
+    "dev": "npm run dev:web",
+    "dev:web": "npm run dev --workspace @eos/web",
+    "build": "npm run build:web && npm run build:api",
+    "build:web": "npm run build --workspace @eos/web",
+    "build:api": "npm run build --workspace @eos/api",
+    "typecheck": "npm run typecheck:web && npm run typecheck:api",
+    "typecheck:web": "npm run typecheck --workspace @eos/web",
+    "typecheck:api": "npm run typecheck --workspace @eos/api",
+    "lint": "npm run lint:web && npm run lint:api",
+    "lint:web": "npm run lint --workspace @eos/web",
+    "lint:api": "npm run lint --workspace @eos/api",
+    "test": "npm run test:web && npm run test:api",
+    "test:web": "npm run test --workspace @eos/web",
+    "test:api": "npm run test --workspace @eos/api"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
