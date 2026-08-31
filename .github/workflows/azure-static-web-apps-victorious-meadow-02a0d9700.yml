@@ -33,16 +33,11 @@ jobs:
       - name: Build frontend
         run: npm run build:web
 
-      - name: Install OIDC client
-        run: npm install --no-save --no-package-lock @actions/core@1.6.0 @actions/http-client
-
       - name: Get ID token
-        uses: actions/github-script@v6
+        uses: actions/github-script@v9
         id: idtoken
         with:
-          script: |
-            const core = require('@actions/core')
-            return await core.getIDToken()
+          script: return await core.getIDToken()
           result-encoding: string
 
       - name: Deploy to the Victorious Meadow Static Web App
