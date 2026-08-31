@@ -35,10 +35,12 @@ npm run build
 
 ## Deployment notes
 
-The frontend workflow expects the `AZURE_STATIC_WEB_APPS_API_TOKEN` GitHub
-secret. It deploys `apps/web` as the static frontend and `apps/api` as the
-managed Azure Functions API under `/api`. The API's `main` field points Azure
-Functions at `dist/index.js` after the TypeScript build.
+The deployment workflow expects the app-specific
+`AZURE_STATIC_WEB_APPS_API_TOKEN_VICTORIOUS_MEADOW_02A0D9700` GitHub secret.
+The token binds the deployment to the Victorious Meadow Static Web App. It
+deploys `apps/web` as the static frontend and `apps/api` as the managed Azure
+Functions API under `/api`. The API's `main` field points Azure Functions at
+`dist/index.js` after the TypeScript build.
 
 `infra/main.bicep` also contains a separate Bring Your Own Functions deployment
 for environments that require a dedicated Function App and managed identity
