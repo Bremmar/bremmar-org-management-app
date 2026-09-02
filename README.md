@@ -10,7 +10,7 @@ paths, and Leadership rollups into one source of truth.
 
 - `apps/web` — React + TypeScript frontend for Azure Static Web Apps.
 - `apps/api` — Azure Functions v4 API deployed at the Static Web Apps `/api` route.
-- `infra` — Bicep foundation for Static Web Apps, Functions, and Cosmos DB.
+- `infra` — Bicep foundation for Static Web Apps, Functions, Cosmos DB, and Azure Table Storage.
 - `AGENTS.md` — project guidance for coding agents and contributors.
 
 ## Local development
@@ -84,12 +84,13 @@ mode per environment; do not deploy both to the same `/api` route. Disable
 local POC mode and configure the approved single-tenant identity adapter before
 allowing shared or production traffic.
 
-The Bicep foundation provisions `eos-control`, `eos-live`, and `eos-test` in one
-Cosmos account. The control database stores environment metadata and Test access
-grants; all workspace records are stored only in their selected database. Supply
-the secure `environmentCookieSecret` parameter, configure
-`COSMOS_CONNECTION_STRING` for a Static Web Apps managed API when applicable,
-and run
+The Bicep foundation provisions `eos-live` and `eos-test` in one Cosmos account
+plus an `EnvironmentAccess` Azure Storage Table for environment metadata, Test
+access grants, and grant audit events. All workspace records are stored only in
+their selected Cosmos database. Supply the secure `environmentCookieSecret`
+parameter, configure `COSMOS_CONNECTION_STRING`, `AZURE_STORAGE_CONNECTION_STRING`,
+and `AZURE_STORAGE_TABLE_NAME` for a Static Web Apps managed API when
+applicable, and run
 `npm run bootstrap:environments --workspace @eos/api` after deployment with the
 initial Entra object IDs. Bootstrap initializes Live with configuration only,
 seeds Test from the dedicated sanitized fixture, and is additive/idempotent.

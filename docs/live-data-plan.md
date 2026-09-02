@@ -13,13 +13,13 @@ authorization model independent of the eventual identity provider.
 
 ## Live and Test environments
 
-The application has one shared frontend and one API deployment backed by three
-Cosmos databases:
+The application has one shared frontend and one API deployment backed by two
+Cosmos databases and one Azure Storage Table:
 
-- `eos-control` stores environment definitions, per-user Test grants, and grant
-  audit events.
 - `eos-live` stores the production workspace.
 - `eos-test` stores the dedicated sanitized Test workspace.
+- `EnvironmentAccess` stores environment definitions, per-user Test grants, and
+  grant audit events in the `org` partition.
 
 Live is always the post-sign-in default. An authenticated organization user has
 Live access by default; Test is shown only when an OrgAdmin has granted access
@@ -59,8 +59,10 @@ operational work has been resolved or moved.
 
 - Operational records use `team:{teamId}` as their Cosmos DB partition key.
 - Users, teams, memberships, settings, transfer envelopes, notifications, team
-  messages, and audit events use the `org` partition. Meetings and their IDS
-  notes remain in the team partition with the operational records they coordinate.
+  messages, and audit events use the `org` Cosmos partition. Meetings and their
+  IDS notes remain in the team partition with the operational records they
+  coordinate. Environment definitions, Test grants, and environment access
+  audit events use the `org` partition in the `EnvironmentAccess` Azure Table.
 - Issues keep their stable ID and original `createdAt`. Because Cosmos
   partition keys are immutable, an accepted transfer is a versioned copy and
   redirect state machine: the source copy is redirected and the destination
@@ -164,9 +166,10 @@ capabilities remain the authorization source of truth.
 1. Validate the local hierarchy, role matrix, transfer and messaging workflows,
    aging/escalation behavior, task/To-Do synchronization, meeting recap/IDS
    notes, and readable responsive layouts.
-2. Provision the three databases and control/workspace containers with the API's
-   Cosmos connection string, then run `bootstrap:environments` with the initial
-   OrgAdmin and approved Test administrator object IDs.
+2. Provision the two workspace databases/containers and the `EnvironmentAccess`
+   Azure Table, then configure the Cosmos and storage connection strings before
+   running `bootstrap:environments` with the initial OrgAdmin and approved Test
+   administrator object IDs.
 3. Verify the smoke path: authenticate, confirm Live is selected, grant Test
    access from Live Admin, switch to Test, edit a record, switch back to Live,
    and confirm the Live workspace is unchanged.

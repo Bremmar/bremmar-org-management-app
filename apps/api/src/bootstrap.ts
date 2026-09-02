@@ -1,4 +1,5 @@
 import { CosmosClient, type Container } from '@azure/cosmos';
+import { TableClient } from '@azure/data-tables';
 import {
   DEFAULT_MEETING_SECTIONS,
   partitionFor,
@@ -9,51 +10,12 @@ import {
   type UserProfile,
   type WorkspaceRecord,
 } from './domain.js';
+import { AzureTableControlPlaneRepository } from './data/environment.js';
 import { MemoryWorkspaceRepository } from './data/repository.js';
 
 const ORG_ID = process.env.BREMMAR_ORG_ID ?? 'bremmar';
 const CONTROL_PARTITION = 'org';
 const nowIso = () => new Date().toISOString();
-
-interface EnvironmentDefinition {
-  id: string;
-  kind: 'environmentDefinition';
-  pk: string;
-  orgId: string;
-  environmentId: EnvironmentId;
-  label: string;
-  active: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
-
-interface EnvironmentAccessGrant {
-  id: string;
-  kind: 'environmentAccessGrant';
-  pk: string;
-  orgId: string;
-  userId: string;
-  environmentId: 'test';
-  allowed: true;
-  grantedAt: string;
-  grantedBy: string;
-  createdAt: string;
-  updatedAt: string;
-  updatedBy: string;
-  version: number;
-}
-
-interface EnvironmentAccessAudit {
-  id: string;
-  kind: 'environmentAccessAudit';
-  pk: string;
-  orgId: string;
-  environmentId: 'control';
-  actorId: string;
-  targetUserId: string;
-  action: 'granted' | 'revoked';
-  createdAt: string;
-}
 
 function recordBase(id: string, kind: WorkspaceRecord['kind'], teamId?: string, environmentId: EnvironmentId = 'live'): WorkspaceRecord {
   const timestamp = nowIso();
@@ -119,27 +81,21 @@ function requiredSetting(name: string) {
 }
 
 export async function bootstrapEnvironments(options: { orgAdminObjectId: string; adminName: string; adminEmail: string; initialTestAccessObjectIds: readonly string[] }) {
-  const connectionString = requiredSetting('COSMOS_CONNECTION_STRING');
-  const controlDatabase = requiredSetting('COSMOS_CONTROL_DATABASE');
+  const cosmosConnectionString = requiredSetting('COSMOS_CONNECTION_STRING');
+  const storageConnectionString = requiredSetting('AZURE_STORAGE_CONNECTION_STRING');
   const liveDatabase = requiredSetting('COSMOS_LIVE_DATABASE');
   const testDatabase = requiredSetting('COSMOS_TEST_DATABASE');
-  const controlContainerName = process.env.COSMOS_CONTROL_CONTAINER ?? 'environment-access';
   const liveContainerName = process.env.COSMOS_LIVE_CONTAINER ?? 'workspace';
   const testContainerName = process.env.COSMOS_TEST_CONTAINER ?? 'workspace';
-  const client = new CosmosClient(connectionString);
-  const control = client.database(controlDatabase).container(controlContainerName);
+  const controlTableName = process.env.AZURE_STORAGE_TABLE_NAME ?? 'EnvironmentAccess';
+  const controlTable = TableClient.fromConnectionString(storageConnectionString, controlTableName);
+  await controlTable.createTable();
+  const control = new AzureTableControlPlaneRepository(controlTable, async () => true);
+  await control.ensureEnvironmentMetadata();
+  const client = new CosmosClient(cosmosConnectionString);
   const live = client.database(liveDatabase).container(liveContainerName);
   const test = client.database(testDatabase).container(testContainerName);
-  const timestamp = nowIso();
   const initialTestAccessObjectIds = [...new Set(options.initialTestAccessObjectIds.map((userId) => userId.trim()).filter(Boolean))];
-
-  const definitions: EnvironmentDefinition[] = [
-    { id: 'environment-live', kind: 'environmentDefinition', pk: CONTROL_PARTITION, orgId: ORG_ID, environmentId: 'live', label: 'Live', active: true, createdAt: timestamp, updatedAt: timestamp },
-    { id: 'environment-test', kind: 'environmentDefinition', pk: CONTROL_PARTITION, orgId: ORG_ID, environmentId: 'test', label: 'Test', active: true, createdAt: timestamp, updatedAt: timestamp },
-  ];
-  const existingDefinitions = await control.items.query<EnvironmentDefinition>({ query: 'SELECT * FROM c WHERE c.pk = @pk AND c.kind = "environmentDefinition"', parameters: [{ name: '@pk', value: CONTROL_PARTITION }] }, { partitionKey: CONTROL_PARTITION }).fetchAll();
-  const existingDefinitionIds = new Set(existingDefinitions.resources.map((definition) => definition.id));
-  for (const definition of definitions) if (!existingDefinitionIds.has(definition.id)) await control.items.create(definition);
 
   if (!await hasAnyWorkspaceRecords(live)) {
     await writeRecords(live, liveBootstrapRecords(options.orgAdminObjectId, options.adminName, options.adminEmail));
@@ -163,22 +119,7 @@ export async function bootstrapEnvironments(options: { orgAdminObjectId: string;
     await writeRecords(test, records.filter((record) => record.kind === 'user' || record.kind === 'teamMembership'));
   }
 
-  if (initialTestAccessObjectIds.length) {
-    const existingGrants = await control.items.query<EnvironmentAccessGrant>({ query: 'SELECT * FROM c WHERE c.pk = @pk AND c.kind = "environmentAccessGrant"', parameters: [{ name: '@pk', value: CONTROL_PARTITION }] }, { partitionKey: CONTROL_PARTITION }).fetchAll();
-    const existingGrantIds = new Set(existingGrants.resources.map((grant) => grant.id));
-    for (const userId of initialTestAccessObjectIds) {
-      if (existingGrantIds.has(`environment-access-test-${userId}`)) continue;
-      const grant: EnvironmentAccessGrant = { id: `environment-access-test-${userId}`, kind: 'environmentAccessGrant', pk: CONTROL_PARTITION, orgId: ORG_ID, userId, environmentId: 'test', allowed: true, grantedAt: timestamp, grantedBy: options.orgAdminObjectId, createdAt: timestamp, updatedAt: timestamp, updatedBy: options.orgAdminObjectId, version: 1 };
-      const audit: EnvironmentAccessAudit = { id: `environment-audit-bootstrap-${safeId(userId)}`, kind: 'environmentAccessAudit', pk: CONTROL_PARTITION, orgId: ORG_ID, environmentId: 'control', actorId: options.orgAdminObjectId, targetUserId: userId, action: 'granted', createdAt: timestamp };
-      const operations = [
-        { operationType: 'Create', resourceBody: grant as unknown as Record<string, unknown> },
-        { operationType: 'Create', resourceBody: audit as unknown as Record<string, unknown> },
-      ] as unknown as import('@azure/cosmos').OperationInput[];
-      const response = await control.items.batch(operations, CONTROL_PARTITION);
-      const failed = response.result?.find((item) => item.statusCode >= 400);
-      if (failed) throw new Error(`Unable to create initial Test access for ${userId} (Cosmos status ${failed.statusCode}).`);
-    }
-  }
+  if (initialTestAccessObjectIds.length) await control.seedTestAccess(initialTestAccessObjectIds, options.orgAdminObjectId);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

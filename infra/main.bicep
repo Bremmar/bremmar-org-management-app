@@ -23,17 +23,16 @@ param initialOrgAdminObjectId string
 @secure()
 param environmentCookieSecret string
 
-@description('Cosmos database for shared environment metadata and Test grants.')
-param controlDatabaseName string = 'eos-control'
-
 @description('Cosmos database for production workspace data.')
 param liveDatabaseName string = 'eos-live'
 
 @description('Cosmos database for dedicated sanitized Test fixtures and Test workspace data.')
 param testDatabaseName string = 'eos-test'
 
-var controlContainerName = 'environment-access'
 var workspaceContainerName = 'workspace'
+var controlTableName = 'EnvironmentAccess'
+var functionStorageKey = listKeys(functionStorage.id, '2023-05-01').keys[0].value
+var functionStorageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${functionStorage.name};AccountKey=${functionStorageKey};EndpointSuffix=${environment().suffixes.storage}'
 
 resource functionStorage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: functionStorageName
@@ -46,6 +45,19 @@ resource functionStorage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     minimumTlsVersion: 'TLS1_2'
     allowBlobPublicAccess: false
     supportsHttpsTrafficOnly: true
+  }
+}
+
+resource functionStorageTableService 'Microsoft.Storage/storageAccounts/tableServices@2023-05-01' = {
+  parent: functionStorage
+  name: 'default'
+}
+
+resource controlTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-05-01' = {
+  parent: functionStorageTableService
+  name: controlTableName
+  properties: {
+    signedIdentifiers: []
   }
 }
 
@@ -72,40 +84,6 @@ resource cosmos 'Microsoft.DocumentDB/databaseAccounts@2024-05-15' = {
     ]
     consistencyPolicy: {
       defaultConsistencyLevel: 'Session'
-    }
-  }
-}
-
-resource cosmosControlDatabase 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases@2024-05-15' = {
-  parent: cosmos
-  name: controlDatabaseName
-  properties: {
-    resource: {
-      id: controlDatabaseName
-    }
-  }
-}
-
-resource cosmosControlContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-05-15' = {
-  parent: cosmosControlDatabase
-  name: controlContainerName
-  properties: {
-    resource: {
-      id: controlContainerName
-      partitionKey: {
-        paths: [
-          '/pk'
-        ]
-        kind: 'Hash'
-      }
-      indexingPolicy: {
-        indexingMode: 'consistent'
-        includedPaths: [
-          {
-            path: '/*'
-          }
-        ]
-      }
     }
   }
 }
@@ -211,12 +189,20 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
           value: 'node'
         }
         {
-          name: 'COSMOS_CONNECTION_STRING'
-          value: listConnectionStrings(cosmos.id, '2024-05-15').connectionStrings[0].connectionString
+          name: 'AzureWebJobsStorage'
+          value: functionStorageConnectionString
         }
         {
-          name: 'COSMOS_CONTROL_DATABASE'
-          value: controlDatabaseName
+          name: 'AZURE_STORAGE_CONNECTION_STRING'
+          value: functionStorageConnectionString
+        }
+        {
+          name: 'AZURE_STORAGE_TABLE_NAME'
+          value: controlTableName
+        }
+        {
+          name: 'COSMOS_CONNECTION_STRING'
+          value: listConnectionStrings(cosmos.id, '2024-05-15').connectionStrings[0].connectionString
         }
         {
           name: 'COSMOS_LIVE_DATABASE'
@@ -225,10 +211,6 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           name: 'COSMOS_TEST_DATABASE'
           value: testDatabaseName
-        }
-        {
-          name: 'COSMOS_CONTROL_CONTAINER'
-          value: controlContainerName
         }
         {
           name: 'COSMOS_LIVE_CONTAINER'
@@ -245,7 +227,7 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
       ]
     }
   }
-  dependsOn: [cosmosControlContainer, cosmosLiveContainer, cosmosTestContainer]
+  dependsOn: [controlTable, cosmosLiveContainer, cosmosTestContainer]
 }
 
 resource staticWebApp 'Microsoft.Web/staticSites@2023-12-01' = {
@@ -263,10 +245,9 @@ resource staticWebApp 'Microsoft.Web/staticSites@2023-12-01' = {
 
 output staticWebAppHostname string = staticWebApp.properties.defaultHostname
 output functionAppHostname string = functionApp.properties.defaultHostName
-output cosmosControlDatabase string = controlDatabaseName
 output cosmosLiveDatabase string = liveDatabaseName
 output cosmosTestDatabase string = testDatabaseName
 output cosmosWorkspaceContainer string = workspaceContainerName
-output cosmosControlContainer string = controlContainerName
+output azureStorageTableName string = controlTableName
 output initialOrgAdminObjectId string = initialOrgAdminObjectId
 output tenantId string = tenantId

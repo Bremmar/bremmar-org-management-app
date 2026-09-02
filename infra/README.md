@@ -5,10 +5,11 @@
 - Azure Static Web Apps for the React frontend.
 - A separate Linux Azure Functions app for the core API when using the Bring
   Your Own Functions deployment mode.
-- A serverless, single-region Cosmos DB for NoSQL account with three isolated
-  databases: `eos-control`, `eos-live`, and `eos-test`.
-- An `environment-access` control-plane container plus one `workspace` container
-  in each workspace database, all partitioned by `/pk`.
+- A serverless, single-region Cosmos DB for NoSQL account with two isolated
+  databases: `eos-live` and `eos-test`.
+- One `workspace` container in each Cosmos database, partitioned by `/pk`.
+- An `EnvironmentAccess` Azure Storage Table for environment definitions, Test
+  access grants, and immutable access audit events.
 
 The default GitHub Actions workflow deploys `apps/api` as the Static Web Apps
 managed Functions API using `api_location`. The separate Function App in this
@@ -22,18 +23,23 @@ existing AI Function App is intentionally not provisioned or connected here.
 
 At minimum provide unique names for `staticWebAppName`, `functionAppName`, `functionStorageName`, and `cosmosAccountName`, plus the organization's `tenantId`, initial administrator object ID, and `environmentCookieSecret`. The cookie secret must be supplied as a secure deployment parameter and is written only to the Function App setting.
 
-The API reads `COSMOS_CONTROL_DATABASE`, `COSMOS_LIVE_DATABASE`, and
-`COSMOS_TEST_DATABASE`; the default container names are `environment-access`
-for control and `workspace` for both workspaces. The API uses the
-`COSMOS_CONNECTION_STRING` app setting. The Bicep template populates that
-setting from the Cosmos account connection string, so the account keeps local
-key authentication enabled and the connection string is not emitted as an
-output.
+The API reads `COSMOS_LIVE_DATABASE` and `COSMOS_TEST_DATABASE`; the default
+container name is `workspace` for both databases. The control plane reads
+`AZURE_STORAGE_CONNECTION_STRING` and `AZURE_STORAGE_TABLE_NAME`, which
+defaults to `EnvironmentAccess`. The Bicep template creates the table and
+populates the storage connection string for the dedicated Function App. It
+also populates `COSMOS_CONNECTION_STRING` from the Cosmos account connection
+string; neither secret is emitted as an output.
 
 After deployment, run the API environment bootstrap with the initial Entra
-object IDs. Bootstrap is additive and idempotent: it creates control metadata,
-initializes Live with configuration only, seeds Test from the dedicated
-sanitized fixture, and grants Test access only to the approved administrator
-IDs. It never copies Live records into Test.
+object IDs. Bootstrap is additive and idempotent: it creates control metadata
+in Azure Table Storage, initializes Live with configuration only, seeds Test
+from the dedicated sanitized fixture, and grants Test access only to the
+approved administrator IDs. It never copies Live records into Test.
+
+For an existing deployment, the old `eos-control` Cosmos database is no longer
+read by the API. Re-run bootstrap with the approved Test object IDs, verify the
+application, and then remove the unused database manually if it still exists;
+an incremental Bicep deployment does not delete that old resource.
 
 Do not commit parameter files containing tenant IDs, subscription-specific values, credentials, or secrets. Use a secure deployment pipeline or local parameter file outside source control.

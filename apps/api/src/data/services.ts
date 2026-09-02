@@ -1,5 +1,5 @@
 import { canAdministerPlatform } from '../domain.js';
-import { CosmosControlPlaneRepository, EnvironmentRepositoryFactory, MemoryControlPlaneRepository, type ControlPlaneRepository } from './environment.js';
+import { AzureTableControlPlaneRepository, EnvironmentRepositoryFactory, MemoryControlPlaneRepository, type ControlPlaneRepository } from './environment.js';
 import { CosmosWorkspaceRepository, MemoryWorkspaceRepository, RepositoryError, repository, type WorkspaceRepository } from './repository.js';
 
 function unavailableWorkspace(environmentId: 'live' | 'test', message: string): WorkspaceRepository {
@@ -25,9 +25,9 @@ const liveRepository = liveCosmosRepository ?? (localPoc ? repository : unavaila
 const testCosmosRepository = CosmosWorkspaceRepository.fromEnvironment('test');
 const testRepository = testCosmosRepository ?? (localPoc ? new MemoryWorkspaceRepository('test') : unavailableWorkspace('test', 'Test Cosmos database configuration is required when LOCAL_POC_MODE is disabled.'));
 const isOrgAdmin = async (userId: string) => canAdministerPlatform((await liveRepository.getUser(userId))?.platformCapabilities ?? []) || (await liveRepository.getLeadershipMembership(userId))?.role === 'OrgAdmin';
-const cosmosControlRepository = CosmosControlPlaneRepository.fromEnvironment(isOrgAdmin);
-const controlRepository = cosmosControlRepository
-  ?? (localPoc ? new MemoryControlPlaneRepository({ isOrgAdmin }) : unavailableControl('Control Cosmos database configuration is required when LOCAL_POC_MODE is disabled.'));
+const tableControlRepository = AzureTableControlPlaneRepository.fromEnvironment(isOrgAdmin);
+const controlRepository = tableControlRepository
+  ?? (localPoc ? new MemoryControlPlaneRepository({ isOrgAdmin }) : unavailableControl('Azure Table Storage control-plane configuration is required when LOCAL_POC_MODE is disabled.'));
 
 export const environmentRepositories = new EnvironmentRepositoryFactory({
   live: liveRepository,

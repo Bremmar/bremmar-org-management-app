@@ -1,4 +1,4 @@
-import { CosmosClient, type Container } from '@azure/cosmos';
+import { TableClient, odata, type TableEntity, type TableEntityResult, type TransactionAction } from '@azure/data-tables';
 import {
   canAdministerPlatform,
   type EnvironmentId,
@@ -8,6 +8,7 @@ import {
 import { MemoryWorkspaceRepository, RepositoryError, type WorkspaceRepository } from './repository.js';
 
 const CONTROL_PARTITION = 'org';
+export const DEFAULT_CONTROL_TABLE_NAME = 'EnvironmentAccess';
 const ORG_ID = process.env.BREMMAR_ORG_ID ?? 'bremmar';
 const nowIso = () => new Date().toISOString();
 
@@ -27,7 +28,6 @@ export interface EnvironmentAccessGrant {
   updatedAt: string;
   updatedBy: string;
   version: number;
-  cosmosEtag?: string;
 }
 
 export interface EnvironmentDefinition {
@@ -184,32 +184,99 @@ export class MemoryControlPlaneRepository implements ControlPlaneRepository {
 }
 
 type ControlDocument = EnvironmentDefinition | EnvironmentAccessGrant | EnvironmentAccessAudit;
+type StoredControlDocument<T extends ControlDocument> = T & { tableEtag: string };
+type ControlTableClient = Pick<TableClient, 'createEntity' | 'getEntity' | 'listEntities' | 'submitTransaction'>;
 
-export class CosmosControlPlaneRepository implements ControlPlaneRepository {
-  constructor(private readonly container: Container, private readonly isOrgAdmin: (userId: string) => Promise<boolean>) {}
+function tableEntityFor(document: ControlDocument, rowKey = document.id): TableEntity<Record<string, unknown>> {
+  const properties = Object.fromEntries(Object.entries(document).filter(([, value]) => value !== undefined));
+  return { partitionKey: CONTROL_PARTITION, rowKey, ...properties };
+}
+
+function documentForTableEntity<T extends ControlDocument>(entity: TableEntityResult<T>) {
+  const document = { ...entity } as Record<string, unknown>;
+  delete document.partitionKey;
+  delete document.rowKey;
+  delete document.timestamp;
+  delete document.etag;
+  return { document: document as T, tableEtag: entity.etag };
+}
+
+function statusCodeFor(error: unknown) {
+  const statusCode = (error as { statusCode?: unknown }).statusCode;
+  return typeof statusCode === 'number' ? statusCode : undefined;
+}
+
+function isNotFound(error: unknown) {
+  return statusCodeFor(error) === 404;
+}
+
+function tableUnavailable(message: string, error: unknown): never {
+  if (error instanceof RepositoryError) throw error;
+  throw new RepositoryError('UNAVAILABLE', message);
+}
+
+function tableRowKey(value: string) {
+  return Buffer.from(value, 'utf8').toString('base64url');
+}
+
+function grantRowKey(userId: string) {
+  return `grant-${tableRowKey(userId)}`;
+}
+
+function auditRowKey() {
+  return `audit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export class AzureTableControlPlaneRepository implements ControlPlaneRepository {
+  constructor(private readonly table: ControlTableClient, private readonly isOrgAdmin: (userId: string) => Promise<boolean>) {}
 
   static fromEnvironment(isOrgAdmin: (userId: string) => Promise<boolean>) {
-    const connectionString = process.env.COSMOS_CONNECTION_STRING;
-    const database = process.env.COSMOS_CONTROL_DATABASE;
-    const containerName = process.env.COSMOS_CONTROL_CONTAINER ?? 'environment-access';
+    const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
+    const tableName = process.env.AZURE_STORAGE_TABLE_NAME ?? DEFAULT_CONTROL_TABLE_NAME;
     if (process.env.LOCAL_POC_MODE === 'true' && process.env.COSMOS_ENABLED !== 'true') return null;
-    if (!connectionString || !database || !containerName) return null;
-    const client = new CosmosClient(connectionString);
-    return new CosmosControlPlaneRepository(client.database(database).container(containerName), isOrgAdmin);
+    if (!connectionString || !tableName) return null;
+    return new AzureTableControlPlaneRepository(TableClient.fromConnectionString(connectionString, tableName), isOrgAdmin);
   }
 
   private async requireOrgAdmin(actorId: string) {
     if (!(await this.isOrgAdmin(actorId))) throw new RepositoryError('FORBIDDEN', 'OrgAdmin authorization is required to manage Test access.');
   }
 
-  private async query<T extends ControlDocument>(query: string, parameters: Array<{ name: string; value: string | boolean }>) {
-    const result = await this.container.items.query<T>({ query, parameters }, { partitionKey: CONTROL_PARTITION }).fetchAll();
-    return result.resources.map((resource) => ({ ...resource, cosmosEtag: (resource as T & { _etag?: string })._etag }) as T & { cosmosEtag?: string });
+  private async query<T extends ControlDocument>(filter: string) {
+    try {
+      const records: Array<StoredControlDocument<T>> = [];
+      for await (const entity of this.table.listEntities<T>({ queryOptions: { filter } })) {
+        const { document, tableEtag } = documentForTableEntity(entity);
+        records.push({ ...document, tableEtag });
+      }
+      return records;
+    } catch (error) {
+      return tableUnavailable('Azure Table Storage could not read control-plane data.', error);
+    }
   }
 
   private async grantFor(userId: string) {
-    const records = await this.query<EnvironmentAccessGrant>('SELECT TOP 1 * FROM c WHERE c.pk = @pk AND c.kind = "environmentAccessGrant" AND c.userId = @userId', [{ name: '@pk', value: CONTROL_PARTITION }, { name: '@userId', value: userId }]);
-    return records[0] ?? null;
+    try {
+      const entity = await this.table.getEntity<EnvironmentAccessGrant>(CONTROL_PARTITION, grantRowKey(userId));
+      const { document, tableEtag } = documentForTableEntity(entity);
+      return { ...document, tableEtag } as StoredControlDocument<EnvironmentAccessGrant>;
+    } catch (error) {
+      if (isNotFound(error)) return null;
+      return tableUnavailable('Azure Table Storage could not read control-plane data.', error);
+    }
+  }
+
+  async ensureEnvironmentMetadata() {
+    const existing = await this.query<EnvironmentDefinition>(odata`PartitionKey eq ${CONTROL_PARTITION} and kind eq ${'environmentDefinition'}`);
+    const existingIds = new Set(existing.map((definition) => definition.id));
+    for (const definition of defaultEnvironmentDefinitions()) {
+      if (existingIds.has(definition.id)) continue;
+      try {
+        await this.table.createEntity(tableEntityFor(definition));
+      } catch (error) {
+        if (statusCodeFor(error) !== 409) return tableUnavailable('Azure Table Storage could not initialize environment metadata.', error);
+      }
+    }
   }
 
   async getEnvironmentSession(userId: string) {
@@ -218,7 +285,7 @@ export class CosmosControlPlaneRepository implements ControlPlaneRepository {
   }
 
   async getEnvironmentMetadata() {
-    const definitions = await this.query<EnvironmentDefinition>('SELECT * FROM c WHERE c.pk = @pk AND c.kind = "environmentDefinition"', [{ name: '@pk', value: CONTROL_PARTITION }]);
+    const definitions = await this.query<EnvironmentDefinition>(odata`PartitionKey eq ${CONTROL_PARTITION} and kind eq ${'environmentDefinition'}`);
     const visibleDefinitions = definitions.length ? definitions : defaultEnvironmentDefinitions();
     return visibleDefinitions.map(({ id, kind, pk, orgId, environmentId, label, active, createdAt, updatedAt }) => ({ id, kind, pk, orgId, environmentId, label, active, createdAt, updatedAt }));
   }
@@ -230,49 +297,53 @@ export class CosmosControlPlaneRepository implements ControlPlaneRepository {
 
   async listTestAccess(actorId: string) {
     await this.requireOrgAdmin(actorId);
-    const grants = await this.query<EnvironmentAccessGrant>('SELECT * FROM c WHERE c.pk = @pk AND c.kind = "environmentAccessGrant"', [{ name: '@pk', value: CONTROL_PARTITION }]);
+    const grants = await this.query<EnvironmentAccessGrant>(odata`PartitionKey eq ${CONTROL_PARTITION} and kind eq ${'environmentAccessGrant'}`);
     return grants.sort((left, right) => left.userId.localeCompare(right.userId)).map(({ userId, allowed, grantedAt, grantedBy, revokedAt, revokedBy, version }) => ({ userId, allowed, grantedAt, grantedBy, revokedAt, revokedBy, version }));
   }
 
   async setTestAccess(targetUserId: string, allowed: boolean, actorId: string) {
     await this.requireOrgAdmin(actorId);
     if (!targetUserId.trim()) throw new RepositoryError('VALIDATION', 'A stable user object ID is required.');
-    const previous = await this.grantFor(targetUserId);
+    const normalizedUserId = targetUserId.trim();
+    const previous = await this.grantFor(normalizedUserId);
     const timestamp = nowIso();
     const grant: EnvironmentAccessGrant = {
-      id: grantId(targetUserId), kind: 'environmentAccessGrant', pk: CONTROL_PARTITION, orgId: ORG_ID, userId: targetUserId, environmentId: 'test', allowed,
+      id: grantId(normalizedUserId), kind: 'environmentAccessGrant', pk: CONTROL_PARTITION, orgId: ORG_ID, userId: normalizedUserId, environmentId: 'test', allowed,
       grantedAt: allowed ? (previous?.grantedAt ?? timestamp) : previous?.grantedAt, grantedBy: allowed ? (previous?.grantedBy ?? actorId) : previous?.grantedBy,
       revokedAt: allowed ? previous?.revokedAt : timestamp, revokedBy: allowed ? previous?.revokedBy : actorId,
       createdAt: previous?.createdAt ?? timestamp, updatedAt: timestamp, updatedBy: actorId, version: (previous?.version ?? 0) + 1,
     };
-    const audit: EnvironmentAccessAudit = { id: `environment-audit-${targetUserId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, kind: 'environmentAccessAudit', pk: CONTROL_PARTITION, orgId: ORG_ID, environmentId: 'control', actorId, targetUserId, action: allowed ? 'granted' : 'revoked', createdAt: timestamp };
+    const audit: EnvironmentAccessAudit = { id: `environment-audit-${normalizedUserId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, kind: 'environmentAccessAudit', pk: CONTROL_PARTITION, orgId: ORG_ID, environmentId: 'control', actorId, targetUserId: normalizedUserId, action: allowed ? 'granted' : 'revoked', createdAt: timestamp };
+    const actions: TransactionAction[] = previous
+      ? [['update', tableEntityFor(grant, grantRowKey(normalizedUserId)), 'Replace', { etag: previous.tableEtag }], ['create', tableEntityFor(audit, auditRowKey())]]
+      : [['create', tableEntityFor(grant, grantRowKey(normalizedUserId))], ['create', tableEntityFor(audit, auditRowKey())]];
     try {
-      const operations = previous
-        ? [{ operationType: 'Replace' as const, id: grant.id, ifMatch: previous.cosmosEtag, resourceBody: grant as unknown as Record<string, unknown> }, { operationType: 'Create' as const, resourceBody: audit as unknown as Record<string, unknown> }]
-        : [{ operationType: 'Create' as const, resourceBody: grant as unknown as Record<string, unknown> }, { operationType: 'Create' as const, resourceBody: audit as unknown as Record<string, unknown> }];
-      const response = await this.container.items.batch(operations as unknown as import('@azure/cosmos').OperationInput[], CONTROL_PARTITION);
-      const failed = response.result?.find((item) => item.statusCode >= 400);
-      if (failed) {
-        if (failed.statusCode === 412) throw new RepositoryError('CONFLICT', 'The Test access record changed elsewhere. Refresh and try again.');
-        throw new RepositoryError('UNAVAILABLE', 'Cosmos could not persist the Test access audit update.');
-      }
+      const response = await this.table.submitTransaction(actions);
+      const failedStatus = response.subResponses.find((item) => item.status >= 400)?.status ?? (response.status >= 400 ? response.status : undefined);
+      if (failedStatus === 409 || failedStatus === 412) throw new RepositoryError('CONFLICT', 'The Test access record changed elsewhere. Refresh and try again.');
+      if (failedStatus) throw new RepositoryError('UNAVAILABLE', 'Azure Table Storage could not persist the Test access audit update.');
     } catch (error) {
+      const statusCode = statusCodeFor(error);
       if (error instanceof RepositoryError) throw error;
-      if ((error as { code?: number }).code === 412) throw new RepositoryError('CONFLICT', 'The Test access record changed elsewhere. Refresh and try again.');
-      throw error;
+      if (statusCode === 409 || statusCode === 412) throw new RepositoryError('CONFLICT', 'The Test access record changed elsewhere. Refresh and try again.');
+      return tableUnavailable('Azure Table Storage could not persist the Test access audit update.', error);
     }
     return { userId: grant.userId, allowed: grant.allowed, grantedAt: grant.grantedAt, grantedBy: grant.grantedBy, revokedAt: grant.revokedAt, revokedBy: grant.revokedBy, version: grant.version };
   }
 
   async seedTestAccess(userIds: readonly string[], actorId = 'bootstrap') {
+    await this.requireOrgAdmin(actorId);
     for (const userId of userIds) {
-      if (userId.trim()) await this.setTestAccess(userId, true, actorId);
+      const normalizedUserId = userId.trim();
+      if (normalizedUserId && !(await this.grantFor(normalizedUserId))) await this.setTestAccess(normalizedUserId, true, actorId);
     }
   }
 
   async getAudit() {
-    const records = await this.query<EnvironmentAccessAudit>('SELECT * FROM c WHERE c.pk = @pk AND c.kind = "environmentAccessAudit"', [{ name: '@pk', value: CONTROL_PARTITION }]);
-    return records.map(({ id, kind, pk, orgId, environmentId, actorId, targetUserId, action, createdAt }) => ({ id, kind, pk, orgId, environmentId, actorId, targetUserId, action, createdAt }));
+    const records = await this.query<EnvironmentAccessAudit>(odata`PartitionKey eq ${CONTROL_PARTITION} and kind eq ${'environmentAccessAudit'}`);
+    return records
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .map(({ id, kind, pk, orgId, environmentId, actorId, targetUserId, action, createdAt }) => ({ id, kind, pk, orgId, environmentId, actorId, targetUserId, action, createdAt }));
   }
 }
 
