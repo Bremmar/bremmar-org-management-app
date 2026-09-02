@@ -1,5 +1,4 @@
 import { CosmosClient, type Container } from '@azure/cosmos';
-import { DefaultAzureCredential } from '@azure/identity';
 import {
   DEFAULT_MEETING_SECTIONS,
   partitionFor,
@@ -120,14 +119,14 @@ function requiredSetting(name: string) {
 }
 
 export async function bootstrapEnvironments(options: { orgAdminObjectId: string; adminName: string; adminEmail: string; initialTestAccessObjectIds: readonly string[] }) {
-  const endpoint = requiredSetting('COSMOS_ENDPOINT');
+  const connectionString = requiredSetting('COSMOS_CONNECTION_STRING');
   const controlDatabase = requiredSetting('COSMOS_CONTROL_DATABASE');
   const liveDatabase = requiredSetting('COSMOS_LIVE_DATABASE');
   const testDatabase = requiredSetting('COSMOS_TEST_DATABASE');
   const controlContainerName = process.env.COSMOS_CONTROL_CONTAINER ?? 'environment-access';
   const liveContainerName = process.env.COSMOS_LIVE_CONTAINER ?? 'workspace';
   const testContainerName = process.env.COSMOS_TEST_CONTAINER ?? 'workspace';
-  const client = new CosmosClient({ endpoint, aadCredentials: new DefaultAzureCredential() });
+  const client = new CosmosClient(connectionString);
   const control = client.database(controlDatabase).container(controlContainerName);
   const live = client.database(liveDatabase).container(liveContainerName);
   const test = client.database(testDatabase).container(testContainerName);

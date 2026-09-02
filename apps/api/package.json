@@ -13,8 +13,7 @@
   },
   "dependencies": {
     "@azure/cosmos": "^4.9.0",
-    "@azure/functions": "^4.8.0",
-    "@azure/identity": "^4.13.0"
+    "@azure/functions": "^4.8.0"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",

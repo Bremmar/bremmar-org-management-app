@@ -164,9 +164,9 @@ capabilities remain the authorization source of truth.
 1. Validate the local hierarchy, role matrix, transfer and messaging workflows,
    aging/escalation behavior, task/To-Do synchronization, meeting recap/IDS
    notes, and readable responsive layouts.
-2. Provision the three databases and control/workspace containers with managed
-   identity, then run `bootstrap:environments` with the initial OrgAdmin and
-   approved Test administrator object IDs.
+2. Provision the three databases and control/workspace containers with the API's
+   Cosmos connection string, then run `bootstrap:environments` with the initial
+   OrgAdmin and approved Test administrator object IDs.
 3. Verify the smoke path: authenticate, confirm Live is selected, grant Test
    access from Live Admin, switch to Test, edit a record, switch back to Live,
    and confirm the Live workspace is unchanged.

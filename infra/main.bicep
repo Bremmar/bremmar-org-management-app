@@ -34,7 +34,6 @@ param testDatabaseName string = 'eos-test'
 
 var controlContainerName = 'environment-access'
 var workspaceContainerName = 'workspace'
-var cosmosContributorRoleId = '${cosmos.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002'
 
 resource functionStorage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: functionStorageName
@@ -57,7 +56,7 @@ resource cosmos 'Microsoft.DocumentDB/databaseAccounts@2024-05-15' = {
   properties: {
     databaseAccountOfferType: 'Standard'
     enableAutomaticFailover: false
-    disableLocalAuth: true
+    disableLocalAuth: false
     minimalTlsVersion: 'Tls12'
     capabilities: [
       {
@@ -196,9 +195,6 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   name: functionAppName
   location: location
   kind: 'functionapp,linux'
-  identity: {
-    type: 'SystemAssigned'
-  }
   properties: {
     serverFarmId: functionPlan.id
     httpsOnly: true
@@ -215,8 +211,8 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
           value: 'node'
         }
         {
-          name: 'COSMOS_ENDPOINT'
-          value: cosmos.properties.documentEndpoint
+          name: 'COSMOS_CONNECTION_STRING'
+          value: listConnectionStrings(cosmos.id, '2024-05-15').connectionStrings[0].connectionString
         }
         {
           name: 'COSMOS_CONTROL_DATABASE'
@@ -252,19 +248,6 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   dependsOn: [cosmosControlContainer, cosmosLiveContainer, cosmosTestContainer]
 }
 
-resource cosmosRoleAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = {
-  parent: cosmos
-  name: guid(cosmos.id, functionApp.identity.principalId, 'workspace-contributor')
-  properties: {
-    roleDefinitionId: cosmosContributorRoleId
-    principalId: functionApp.identity.principalId
-    scope: cosmos.id
-  }
-  dependsOn: [
-    functionApp
-  ]
-}
-
 resource staticWebApp 'Microsoft.Web/staticSites@2023-12-01' = {
   name: staticWebAppName
   location: location
@@ -280,7 +263,6 @@ resource staticWebApp 'Microsoft.Web/staticSites@2023-12-01' = {
 
 output staticWebAppHostname string = staticWebApp.properties.defaultHostname
 output functionAppHostname string = functionApp.properties.defaultHostName
-output cosmosEndpoint string = cosmos.properties.documentEndpoint
 output cosmosControlDatabase string = controlDatabaseName
 output cosmosLiveDatabase string = liveDatabaseName
 output cosmosTestDatabase string = testDatabaseName

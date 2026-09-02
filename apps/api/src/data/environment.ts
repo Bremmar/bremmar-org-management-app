@@ -1,5 +1,4 @@
 import { CosmosClient, type Container } from '@azure/cosmos';
-import { DefaultAzureCredential } from '@azure/identity';
 import {
   canAdministerPlatform,
   type EnvironmentId,
@@ -190,12 +189,12 @@ export class CosmosControlPlaneRepository implements ControlPlaneRepository {
   constructor(private readonly container: Container, private readonly isOrgAdmin: (userId: string) => Promise<boolean>) {}
 
   static fromEnvironment(isOrgAdmin: (userId: string) => Promise<boolean>) {
-    const endpoint = process.env.COSMOS_ENDPOINT;
+    const connectionString = process.env.COSMOS_CONNECTION_STRING;
     const database = process.env.COSMOS_CONTROL_DATABASE;
     const containerName = process.env.COSMOS_CONTROL_CONTAINER ?? 'environment-access';
     if (process.env.LOCAL_POC_MODE === 'true' && process.env.COSMOS_ENABLED !== 'true') return null;
-    if (!endpoint || !database || !containerName) return null;
-    const client = new CosmosClient({ endpoint, aadCredentials: new DefaultAzureCredential() });
+    if (!connectionString || !database || !containerName) return null;
+    const client = new CosmosClient(connectionString);
     return new CosmosControlPlaneRepository(client.database(database).container(containerName), isOrgAdmin);
   }
 

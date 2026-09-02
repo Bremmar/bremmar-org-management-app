@@ -78,15 +78,18 @@ Functions API under `/api`. The API's `main` field points Azure Functions at
 `dist/index.js` after the TypeScript build.
 
 `infra/main.bicep` also contains a separate Bring Your Own Functions deployment
-for environments that require a dedicated Function App and managed identity
-for Cosmos DB. Choose one API hosting mode per environment; do not deploy both
-to the same `/api` route. Disable local POC mode and configure the approved
-single-tenant identity adapter before allowing shared or production traffic.
+for environments that require a dedicated Function App. That deployment
+configures the API with a Cosmos DB connection string. Choose one API hosting
+mode per environment; do not deploy both to the same `/api` route. Disable
+local POC mode and configure the approved single-tenant identity adapter before
+allowing shared or production traffic.
 
 The Bicep foundation provisions `eos-control`, `eos-live`, and `eos-test` in one
 Cosmos account. The control database stores environment metadata and Test access
 grants; all workspace records are stored only in their selected database. Supply
-the secure `environmentCookieSecret` parameter and run
+the secure `environmentCookieSecret` parameter, configure
+`COSMOS_CONNECTION_STRING` for a Static Web Apps managed API when applicable,
+and run
 `npm run bootstrap:environments --workspace @eos/api` after deployment with the
 initial Entra object IDs. Bootstrap initializes Live with configuration only,
 seeds Test from the dedicated sanitized fixture, and is additive/idempotent.

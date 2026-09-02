@@ -2,7 +2,7 @@
   "IsEncrypted": false,
   "Values": {
     "FUNCTIONS_WORKER_RUNTIME": "node",
-    "COSMOS_ENDPOINT": "https://your-account.documents.azure.com:443/",
+    "COSMOS_CONNECTION_STRING": "AccountEndpoint=https://your-account.documents.azure.com:443/;AccountKey=replace-with-a-cosmos-key;",
     "COSMOS_CONTROL_DATABASE": "eos-control",
     "COSMOS_LIVE_DATABASE": "eos-live",
     "COSMOS_TEST_DATABASE": "eos-test",

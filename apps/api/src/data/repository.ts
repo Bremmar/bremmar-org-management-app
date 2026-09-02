@@ -1,5 +1,4 @@
 import { CosmosClient, type Container } from '@azure/cosmos';
-import { DefaultAzureCredential } from '@azure/identity';
 import type { ClientPrincipal } from '../auth.js';
 import {
   canAcceptTransfer,
@@ -1354,12 +1353,12 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
   }
 
   static fromEnvironment(environmentId: EnvironmentId = 'live') {
-    const endpoint = process.env.COSMOS_ENDPOINT;
+    const connectionString = process.env.COSMOS_CONNECTION_STRING;
     const database = environmentId === 'live' ? (process.env.COSMOS_LIVE_DATABASE ?? process.env.COSMOS_DATABASE) : process.env.COSMOS_TEST_DATABASE;
     const containerName = environmentId === 'live' ? (process.env.COSMOS_LIVE_CONTAINER ?? process.env.COSMOS_CONTAINER) : process.env.COSMOS_TEST_CONTAINER;
     if (process.env.LOCAL_POC_MODE === 'true' && process.env.COSMOS_ENABLED !== 'true') return null;
-    if (!endpoint || !database || !containerName) return null;
-    const client = new CosmosClient({ endpoint, aadCredentials: new DefaultAzureCredential() });
+    if (!connectionString || !database || !containerName) return null;
+    const client = new CosmosClient(connectionString);
     return new CosmosWorkspaceRepository(client.database(database).container(containerName), environmentId);
   }
 
