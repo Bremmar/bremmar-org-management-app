@@ -10,3 +10,4 @@ import './functions/admin.js';
 import './functions/profile.js';
 import './functions/messages.js';
 import './functions/meetings.js';
+import './functions/scorecard.js';

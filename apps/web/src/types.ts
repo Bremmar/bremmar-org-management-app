@@ -9,6 +9,7 @@ export type IssueAssignmentState = 'assigned' | 'pending-transfer' | 'unassigned
 export type IssueAgeBand = 'fresh' | 'aging' | 'stale' | 'critical';
 export type MeetingStatus = 'upcoming' | 'in-progress' | 'closed';
 export type MetricStatus = 'on-track' | 'off-track';
+export type ScorecardTrend = 'up' | 'down' | 'flat';
 export type TeamNodeType = 'operational' | 'grouping';
 export type TeamRole = 'OrgAdmin' | 'TeamLead' | 'Member' | 'Viewer';
 export type PlatformCapability = 'PlatformAdmin';
@@ -245,12 +246,25 @@ export interface ScorecardMetric {
   teamId: string;
   label: string;
   target: string;
-  actual: string;
   unit: string;
   ownerId: string;
+  createdAt: string;
+  updatedAt: string;
+  version: number;
+}
+
+export interface ScorecardResult {
+  id: string;
+  metricId: string;
+  teamId: string;
+  weekStartDate: string;
+  actual: string;
   status: MetricStatus;
-  trend: 'up' | 'down' | 'flat';
+  trend: ScorecardTrend;
   trendLabel: string;
+  createdAt: string;
+  updatedAt: string;
+  version: number;
 }
 
 export interface Headline {
@@ -269,6 +283,7 @@ export interface MeetingInstance {
   teamId: string;
   label: string;
   dateLabel: string;
+  weekStartDate?: string;
   status: MeetingStatus;
   facilitatorId: string;
   attendeeIds: string[];
@@ -318,9 +333,29 @@ export interface Workspace {
   transfers: IssueTransfer[];
   notifications: Notification[];
   metrics: ScorecardMetric[];
+  scorecardResults: ScorecardResult[];
   headlines: Headline[];
   meetings: MeetingInstance[];
   activity: AuditEvent[];
+}
+
+export function weekStartDateFor(value: string | Date = new Date()) {
+  const dateValue = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T12:00:00Z` : value;
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) throw new Error('Invalid date.');
+  const day = date.getUTCDay();
+  date.setUTCDate(date.getUTCDate() + (day === 0 ? -6 : 1 - day));
+  return date.toISOString().slice(0, 10);
+}
+
+export function scorecardTrendFor(actual: string, priorActual?: string): { trend: ScorecardTrend; trendLabel: string } {
+  const current = Number(actual.trim().replace(/%$/, ''));
+  const prior = priorActual === undefined ? Number.NaN : Number(priorActual.trim().replace(/%$/, ''));
+  if (!Number.isFinite(current) || !Number.isFinite(prior)) return { trend: 'flat', trendLabel: 'No comparable prior result' };
+  const delta = current - prior;
+  if (delta === 0) return { trend: 'flat', trendLabel: 'No change vs prior week' };
+  const formatted = Number.isInteger(delta) ? String(delta) : delta.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+  return { trend: delta > 0 ? 'up' : 'down', trendLabel: `${delta > 0 ? '+' : ''}${formatted} vs prior week` };
 }
 
 export interface TeamRollup {

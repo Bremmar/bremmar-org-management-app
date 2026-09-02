@@ -1,4 +1,4 @@
-import { defaultMeetingSections } from './types';
+import { defaultMeetingSections, scorecardTrendFor, weekStartDateFor } from './types';
 import type {
   AuditEvent,
   Headline,
@@ -10,6 +10,7 @@ import type {
   Rock,
   RockTask,
   ScorecardMetric,
+  ScorecardResult,
   Team,
   TeamMessage,
   TeamMembership,
@@ -22,6 +23,8 @@ const DAY = 24 * 60 * 60 * 1000;
 const now = Date.now();
 const daysAgo = (days: number) => new Date(now - days * DAY).toISOString();
 const today = new Date(now).toISOString().slice(0, 10);
+const currentWeekStartDate = weekStartDateFor(new Date(now));
+const previousWeekStartDate = weekStartDateFor(new Date(new Date(currentWeekStartDate).getTime() - 7 * DAY));
 
 export const defaultAgeBand = (ageInDays: number): IssueAgeBand => {
   if (ageInDays >= 30) return 'critical';
@@ -268,12 +271,40 @@ const messages: TeamMessage[] = [
 ];
 
 const metrics: ScorecardMetric[] = [
-  { id: 'metric-pipeline', teamId: 'leadership', label: 'Qualified pipeline created', target: '18', actual: '21', unit: 'opportunities', ownerId: 'jon-bell', status: 'on-track', trend: 'up', trendLabel: '+3 vs last week' },
-  { id: 'metric-onboarding', teamId: 'leadership', label: 'Average onboarding cycle', target: '10', actual: '12', unit: 'days', ownerId: 'marcus-lee', status: 'off-track', trend: 'down', trendLabel: '+1 day vs last week' },
-  { id: 'metric-health', teamId: 'managed-services', label: 'Customer health checks', target: '15', actual: '17', unit: 'checks', ownerId: 'daniel-cho', status: 'on-track', trend: 'up', trendLabel: '+4 vs last week' },
-  { id: 'metric-incidents', teamId: 'service-delivery', label: 'Critical incidents', target: '< 2', actual: '1', unit: 'incidents', ownerId: 'jon-bell', status: 'on-track', trend: 'flat', trendLabel: 'Holding steady' },
-  { id: 'metric-kickoffs', teamId: 'projects', label: 'Projects kicked off on time', target: '90%', actual: '94%', unit: 'on-time', ownerId: 'maria-ortiz', status: 'on-track', trend: 'up', trendLabel: '+6 pts vs last week' },
-  { id: 'metric-evidence', teamId: 'cybersecurity', label: 'Evidence requests assigned', target: '100%', actual: '72%', unit: 'assigned', ownerId: 'priya-shah', status: 'off-track', trend: 'down', trendLabel: '-8 pts vs last week' },
+  { id: 'metric-pipeline', teamId: 'leadership', label: 'Qualified pipeline created', target: '18', unit: 'opportunities', ownerId: 'jon-bell', createdAt: daysAgo(55), updatedAt: daysAgo(1), version: 1 },
+  { id: 'metric-onboarding', teamId: 'leadership', label: 'Average onboarding cycle', target: '10', unit: 'days', ownerId: 'marcus-lee', createdAt: daysAgo(55), updatedAt: daysAgo(1), version: 1 },
+  { id: 'metric-health', teamId: 'managed-services', label: 'Customer health checks', target: '15', unit: 'checks', ownerId: 'daniel-cho', createdAt: daysAgo(55), updatedAt: daysAgo(1), version: 1 },
+  { id: 'metric-incidents', teamId: 'service-delivery', label: 'Critical incidents', target: '< 2', unit: 'incidents', ownerId: 'jon-bell', createdAt: daysAgo(55), updatedAt: daysAgo(1), version: 1 },
+  { id: 'metric-kickoffs', teamId: 'projects', label: 'Projects kicked off on time', target: '90%', unit: 'on-time', ownerId: 'maria-ortiz', createdAt: daysAgo(55), updatedAt: daysAgo(1), version: 1 },
+  { id: 'metric-evidence', teamId: 'cybersecurity', label: 'Evidence requests assigned', target: '100%', unit: 'assigned', ownerId: 'priya-shah', createdAt: daysAgo(55), updatedAt: daysAgo(1), version: 1 },
+];
+
+const makeScorecardResult = (metricId: string, teamId: string, weekStartDate: string, actual: string, status: ScorecardResult['status'], priorActual?: string): ScorecardResult => ({
+  id: `result-${metricId}-${weekStartDate}`,
+  metricId,
+  teamId,
+  weekStartDate,
+  actual,
+  status,
+  ...scorecardTrendFor(actual, priorActual),
+  createdAt: daysAgo(2),
+  updatedAt: daysAgo(1),
+  version: 1,
+});
+
+const scorecardResults: ScorecardResult[] = [
+  makeScorecardResult('metric-pipeline', 'leadership', previousWeekStartDate, '18', 'on-track'),
+  makeScorecardResult('metric-pipeline', 'leadership', currentWeekStartDate, '21', 'on-track', '18'),
+  makeScorecardResult('metric-onboarding', 'leadership', previousWeekStartDate, '11', 'off-track'),
+  makeScorecardResult('metric-onboarding', 'leadership', currentWeekStartDate, '12', 'off-track', '11'),
+  makeScorecardResult('metric-health', 'managed-services', previousWeekStartDate, '13', 'off-track'),
+  makeScorecardResult('metric-health', 'managed-services', currentWeekStartDate, '17', 'on-track', '13'),
+  makeScorecardResult('metric-incidents', 'service-delivery', previousWeekStartDate, '1', 'on-track'),
+  makeScorecardResult('metric-incidents', 'service-delivery', currentWeekStartDate, '1', 'on-track', '1'),
+  makeScorecardResult('metric-kickoffs', 'projects', previousWeekStartDate, '88%', 'off-track'),
+  makeScorecardResult('metric-kickoffs', 'projects', currentWeekStartDate, '94%', 'on-track', '88%'),
+  makeScorecardResult('metric-evidence', 'cybersecurity', previousWeekStartDate, '80%', 'off-track'),
+  makeScorecardResult('metric-evidence', 'cybersecurity', currentWeekStartDate, '72%', 'off-track', '80%'),
 ];
 
 const headlines: Headline[] = [
@@ -282,7 +313,7 @@ const headlines: Headline[] = [
 ];
 
 const meetings: MeetingInstance[] = teams.map((team) => ({
-  id: `meeting-${team.id}-2026-08-31`, teamId: team.id, label: `${team.shortName} L10`, dateLabel: 'Monday · Aug 31', status: 'upcoming',
+  id: `meeting-${team.id}-${currentWeekStartDate}`, teamId: team.id, label: `${team.shortName} L10`, dateLabel: 'Monday · Aug 31', weekStartDate: currentWeekStartDate, status: 'upcoming',
   facilitatorId: memberships.find((membership) => membership.teamId === team.id && membership.role === 'TeamLead')?.userId ?? 'ava-khan',
   attendeeIds: memberships.filter((membership) => membership.teamId === team.id && membership.active).map((membership) => membership.userId),
   lastRating: 8.8, agendaProgress: 0, agendaTotal: team.meetingSections.filter((section) => section.enabled).length, idsSolved: 0, idsTotal: issues.filter((issue) => issue.teamId === team.id && issue.status !== 'solved').length, recap: '', sectionNotes: {}, idsIssueIds: [], createdTodoIds: [], idsNotes: [],
@@ -310,6 +341,7 @@ export const initialWorkspace: Workspace = {
   transfers,
   notifications,
   metrics,
+  scorecardResults,
   headlines,
   meetings,
   activity,

@@ -157,17 +157,92 @@ describe('LocalWorkspaceApi', () => {
     expect(afterTodo.todos.find((todo) => todo.id === 'todo-handoff')?.notes).toContain('customer-facing owner');
   });
 
-  it('flags a repeated To-Do and creates one linked Issue after the fourth move', async () => {
+  it('rolls an incomplete To-Do over when a due date moves later', async () => {
     const api = new LocalWorkspaceApi();
     let workspace = await api.getWorkspace();
+    const before = workspace.todos.find((item) => item.id === 'todo-handoff')!;
+    workspace = await api.updateTodo(before.id, { dueDate: '2026-09-10', status: 'done' }, before.version);
+    const rolled = workspace.todos.find((item) => item.id === before.id)!;
+
+    expect(rolled).toMatchObject({ dueDate: '2026-09-10', status: 'open', carryForwardCount: 1, flagged: false });
+  });
+
+  it('treats earlier and unchanged dates as ordinary edits and never rolls completed To-Dos', async () => {
+    const api = new LocalWorkspaceApi();
+    let workspace = await api.getWorkspace();
+    let todo = workspace.todos.find((item) => item.id === 'todo-handoff')!;
+    workspace = await api.updateTodo(todo.id, { dueDate: '2026-09-10' }, todo.version);
+    todo = workspace.todos.find((item) => item.id === todo.id)!;
+    workspace = await api.updateTodo(todo.id, { dueDate: '2026-09-05' }, todo.version);
+    todo = workspace.todos.find((item) => item.id === todo.id)!;
+    workspace = await api.updateTodo(todo.id, { dueDate: todo.dueDate }, todo.version);
+    todo = workspace.todos.find((item) => item.id === todo.id)!;
+
+    expect(todo.carryForwardCount).toBe(1);
+    expect(todo.status).toBe('open');
+
+    const completed = (await api.getWorkspace()).todos.find((item) => item.id === 'todo-alerts')!;
+    workspace = await api.updateTodo(completed.id, { dueDate: '2099-09-30' }, completed.version);
+    expect(workspace.todos.find((item) => item.id === completed.id)).toMatchObject({ status: 'done', carryForwardCount: 0, dueDate: '2099-09-30' });
+  });
+
+  it('synchronizes a linked Rock Task and creates one linked Issue after the fourth rollover', async () => {
+    const seed = structuredClone(initialWorkspace);
+    seed.currentUser = seed.users.find((user) => user.id === 'marcus-lee')!;
+    const api = new LocalWorkspaceApi(seed);
+    let workspace = await api.getWorkspace();
+    const linkedBefore = workspace.todos.find((item) => item.id === 'todo-project-kickoff')!;
+    const taskBefore = workspace.rocks.flatMap((rock) => rock.tasks).find((task) => task.id === 'task-project-template')!;
+    workspace = await api.updateTodo(linkedBefore.id, { dueDate: '2026-09-17' }, linkedBefore.version);
+    const linkedAfter = workspace.todos.find((item) => item.id === linkedBefore.id)!;
+    const taskAfter = workspace.rocks.flatMap((rock) => rock.tasks).find((task) => task.id === taskBefore.id)!;
+    expect(linkedAfter).toMatchObject({ dueDate: '2026-09-17', status: 'open', carryForwardCount: 1 });
+    expect(taskAfter).toMatchObject({ dueDate: '2026-09-17', status: 'open', version: taskBefore.version + 1 });
+
+    workspace = await api.getWorkspace();
     for (let count = 0; count < 4; count += 1) {
       const todo = workspace.todos.find((item) => item.id === 'todo-handoff')!;
-      workspace = await api.moveTodoForward(todo.id, `2099-09-${String(10 + count).padStart(2, '0')}`, todo.version);
+      workspace = await api.updateTodo(todo.id, { dueDate: `2099-09-${String(10 + count).padStart(2, '0')}` }, todo.version);
     }
     const todo = workspace.todos.find((item) => item.id === 'todo-handoff')!;
     const issue = workspace.issues.find((item) => item.sourceTodoId === todo.id);
     expect(todo).toMatchObject({ carryForwardCount: 4, flagged: true, convertedIssueId: issue?.id });
     expect(issue).toMatchObject({ category: 'To-Do rollover', horizon: 'short-term', sourceTodoId: todo.id });
+  });
+
+  it('creates, edits, and upserts team scorecard records with weekly trends', async () => {
+    const seed = structuredClone(initialWorkspace);
+    seed.currentUser = seed.users.find((user) => user.id === 'marcus-lee')!;
+    const api = new LocalWorkspaceApi(seed);
+    let workspace = await api.getWorkspace();
+    const week = workspace.meetings.find((meeting) => meeting.teamId === 'projects')!.weekStartDate!;
+    const metric = workspace.metrics.find((item) => item.id === 'metric-kickoffs')!;
+    const beforeResultCount = workspace.scorecardResults.filter((result) => result.metricId === metric.id && result.weekStartDate === week).length;
+    workspace = await api.updateScorecardMetric(metric.id, { target: '92%' }, metric.version);
+    const updatedMetric = workspace.metrics.find((item) => item.id === metric.id)!;
+    expect(updatedMetric).toMatchObject({ target: '92%', version: metric.version + 1 });
+    workspace = await api.upsertScorecardResult(metric.id, week, { actual: '96%', status: 'on-track' }, workspace.scorecardResults.find((result) => result.metricId === metric.id && result.weekStartDate === week)!.version);
+    const result = workspace.scorecardResults.find((item) => item.metricId === metric.id && item.weekStartDate === week)!;
+    expect(result).toMatchObject({ actual: '96%', status: 'on-track', trend: 'up', trendLabel: '+8 vs prior week' });
+    expect(workspace.scorecardResults.filter((item) => item.metricId === metric.id && item.weekStartDate === week)).toHaveLength(beforeResultCount);
+    await expect(api.upsertScorecardResult(metric.id, week, { actual: '97%', status: 'on-track' }, result.version - 1)).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('keeps scorecard writes inside team authorization and rejects grouping-only teams', async () => {
+    const viewerSeed = structuredClone(initialWorkspace);
+    viewerSeed.currentUser = viewerSeed.users.find((user) => user.id === 'maya-green')!;
+    viewerSeed.memberships.find((membership) => membership.teamId === 'projects' && membership.userId === 'maya-green')!.role = 'Viewer';
+    const viewerApi = new LocalWorkspaceApi(viewerSeed);
+    await expect(viewerApi.createScorecardMetric({ teamId: 'projects', label: 'Viewer metric', target: '1', unit: 'item', ownerId: 'maya-green' })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+    const leadershipApi = new LocalWorkspaceApi();
+    await expect(leadershipApi.updateScorecardMetric('metric-kickoffs', { target: '95%' })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+    const groupingSeed = structuredClone(initialWorkspace);
+    groupingSeed.teams.push({ ...groupingSeed.teams[0], id: 'grouping-only', name: 'Grouping Only', shortName: 'Group', nodeType: 'grouping', parentTeamId: 'leadership', memberCount: 1 });
+    groupingSeed.memberships.push({ ...groupingSeed.memberships[0], id: 'membership-ava-grouping', teamId: 'grouping-only' });
+    const groupingApi = new LocalWorkspaceApi(groupingSeed);
+    await expect(groupingApi.createScorecardMetric({ teamId: 'grouping-only', label: 'Invalid metric', target: '1', unit: 'item', ownerId: 'ava-khan' })).rejects.toMatchObject({ code: 'VALIDATION' });
   });
 
   it('keeps team messages separate from transfers and supports editable Issue conversion', async () => {

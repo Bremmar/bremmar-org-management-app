@@ -94,22 +94,6 @@ async function updateTodoHandler(request: HttpRequest, _context: InvocationConte
   }
 }
 
-async function moveTodoForwardHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
-  const scope = await requestScope(request);
-  if (isResponse(scope)) return scope;
-  const { principal, repository } = scope;
-  const todoId = request.params.todoId;
-  if (!todoId) return { status: 422, jsonBody: { error: 'todoId is required', code: 'VALIDATION' } };
-  try {
-    const body = await requestJson<{ dueDate?: string }>(request);
-    if (!body.dueDate) return { status: 422, jsonBody: { error: 'dueDate is required', code: 'VALIDATION' } };
-    const result = await repository.moveTodoForward(todoId, body.dueDate, principal.userId, expectedVersion(request));
-    return responseWithEtag(result, `W/\"${result.todo.version}\"`);
-  } catch (error) {
-    return repositoryErrorResponse(error);
-  }
-}
-
 async function createIssueHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
   const scope = await requestScope(request);
   if (isResponse(scope)) return scope;
@@ -205,7 +189,6 @@ app.http('updateRockStatus', { methods: ['PATCH'], authLevel: 'anonymous', route
 app.http('createTodo', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/todos', handler: createTodoHandler });
 app.http('updateTodo', { methods: ['PATCH'], authLevel: 'anonymous', route: 'todos/{todoId}', handler: updateTodoHandler });
 app.http('updateTodoStatus', { methods: ['PATCH'], authLevel: 'anonymous', route: 'todos/{todoId}/status', handler: updateTodoStatusHandler });
-app.http('moveTodoForward', { methods: ['POST'], authLevel: 'anonymous', route: 'todos/{todoId}/move-forward', handler: moveTodoForwardHandler });
 app.http('createIssue', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/issues', handler: createIssueHandler });
 app.http('updateIssue', { methods: ['PATCH'], authLevel: 'anonymous', route: 'issues/{issueId}', handler: updateIssueHandler });
 app.http('startIssue', { methods: ['POST'], authLevel: 'anonymous', route: 'issues/{issueId}/ids', handler: (request, context) => issueActionHandler(request, context, 'start') });

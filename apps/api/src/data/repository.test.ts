@@ -106,18 +106,89 @@ test('avatar validation and configurable aging settings stay behind the admin bo
   await rejectsWithCode(repository.updateAgeSettings({ agingDays: 6, staleDays: 12, criticalDays: 24 }, 'ava-khan', 1), 'CONFLICT');
 });
 
-test('repeated To-Dos are flagged and converted into one Issue after the fourth move', async () => {
+test('To-Do due-date edits roll incomplete work forward and leave earlier, unchanged, and completed edits ordinary', async () => {
   const repository = new MemoryWorkspaceRepository();
   let todo = (await repository.getTeamWorkspace('projects', 'marcus-lee')).todos.find((item) => item.id === 'todo-project-kickoff')!;
-  let result: Awaited<ReturnType<MemoryWorkspaceRepository['moveTodoForward']>> | undefined;
-  for (let count = 0; count < 4; count += 1) {
-    result = await repository.moveTodoForward(todo.id, `2099-09-${String(10 + count).padStart(2, '0')}`, 'marcus-lee', todo.version);
-    todo = result.todo;
-  }
+  todo = await repository.updateTodo(todo.id, { dueDate: '2026-09-10', status: 'done' }, 'marcus-lee', todo.version);
+  assert.deepEqual({ dueDate: todo.dueDate, status: todo.status, carryForwardCount: todo.carryForwardCount }, { dueDate: '2026-09-10', status: 'open', carryForwardCount: 1 });
+  todo = await repository.updateTodo(todo.id, { dueDate: '2026-09-06' }, 'marcus-lee', todo.version);
+  todo = await repository.updateTodo(todo.id, { dueDate: todo.dueDate }, 'marcus-lee', todo.version);
+  assert.equal(todo.carryForwardCount, 1);
+
+  let completed = await repository.createTodo({ teamId: 'projects', title: 'Completed commitment', ownerId: 'marcus-lee', dueDate: '2026-09-05' }, 'marcus-lee');
+  completed = await repository.updateTodo(completed.id, { status: 'done' }, 'marcus-lee', completed.version);
+  completed = await repository.updateTodo(completed.id, { dueDate: '2099-09-30' }, 'marcus-lee', completed.version);
+  assert.deepEqual({ status: completed.status, carryForwardCount: completed.carryForwardCount, dueDate: completed.dueDate }, { status: 'done', carryForwardCount: 0, dueDate: '2099-09-30' });
+});
+
+test('linked Rock Tasks follow automatic To-Do rollover and the fourth rollover creates one Issue', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const task = await repository.createRockTask({ rockId: 'rock-project-kickoff', title: 'Run the pilot', assigneeId: 'marcus-lee', assignedAt: '2026-09-02', startDate: '2026-09-03', dueDate: '2026-09-10' }, 'marcus-lee');
+  const converted = await repository.convertRockTaskToTodo(task.id, 'marcus-lee');
+  const rolled = await repository.updateTodo(converted.todo.id, { dueDate: '2026-09-17' }, 'marcus-lee', converted.todo.version);
+  const workspace = await repository.getTeamWorkspace('projects', 'marcus-lee');
+  const synchronizedTask = workspace.tasks.find((candidate) => candidate.id === task.id)!;
+  assert.deepEqual({ status: rolled.status, dueDate: rolled.dueDate, carryForwardCount: rolled.carryForwardCount }, { status: 'open', dueDate: '2026-09-17', carryForwardCount: 1 });
+  assert.deepEqual({ status: synchronizedTask.status, dueDate: synchronizedTask.dueDate }, { status: 'open', dueDate: '2026-09-17' });
+
+  let todo = (await repository.getTeamWorkspace('projects', 'marcus-lee')).todos.find((item) => item.id === 'todo-project-kickoff')!;
+  for (let count = 0; count < 4; count += 1) todo = await repository.updateTodo(todo.id, { dueDate: `2099-09-${String(10 + count).padStart(2, '0')}` }, 'marcus-lee', todo.version);
+  const issue = (await repository.getTeamWorkspace('projects', 'marcus-lee')).issues.find((item) => item.sourceTodoId === todo.id);
   assert.equal(todo.carryForwardCount, 4);
   assert.equal(todo.flagged, true);
-  assert.equal(result?.issue?.sourceTodoId, todo.id);
-  assert.equal((await repository.getTeamWorkspace('projects', 'marcus-lee')).issues.filter((issue) => issue.sourceTodoId === todo.id).length, 1);
+  assert.equal(issue?.sourceTodoId, todo.id);
+  assert.equal((await repository.getTeamWorkspace('projects', 'marcus-lee')).issues.filter((item) => item.sourceTodoId === todo.id).length, 1);
+});
+
+test('weekly scorecard definitions and results are team-scoped, versioned, and trend-aware', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const week = (await repository.getTeamWorkspace('projects', 'marcus-lee')).meetings[0].weekStartDate;
+  const metric = await repository.createScorecardMetric({ teamId: 'projects', label: 'Pilot completion rate', target: '90%', unit: 'percent', ownerId: 'marcus-lee' }, 'marcus-lee');
+  assert.deepEqual({ kind: metric.kind, teamId: metric.teamId, pk: metric.pk, version: metric.version }, { kind: 'scorecardMetric', teamId: 'projects', pk: 'team:projects', version: 1 });
+  const priorWeek = new Date(`${week}T12:00:00Z`);
+  priorWeek.setUTCDate(priorWeek.getUTCDate() - 7);
+  const prior = await repository.upsertScorecardResult(metric.id, priorWeek.toISOString().slice(0, 10), { actual: '80%', status: 'off-track' }, 'marcus-lee');
+  const current = await repository.upsertScorecardResult(metric.id, week, { actual: '95%', status: 'on-track' }, 'marcus-lee');
+  assert.deepEqual({ actual: current.actual, status: current.status, trend: current.trend, trendLabel: current.trendLabel, version: current.version }, { actual: '95%', status: 'on-track', trend: 'up', trendLabel: '+15 vs prior week', version: 1 });
+  const editedMetric = await repository.updateScorecardMetric(metric.id, { target: '92%' }, 'marcus-lee', metric.version);
+  assert.equal(editedMetric.version, 2);
+  await rejectsWithCode(repository.updateScorecardMetric(metric.id, { target: '93%' }, 'marcus-lee', metric.version), 'CONFLICT');
+  const editedResult = await repository.upsertScorecardResult(metric.id, week, { actual: '96%', status: 'on-track' }, 'marcus-lee', current.version);
+  assert.equal(editedResult.version, 2);
+  assert.equal((await repository.getTeamWorkspace('projects', 'marcus-lee')).scorecardResults.filter((result) => result.metricId === metric.id && result.weekStartDate === week).length, 1);
+  await rejectsWithCode(repository.upsertScorecardResult(metric.id, week, { actual: '97%', status: 'on-track' }, 'marcus-lee', current.version), 'CONFLICT');
+  const snapshot = await repository.getWorkspaceSnapshot('marcus-lee');
+  assert.equal(snapshot.metrics.some((item) => item.id === metric.id), true);
+  assert.equal(snapshot.scorecardResults.some((item) => item.id === prior.id), true);
+  assert.equal(repository.exportWorkspaceRecords().filter((record) => record.kind === 'scorecardResult' && record.pk === 'team:projects').length >= 2, true);
+});
+
+test('scorecard writes enforce TeamLead/Member access, keep Viewers read-only, and reject grouping-only nodes', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const metric = await repository.createScorecardMetric({ teamId: 'projects', label: 'Authorization metric', target: '1', unit: 'item', ownerId: 'marcus-lee' }, 'marcus-lee');
+  const week = (await repository.getTeamWorkspace('projects', 'marcus-lee')).meetings[0].weekStartDate;
+  await rejectsWithCode(repository.updateScorecardMetric(metric.id, { target: '2' }, 'priya-shah', metric.version), 'FORBIDDEN');
+  await rejectsWithCode(repository.upsertScorecardResult(metric.id, week, { actual: '1', status: 'on-track' }, 'priya-shah'), 'FORBIDDEN');
+  await repository.upsertMembership({ userId: 'maya-green', teamId: 'projects', role: 'Viewer' }, 'ava-khan');
+  await rejectsWithCode(repository.createScorecardMetric({ teamId: 'projects', label: 'Viewer metric', target: '1', unit: 'item', ownerId: 'maya-green' }, 'maya-green'), 'FORBIDDEN');
+  await rejectsWithCode(repository.upsertScorecardResult(metric.id, week, { actual: '1', status: 'on-track' }, 'ava-khan'), 'FORBIDDEN');
+  const grouping = await repository.createTeam({ teamId: 'grouping-only', name: 'Grouping Only', shortName: 'Group', description: 'No direct work.', parentTeamId: 'leadership', nodeType: 'grouping', meetingDay: 'Monday', meetingTime: '9:00 AM', accent: '#4c8f86', initials: 'GO', meetingSections: DEFAULT_MEETING_SECTIONS, escalationUserIds: [] }, 'ava-khan');
+  assert.equal(grouping.nodeType, 'grouping');
+  await repository.upsertMembership({ userId: 'ava-khan', teamId: 'grouping-only', role: 'Member' }, 'ava-khan');
+  await rejectsWithCode(repository.createScorecardMetric({ teamId: 'grouping-only', label: 'Invalid metric', target: '1', unit: 'item', ownerId: 'ava-khan' }, 'ava-khan'), 'VALIDATION');
+});
+
+test('meeting recaps use the matching Monday-start weekly scorecard result', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const before = await repository.getTeamWorkspace('projects', 'marcus-lee');
+  const meeting = before.meetings[0];
+  const metric = before.metrics.find((item) => item.id === 'metric-project-kickoffs')!;
+  const existing = before.scorecardResults.find((result) => result.metricId === metric.id && result.weekStartDate === meeting.weekStartDate)!;
+  await repository.upsertScorecardResult(metric.id, meeting.weekStartDate, { actual: '70%', status: 'off-track' }, 'marcus-lee', existing.version);
+  const closed = await repository.closeMeeting('projects', meeting.id, 'Weekly review complete.', 9, 'marcus-lee', meeting.version);
+  assert.match(closed.recap, /Scorecard: off-track/);
+  assert.match(closed.recap, /70%/);
+  assert.match(closed.recap, new RegExp(meeting.weekStartDate));
 });
 
 test('team messages can be read and converted into an editable Issue in the receiving workspace', async () => {

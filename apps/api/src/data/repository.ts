@@ -10,6 +10,8 @@ import {
   issueAgeBand,
   meetingSectionsFor,
   partitionFor,
+  scorecardTrendFor,
+  weekStartDateFor,
   type AuditEventRecord,
   type CompanyOverview,
   type DashboardSummary,
@@ -24,6 +26,8 @@ import {
   type NotificationRecord,
   type RockRecord,
   type RockTaskRecord,
+  type ScorecardMetricRecord,
+  type ScorecardResultRecord,
   type SessionContext,
   type TeamMembership,
   type TeamRecord,
@@ -70,7 +74,9 @@ export interface WorkspaceRepository {
   updateRock(rockId: string, input: Partial<Pick<RockRecord, 'title' | 'description' | 'notes' | 'ownerId' | 'progress' | 'dueDate' | 'priority'>>, actorId: string, expectedVersion?: number): Promise<RockRecord>;
   updateTodoStatus(todoId: string, status: TodoRecord['status'], actorId: string, expectedVersion?: number): Promise<TodoRecord>;
   updateTodo(todoId: string, input: Partial<Pick<TodoRecord, 'title' | 'notes' | 'ownerId' | 'dueDate' | 'status'>>, actorId: string, expectedVersion?: number): Promise<TodoRecord>;
-  moveTodoForward(todoId: string, dueDate: string, actorId: string, expectedVersion?: number): Promise<{ todo: TodoRecord; issue?: IssueRecord }>;
+  createScorecardMetric(input: { teamId: string; label: string; target: string; unit: string; ownerId: string }, actorId: string): Promise<ScorecardMetricRecord>;
+  updateScorecardMetric(metricId: string, input: Partial<Pick<ScorecardMetricRecord, 'label' | 'target' | 'unit' | 'ownerId'>>, actorId: string, expectedVersion?: number): Promise<ScorecardMetricRecord>;
+  upsertScorecardResult(metricId: string, weekStartDate: string, input: Pick<ScorecardResultRecord, 'actual' | 'status'>, actorId: string, expectedVersion?: number): Promise<ScorecardResultRecord>;
   createIssue(input: { teamId: string; title: string; detail?: string; category?: string; priority?: number; horizon?: IssueRecord['horizon']; raisedById: string; ownerId?: string; linkedRockId?: string; idsNote?: string }, actorId: string): Promise<IssueRecord>;
   updateIssue(issueId: string, input: Partial<Pick<IssueRecord, 'title' | 'detail' | 'category' | 'priority' | 'horizon' | 'ownerId' | 'idsNote'>>, actorId: string, expectedVersion?: number): Promise<IssueRecord>;
   addMeetingIssueNote(issueId: string, meetingId: string, note: string, actorId: string, expectedVersion?: number): Promise<{ issue: IssueRecord; meeting: MeetingRecord }>;
@@ -165,7 +171,7 @@ function assertExpectedVersion(actual: number, expectedVersion?: number) {
 }
 
 function assertText(value: string, field: string) {
-  if (!value.trim()) throw new RepositoryError('VALIDATION', `${field} is required.`);
+  if (typeof value !== 'string' || !value.trim()) throw new RepositoryError('VALIDATION', `${field} is required.`);
 }
 
 function assertDate(value: string, field: string) {
@@ -177,11 +183,17 @@ function appendMeetingNote(current: string | undefined, label: string, note: str
   return current?.trim() ? `${current.trim()}\n\n${entry}` : entry;
 }
 
-function meetingRecap(team: TeamRecord, meeting: MeetingRecord, rocks: RockRecord[], todos: TodoRecord[], issues: IssueRecord[], manualNotes: string) {
+function meetingRecap(team: TeamRecord, meeting: MeetingRecord, rocks: RockRecord[], todos: TodoRecord[], issues: IssueRecord[], manualNotes: string, metrics: ScorecardMetricRecord[] = [], results: ScorecardResultRecord[] = []) {
   const ids = meeting.idsIssueIds.map((id) => issues.find((issue) => issue.id === id)).filter((issue): issue is IssueRecord => Boolean(issue));
-  const lines = [`${team.name} L10 recap · ${meeting.dateLabel}`, ''];
+  const lines = [`${team.name} L10 recap · ${meeting.dateLabel} · week of ${meeting.weekStartDate}`, ''];
   for (const [section, note] of Object.entries(meeting.sectionNotes)) {
     if (note?.trim()) lines.push(`${section}: ${note.trim()}`);
+  }
+  if (meetingSectionsFor(team).some((section) => section.id === 'scorecard')) {
+    const weekly = metrics.filter((metric) => metric.teamId === team.teamId).map((metric) => ({ metric, result: results.find((result) => result.metricId === metric.id && result.weekStartDate === meeting.weekStartDate) }));
+    const offTrack = weekly.filter(({ result }) => result?.status === 'off-track').map(({ metric, result }) => `${metric.label} (${result?.actual ?? 'Not entered'})`);
+    const missing = weekly.filter(({ result }) => !result).map(({ metric }) => metric.label);
+    lines.push(`Scorecard: ${offTrack.length ? `off-track — ${offTrack.join(', ')}` : missing.length ? `not entered — ${missing.join(', ')}` : 'all visible measurables on track.'}`);
   }
   lines.push(`Rock Review: ${rocks.length ? rocks.map((rock) => `${rock.title} (${rock.progress}% · ${rock.status})`).join('; ') : 'no Rocks recorded.'}`);
   lines.push(`To-Do Review: ${todos.length ? todos.map((todo) => `${todo.title} — ${todo.status} · due ${todo.dueDate}`).join('; ') : 'no To-Dos recorded.'}`);
@@ -239,6 +251,14 @@ function makeTodo(input: { id: string; teamId: string; title: string; ownerId: s
   return { ...baseRecord(input.id, 'todo', input.teamId), kind: 'todo', teamId: input.teamId, title: input.title, notes: '', ownerId: input.ownerId, dueDate: input.dueDate ?? '2026-09-05', status: input.status ?? 'open', origin: 'Team workspace', linkedRockTaskId: input.linkedRockTaskId, carryForwardCount: 0, flagged: false };
 }
 
+function makeScorecardMetric(input: { id: string; teamId: string; label: string; target: string; unit: string; ownerId: string }): ScorecardMetricRecord {
+  return { ...baseRecord(input.id, 'scorecardMetric', input.teamId), kind: 'scorecardMetric', teamId: input.teamId, label: input.label, target: input.target, unit: input.unit, ownerId: input.ownerId };
+}
+
+function makeScorecardResult(input: { id: string; metricId: string; teamId: string; weekStartDate: string; actual: string; status: ScorecardResultRecord['status']; priorActual?: string }): ScorecardResultRecord {
+  return { ...baseRecord(input.id, 'scorecardResult', input.teamId), kind: 'scorecardResult', teamId: input.teamId, metricId: input.metricId, weekStartDate: input.weekStartDate, actual: input.actual, status: input.status, ...scorecardTrendFor(input.actual, input.priorActual) };
+}
+
 function makeIssue(input: { id: string; teamId: string; title: string; raisedById: string; ageInDays: number; horizon?: IssueRecord['horizon']; assignmentState?: IssueRecord['assignmentState']; currentTeamId?: string | null; status?: IssueRecord['status']; ownerId?: string }): IssueRecord {
   const record = baseRecord(input.id, 'issue', input.teamId);
   const createdAt = daysAgo(input.ageInDays);
@@ -258,6 +278,8 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
   protected notifications: NotificationRecord[];
   protected messages: TeamMessageRecord[];
   protected meetings: MeetingRecord[];
+  protected metrics: ScorecardMetricRecord[];
+  protected scorecardResults: ScorecardResultRecord[];
   protected audit: AuditEventRecord[];
   protected settings: IssueAgeSettings;
   protected settingsVersion = 1;
@@ -320,8 +342,28 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     this.meetings = this.teams.filter((team) => team.nodeType === 'operational').map((team) => {
       const issueIds = this.issues.filter((issue) => issue.teamId === team.teamId && issue.horizon === 'short-term' && issue.assignmentState !== 'redirected').map((issue) => issue.id);
       const sections = meetingSectionsFor(team);
-      return { ...baseRecord(`meeting-${team.teamId}-current`, 'meeting', team.teamId), kind: 'meeting', teamId: team.teamId, label: `${team.shortName} L10`, dateLabel: `This week · ${team.meetingDay}`, status: 'upcoming', facilitatorId: team.escalationUserIds[0] ?? 'ava-khan', attendeeIds: this.memberships.filter((membership) => membership.teamId === team.teamId && membership.active).map((membership) => membership.userId), lastRating: 8, agendaProgress: 0, agendaTotal: sections.length, idsSolved: 0, idsTotal: issueIds.length, recap: '', sectionNotes: {}, idsIssueIds: [], createdTodoIds: [], idsNotes: [] } satisfies MeetingRecord;
+      return { ...baseRecord(`meeting-${team.teamId}-current`, 'meeting', team.teamId), kind: 'meeting', teamId: team.teamId, label: `${team.shortName} L10`, dateLabel: `This week · ${team.meetingDay}`, weekStartDate: weekStartDateFor(new Date()), status: 'upcoming', facilitatorId: team.escalationUserIds[0] ?? 'ava-khan', attendeeIds: this.memberships.filter((membership) => membership.teamId === team.teamId && membership.active).map((membership) => membership.userId), lastRating: 8, agendaProgress: 0, agendaTotal: sections.length, idsSolved: 0, idsTotal: issueIds.length, recap: '', sectionNotes: {}, idsIssueIds: [], createdTodoIds: [], idsNotes: [] } satisfies MeetingRecord;
     });
+    const currentWeekStartDate = weekStartDateFor(new Date());
+    const previousWeekStartDate = weekStartDateFor(new Date(new Date(currentWeekStartDate).getTime() - 7 * DAY));
+    this.metrics = [
+      makeScorecardMetric({ id: 'metric-leadership-pipeline', teamId: 'leadership', label: 'Qualified pipeline created', target: '18', unit: 'opportunities', ownerId: 'ava-khan' }),
+      makeScorecardMetric({ id: 'metric-project-kickoffs', teamId: 'projects', label: 'Projects kicked off on time', target: '90%', unit: 'on-time', ownerId: 'marcus-lee' }),
+      makeScorecardMetric({ id: 'metric-service-health', teamId: 'service-development', label: 'Customer health checks', target: '15', unit: 'checks', ownerId: 'maria-ortiz' }),
+      makeScorecardMetric({ id: 'metric-service-incidents', teamId: 'service-delivery', label: 'Critical incidents', target: '< 2', unit: 'incidents', ownerId: 'jon-bell' }),
+      makeScorecardMetric({ id: 'metric-cyber-evidence', teamId: 'cybersecurity', label: 'Evidence requests assigned', target: '100%', unit: 'assigned', ownerId: 'priya-shah' }),
+    ];
+    this.scorecardResults = [
+      makeScorecardResult({ id: 'result-metric-leadership-pipeline-previous', metricId: 'metric-leadership-pipeline', teamId: 'leadership', weekStartDate: previousWeekStartDate, actual: '18', status: 'on-track' }),
+      makeScorecardResult({ id: 'result-metric-leadership-pipeline-current', metricId: 'metric-leadership-pipeline', teamId: 'leadership', weekStartDate: currentWeekStartDate, actual: '21', status: 'on-track', priorActual: '18' }),
+      makeScorecardResult({ id: 'result-metric-project-kickoffs-previous', metricId: 'metric-project-kickoffs', teamId: 'projects', weekStartDate: previousWeekStartDate, actual: '88%', status: 'off-track' }),
+      makeScorecardResult({ id: 'result-metric-project-kickoffs-current', metricId: 'metric-project-kickoffs', teamId: 'projects', weekStartDate: currentWeekStartDate, actual: '94%', status: 'on-track', priorActual: '88%' }),
+      makeScorecardResult({ id: 'result-metric-service-health-previous', metricId: 'metric-service-health', teamId: 'service-development', weekStartDate: previousWeekStartDate, actual: '13', status: 'off-track' }),
+      makeScorecardResult({ id: 'result-metric-service-health-current', metricId: 'metric-service-health', teamId: 'service-development', weekStartDate: currentWeekStartDate, actual: '17', status: 'on-track', priorActual: '13' }),
+      makeScorecardResult({ id: 'result-metric-service-incidents-previous', metricId: 'metric-service-incidents', teamId: 'service-delivery', weekStartDate: previousWeekStartDate, actual: '1', status: 'on-track' }),
+      makeScorecardResult({ id: 'result-metric-service-incidents-current', metricId: 'metric-service-incidents', teamId: 'service-delivery', weekStartDate: currentWeekStartDate, actual: '1', status: 'on-track', priorActual: '1' }),
+      makeScorecardResult({ id: 'result-metric-cyber-evidence-current', metricId: 'metric-cyber-evidence', teamId: 'cybersecurity', weekStartDate: currentWeekStartDate, actual: '72%', status: 'off-track', priorActual: '80%' }),
+    ];
     this.settings = clone(DEFAULT_ISSUE_AGE_SETTINGS);
     this.audit = [{
       ...baseRecord('audit-seed', 'auditEvent'), kind: 'auditEvent', actorId: 'ava-khan', action: 'Created workspace hierarchy', target: ORG_ID, detail: 'Seeded the Leadership, Professional Services, and Managed Services structure.', eventType: 'team',
@@ -333,7 +375,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     this.teams = this.teams.map((team) => ({ ...team, meetingSections: team.meetingSections?.length ? team.meetingSections : clone(DEFAULT_MEETING_SECTIONS), escalationUserIds: team.escalationUserIds ?? [] }));
     this.todos = this.todos.map((todo) => ({ ...todo, carryForwardCount: todo.carryForwardCount ?? 0, flagged: todo.flagged ?? false }));
     this.issues = this.issues.map((issue) => ({ ...issue, meetingsPassed: issue.meetingsPassed ?? 0, escalationState: issue.escalationState ?? 'not-scheduled', escalationLevel: issue.escalationLevel ?? 0 }));
-    this.meetings = this.meetings.map((meeting) => ({ ...meeting, sectionNotes: meeting.sectionNotes ?? {}, idsIssueIds: meeting.idsIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: meeting.idsNotes ?? [], agendaTotal: meetingSectionsFor(this.team(meeting.teamId) ?? { meetingSections: DEFAULT_MEETING_SECTIONS }).length }));
+    this.meetings = this.meetings.map((meeting) => ({ ...meeting, weekStartDate: meeting.weekStartDate ?? weekStartDateFor(new Date()), sectionNotes: meeting.sectionNotes ?? {}, idsIssueIds: meeting.idsIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: meeting.idsNotes ?? [], agendaTotal: meetingSectionsFor(this.team(meeting.teamId) ?? { meetingSections: DEFAULT_MEETING_SECTIONS }).length }));
     this.issues = this.issues.map((issue) => issueAge(issue, this.settings));
   }
 
@@ -408,7 +450,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       criticalDays: this.settings.criticalDays,
       version: this.settings.version ?? this.settingsVersion,
     };
-    return clone([...this.teams, ...this.users, ...this.memberships, ...this.rocks, ...this.tasks, ...this.todos, ...this.issues, ...this.transfers, ...this.notifications, ...this.messages, ...this.meetings, ...this.audit, settings].map((record) => ({ ...record, environmentId: this.environmentId })));
+    return clone([...this.teams, ...this.users, ...this.memberships, ...this.rocks, ...this.tasks, ...this.todos, ...this.issues, ...this.transfers, ...this.notifications, ...this.messages, ...this.meetings, ...this.metrics, ...this.scorecardResults, ...this.audit, settings].map((record) => ({ ...record, environmentId: this.environmentId })));
   }
 
   async getTeamMembership(teamId: string, userId: string) {
@@ -464,7 +506,9 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     const notifications = this.notifications.filter((notification) => notification.recipientUserId === userId && (!notification.teamId || notification.teamId === teamId));
     const messages = this.messages.filter((message) => message.fromTeamId === teamId || message.toTeamId === teamId);
     const meetings = this.meetings.filter((meeting) => meeting.teamId === teamId);
-    return { environmentId: this.environmentId, team: clone(team), membership: clone(this.membership(teamId, userId) ? { teamId, role: this.membership(teamId, userId)!.role, active: true } : null), dashboard: dashboardFor(teamId, rocks, todos, issues), rocks: clone(rocks), tasks: clone(tasks), todos: clone(todos), issues: clone(issues), transfers: clone(transfers), notifications: clone(notifications), messages: clone(messages), meetings: clone(meetings), etag: etagFor([...rocks, ...tasks, ...todos, ...issues, ...transfers, ...messages, ...meetings]) };
+    const metrics = this.metrics.filter((metric) => metric.teamId === teamId);
+    const scorecardResults = this.scorecardResults.filter((result) => result.teamId === teamId);
+    return { environmentId: this.environmentId, team: clone(team), membership: clone(this.membership(teamId, userId) ? { teamId, role: this.membership(teamId, userId)!.role, active: true } : null), dashboard: dashboardFor(teamId, rocks, todos, issues), rocks: clone(rocks), tasks: clone(tasks), todos: clone(todos), issues: clone(issues), transfers: clone(transfers), notifications: clone(notifications), messages: clone(messages), meetings: clone(meetings), metrics: clone(metrics), scorecardResults: clone(scorecardResults), etag: etagFor([...rocks, ...tasks, ...todos, ...issues, ...transfers, ...messages, ...meetings, ...metrics, ...scorecardResults]) };
   }
 
   async getWorkspaceSnapshot(userId: string): Promise<WorkspaceSnapshot> {
@@ -481,6 +525,8 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     const transfers = this.transfers.filter((transfer) => teamIds.has(transfer.sourceTeamId) || teamIds.has(transfer.destinationTeamId));
     const messages = this.messages.filter((message) => teamIds.has(message.fromTeamId) || teamIds.has(message.toTeamId));
     const meetings = this.meetings.filter((meeting) => teamIds.has(meeting.teamId));
+    const metrics = this.metrics.filter((metric) => teamIds.has(metric.teamId));
+    const scorecardResults = this.scorecardResults.filter((result) => teamIds.has(result.teamId) && result.weekStartDate >= '2026-07-01' && result.weekStartDate <= '2026-09-30');
     const notifications = this.notifications.filter((notification) => notification.recipientUserId === userId);
     const quarterEnd = new Date('2026-09-30T23:59:59Z').getTime();
     const daysRemaining = Math.max(0, Math.ceil((quarterEnd - Date.now()) / DAY));
@@ -499,11 +545,12 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       notifications: clone(notifications),
       messages: clone(messages),
       meetings: clone(meetings),
-      metrics: [],
+      metrics: clone(metrics),
+      scorecardResults: clone(scorecardResults),
       headlines: [],
       audit: clone(this.audit),
       quarter: { id: '2026-q3', label: 'Q3 2026', theme: 'Make Q3 feel lighter.', startDate: '2026-07-01', endDate: '2026-09-30', daysRemaining },
-      etag: etagFor([...teams, ...memberships, ...rocks, ...tasks, ...todos, ...issues, ...transfers, ...messages, ...meetings, ...notifications, ...this.audit]),
+      etag: etagFor([...teams, ...memberships, ...rocks, ...tasks, ...todos, ...issues, ...transfers, ...messages, ...meetings, ...notifications, ...metrics, ...scorecardResults, ...this.audit]),
     };
   }
 
@@ -595,13 +642,22 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     if (input.title !== undefined) assertText(input.title, 'To-Do title');
     if (input.ownerId !== undefined && !this.user(input.ownerId)) throw new RepositoryError('VALIDATION', 'To-Do owner not found.');
     if (input.status !== undefined && !['open', 'done', 'not-done'].includes(input.status)) throw new RepositoryError('VALIDATION', 'Invalid To-Do status.');
+    if (input.dueDate !== undefined) assertDate(input.dueDate, 'Due date');
+    const isLaterDate = input.dueDate !== undefined && input.dueDate > todo.dueDate;
+    const isRollover = todo.status !== 'done' && isLaterDate;
     const timestamp = nowIso();
-    Object.assign(todo, input, { updatedAt: timestamp, updatedBy: actorId, version: todo.version + 1 });
+    const nextInput = isRollover ? { ...input, status: 'open' as const } : input;
+    if (isRollover) {
+      todo.carryForwardCount += 1;
+      todo.flagged = todo.carryForwardCount > 3;
+    }
+    Object.assign(todo, nextInput, { updatedAt: timestamp, updatedBy: actorId, version: todo.version + 1 });
     if (todo.linkedRockTaskId) {
       const task = this.tasks.find((item) => item.id === todo.linkedRockTaskId);
       if (task) {
         if (task.teamId !== todo.teamId) throw new RepositoryError('VALIDATION', 'Linked Rock Task must belong to the same team.');
-        if (input.status !== undefined) task.status = input.status === 'done' ? 'done' : 'open';
+        if (isRollover) task.status = 'open';
+        else if (input.status !== undefined) task.status = input.status === 'done' ? 'done' : 'open';
         if (input.ownerId !== undefined) task.assigneeId = input.ownerId;
         if (input.dueDate !== undefined) task.dueDate = input.dueDate;
         task.updatedAt = timestamp;
@@ -609,39 +665,8 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
         task.version += 1;
       }
     }
-    this.recordAudit(actorId, 'Updated To-Do', todo.id, `Updated ${todo.title}.`, 'todo');
-    return clone(todo);
-  }
-
-  async moveTodoForward(todoId: string, dueDate: string, actorId: string, expectedVersion?: number) {
-    const todo = this.todos.find((item) => item.id === todoId);
-    if (!todo) throw new RepositoryError('NOT_FOUND', 'To-Do not found.');
-    this.requireWrite(todo.teamId, actorId);
-    assertExpectedVersion(todo.version, expectedVersion);
-    if (todo.status === 'done') throw new RepositoryError('VALIDATION', 'Completed To-Dos do not need to be moved forward.');
-    assertDate(dueDate, 'Due date');
-    const timestamp = nowIso();
-    todo.dueDate = dueDate;
-    todo.status = 'open';
-    todo.carryForwardCount += 1;
-    todo.flagged = todo.carryForwardCount > 3;
-    todo.updatedAt = timestamp;
-    todo.updatedBy = actorId;
-    todo.version += 1;
-    if (todo.linkedRockTaskId) {
-      const task = this.tasks.find((item) => item.id === todo.linkedRockTaskId);
-      if (task) {
-        if (task.teamId !== todo.teamId) throw new RepositoryError('VALIDATION', 'Linked Rock Task must belong to the same team.');
-        task.dueDate = dueDate;
-        task.status = 'open';
-        task.updatedAt = timestamp;
-        task.updatedBy = actorId;
-        task.version += 1;
-      }
-    }
-    let issue: IssueRecord | undefined;
-    if (todo.flagged && !todo.convertedIssueId) {
-      issue = makeIssue({ id: `issue-todo-rollover-${todo.id}`, teamId: todo.teamId, title: `Repeated To-Do: ${todo.title}`, raisedById: actorId, ageInDays: 0, ownerId: todo.ownerId });
+    if (isRollover && todo.flagged && !todo.convertedIssueId) {
+      const issue: IssueRecord = makeIssue({ id: `issue-todo-rollover-${todo.id}`, teamId: todo.teamId, title: `Repeated To-Do: ${todo.title}`, raisedById: actorId, ageInDays: 0, ownerId: todo.ownerId });
       issue.detail = `This To-Do was moved forward ${todo.carryForwardCount} times. Review the commitment in IDS and decide what must change.`;
       issue.category = 'To-Do rollover';
       issue.priority = 2;
@@ -650,10 +675,79 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       this.issues.unshift(issue);
       todo.convertedIssueId = issue.id;
       this.recordAudit(actorId, 'Converted repeated To-Do to Issue', issue.id, `${todo.title} moved forward ${todo.carryForwardCount} times.`, 'issue');
-    } else {
+    } else if (isRollover) {
       this.recordAudit(actorId, 'Moved To-Do forward', todo.id, `${todo.title} moved to ${todo.dueDate} (${todo.carryForwardCount} times).`, 'todo');
+    } else {
+      this.recordAudit(actorId, 'Updated To-Do', todo.id, `Updated ${todo.title}.`, 'todo');
     }
-    return { todo: clone(todo), issue: issue ? clone(issue) : undefined };
+    return clone(todo);
+  }
+
+  /* Scorecard definitions and results are team-owned records. */
+  async createScorecardMetric(input: { teamId: string; label: string; target: string; unit: string; ownerId: string }, actorId: string) {
+    this.requireWrite(input.teamId, actorId);
+    const team = this.team(input.teamId);
+    if (!team) throw new RepositoryError('NOT_FOUND', 'Team not found.');
+    if (team.nodeType !== 'operational') throw new RepositoryError('VALIDATION', 'Grouping-only teams cannot own measurables.');
+    assertText(input.label, 'Measurable label');
+    assertText(input.target, 'Measurable target');
+    assertText(input.unit, 'Measurable unit');
+    if (!this.user(input.ownerId)) throw new RepositoryError('VALIDATION', 'Measurable owner not found.');
+    if (!this.membership(input.teamId, input.ownerId)) throw new RepositoryError('VALIDATION', 'Measurable owner must be an active member of the team.');
+    const metric: ScorecardMetricRecord = makeScorecardMetric({ id: generatedId('metric'), teamId: input.teamId, label: input.label.trim(), target: input.target.trim(), unit: input.unit.trim(), ownerId: input.ownerId });
+    metric.updatedBy = actorId;
+    this.metrics.push(metric);
+    this.recordAudit(actorId, 'Created Scorecard measurable', metric.id, metric.label, 'team');
+    return clone(metric);
+  }
+
+  async updateScorecardMetric(metricId: string, input: Partial<Pick<ScorecardMetricRecord, 'label' | 'target' | 'unit' | 'ownerId'>>, actorId: string, expectedVersion?: number) {
+    const metric = this.metrics.find((item) => item.id === metricId);
+    if (!metric) throw new RepositoryError('NOT_FOUND', 'Measurable not found.');
+    this.requireWrite(metric.teamId, actorId);
+    assertExpectedVersion(metric.version, expectedVersion);
+    if (input.label !== undefined) assertText(input.label, 'Measurable label');
+    if (input.target !== undefined) assertText(input.target, 'Measurable target');
+    if (input.unit !== undefined) assertText(input.unit, 'Measurable unit');
+    if (input.ownerId !== undefined) {
+      if (!this.user(input.ownerId)) throw new RepositoryError('VALIDATION', 'Measurable owner not found.');
+      if (!this.membership(metric.teamId, input.ownerId)) throw new RepositoryError('VALIDATION', 'Measurable owner must be an active member of the team.');
+    }
+    Object.assign(metric, { ...input, label: input.label?.trim() ?? metric.label, target: input.target?.trim() ?? metric.target, unit: input.unit?.trim() ?? metric.unit, updatedAt: nowIso(), updatedBy: actorId, version: metric.version + 1 });
+    this.recordAudit(actorId, 'Updated Scorecard measurable', metric.id, metric.label, 'team');
+    return clone(metric);
+  }
+
+  async upsertScorecardResult(metricId: string, weekStartDate: string, input: Pick<ScorecardResultRecord, 'actual' | 'status'>, actorId: string, expectedVersion?: number) {
+    const metric = this.metrics.find((item) => item.id === metricId);
+    if (!metric) throw new RepositoryError('NOT_FOUND', 'Measurable not found.');
+    this.requireWrite(metric.teamId, actorId);
+    try {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(weekStartDate) || weekStartDateFor(weekStartDate) !== weekStartDate) throw new RepositoryError('VALIDATION', 'Week start must be a valid Monday date.');
+    } catch (error) {
+      if (error instanceof RepositoryError) throw error;
+      throw new RepositoryError('VALIDATION', 'Week start must be a valid Monday date.');
+    }
+    assertText(input.actual, 'Actual value');
+    if (!['on-track', 'off-track'].includes(input.status)) throw new RepositoryError('VALIDATION', 'Invalid measurable status.');
+    const result = this.scorecardResults.find((item) => item.metricId === metricId && item.weekStartDate === weekStartDate);
+    const priorWeek = weekStartDateFor(new Date(new Date(`${weekStartDate}T12:00:00Z`).getTime() - 7 * DAY));
+    const prior = this.scorecardResults.find((item) => item.metricId === metricId && item.weekStartDate === priorWeek);
+    const trend = scorecardTrendFor(input.actual, prior?.actual);
+    const timestamp = nowIso();
+    if (result) {
+      assertExpectedVersion(result.version, expectedVersion);
+      Object.assign(result, { actual: input.actual.trim(), status: input.status, ...trend, updatedAt: timestamp, updatedBy: actorId, version: result.version + 1 });
+    } else {
+      if (expectedVersion !== undefined) throw new RepositoryError('CONFLICT', 'This weekly result does not exist yet. Refresh and try again.');
+      const created: ScorecardResultRecord = makeScorecardResult({ id: `result-${metricId}-${weekStartDate}`, metricId, teamId: metric.teamId, weekStartDate, actual: input.actual.trim(), status: input.status, priorActual: prior?.actual });
+      created.updatedBy = actorId;
+      this.scorecardResults.push(created);
+      this.recordAudit(actorId, 'Updated Scorecard result', created.id, `${metric.label} · ${weekStartDate}`, 'team');
+      return clone(created);
+    }
+    this.recordAudit(actorId, 'Updated Scorecard result', result.id, `${metric.label} · ${weekStartDate}`, 'team');
+    return clone(result);
   }
 
   async createIssue(input: { teamId: string; title: string; detail?: string; category?: string; priority?: number; horizon?: IssueRecord['horizon']; raisedById: string; ownerId?: string; linkedRockId?: string; idsNote?: string }, actorId: string) {
@@ -1103,14 +1197,14 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     meeting.idsTotal = meeting.idsIssueIds.length;
     meeting.idsSolved = meeting.idsIssueIds.filter((issueId) => teamIssues.find((issue) => issue.id === issueId)?.status === 'solved').length;
     meeting.lastRating = Math.min(10, Math.max(0, rating));
-    meeting.recap = meetingRecap(team, meeting, teamRocks, teamTodos, teamIssues, recap);
+    meeting.recap = meetingRecap(team, meeting, teamRocks, teamTodos, teamIssues, recap, this.metrics, this.scorecardResults);
     meeting.updatedAt = timestamp;
     meeting.updatedBy = actorId;
     meeting.version += 1;
     this.advanceIssueEscalations(team, meeting, timestamp);
     const nextDate = new Date(new Date(timestamp).getTime() + 7 * DAY);
     const carriedIssueIds = meeting.idsIssueIds.filter((issueId) => this.activeIssue(issueId)?.status !== 'solved');
-    const nextMeeting: MeetingRecord = { ...baseRecord(`meeting-${teamId}-${nextDate.toISOString().slice(0, 10)}-${Date.now()}`, 'meeting', teamId), kind: 'meeting', teamId, label: `${team.shortName} L10`, dateLabel: `${team.meetingDay} · ${nextDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`, status: 'upcoming', facilitatorId: meeting.facilitatorId, attendeeIds: [...meeting.attendeeIds], lastRating: meeting.lastRating, agendaProgress: 0, agendaTotal: sections.length, idsSolved: 0, idsTotal: carriedIssueIds.length, recap: '', sectionNotes: {}, idsIssueIds: carriedIssueIds, createdTodoIds: [], idsNotes: [] };
+    const nextMeeting: MeetingRecord = { ...baseRecord(`meeting-${teamId}-${nextDate.toISOString().slice(0, 10)}-${Date.now()}`, 'meeting', teamId), kind: 'meeting', teamId, label: `${team.shortName} L10`, dateLabel: `${team.meetingDay} · ${nextDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`, weekStartDate: weekStartDateFor(nextDate), status: 'upcoming', facilitatorId: meeting.facilitatorId, attendeeIds: [...meeting.attendeeIds], lastRating: meeting.lastRating, agendaProgress: 0, agendaTotal: sections.length, idsSolved: 0, idsTotal: carriedIssueIds.length, recap: '', sectionNotes: {}, idsIssueIds: carriedIssueIds, createdTodoIds: [], idsNotes: [] };
     this.meetings.push(nextMeeting);
     this.recordAudit(actorId, 'Closed L10 meeting', meeting.id, recap || 'Meeting closed without a recap.', 'meeting');
     return clone(meeting);
@@ -1136,6 +1230,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       this.meetings.push({
         ...baseRecord(`meeting-${team.teamId}-current`, 'meeting', team.teamId),
         kind: 'meeting', teamId: team.teamId, label: `${team.shortName} L10`, dateLabel: `This week · ${team.meetingDay}`, status: 'upcoming',
+        weekStartDate: weekStartDateFor(new Date()),
         facilitatorId: team.escalationUserIds[0] ?? actorId, attendeeIds: [], lastRating: 0, agendaProgress: 0,
         agendaTotal: sections.length, idsSolved: 0, idsTotal: 0, recap: '', sectionNotes: {}, idsIssueIds: [], createdTodoIds: [], idsNotes: [],
       });
@@ -1305,6 +1400,8 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
       this.notifications = ofKind<NotificationRecord>('notification');
       this.messages = ofKind<TeamMessageRecord>('message');
       this.meetings = ofKind<MeetingRecord>('meeting');
+      this.metrics = ofKind<ScorecardMetricRecord>('scorecardMetric');
+      this.scorecardResults = ofKind<ScorecardResultRecord>('scorecardResult');
       this.audit = ofKind<AuditEventRecord>('auditEvent');
       this.settingsRecord = ofKind<IssueAgeSettingsRecord>('issueAgeSettings')[0];
       this.settings = this.settingsRecord ? { agingDays: this.settingsRecord.agingDays, staleDays: this.settingsRecord.staleDays, criticalDays: this.settingsRecord.criticalDays, version: this.settingsRecord.version } : clone(DEFAULT_ISSUE_AGE_SETTINGS);
@@ -1320,7 +1417,7 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
   }
 
   private allRecords(): WorkspaceRecord[] {
-    const records: WorkspaceRecord[] = [...this.teams, ...this.users, ...this.memberships, ...this.rocks, ...this.tasks, ...this.todos, ...this.issues, ...this.transfers, ...this.notifications, ...this.messages, ...this.meetings, ...this.audit];
+    const records: WorkspaceRecord[] = [...this.teams, ...this.users, ...this.memberships, ...this.rocks, ...this.tasks, ...this.todos, ...this.issues, ...this.transfers, ...this.notifications, ...this.messages, ...this.meetings, ...this.metrics, ...this.scorecardResults, ...this.audit];
     if (this.settingsRecord) records.push(this.settingsRecord);
     return records;
   }
@@ -1467,11 +1564,11 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
   }
 
   async getTeamWorkspace(teamId: string, userId: string): Promise<TeamWorkspace> {
-    const [team, membership, rocks, tasks, todos, issues, transfers, notifications, messages, meetings, settings] = await Promise.all([
+    const [team, membership, rocks, tasks, todos, issues, transfers, notifications, messages, meetings, metrics, scorecardResults, settings] = await Promise.all([
       this.orgRecords<TeamRecord>('team').then((items) => items.find((item) => item.teamId === teamId && item.active) ?? null),
       this.getTeamMembership(teamId, userId),
       this.teamRecords<RockRecord>(teamId, 'rock'), this.teamRecords<RockTaskRecord>(teamId, 'rockTask'), this.teamRecords<TodoRecord>(teamId, 'todo'), this.teamRecords<IssueRecord>(teamId, 'issue'), this.orgRecords<IssueTransferRecord>('issueTransfer'), this.orgRecords<NotificationRecord>('notification'),
-      this.orgRecords<TeamMessageRecord>('message'), this.teamRecords<MeetingRecord>(teamId, 'meeting'),
+      this.orgRecords<TeamMessageRecord>('message'), this.teamRecords<MeetingRecord>(teamId, 'meeting'), this.teamRecords<ScorecardMetricRecord>(teamId, 'scorecardMetric'), this.teamRecords<ScorecardResultRecord>(teamId, 'scorecardResult'),
       this.ageSettings(),
     ]);
     const leadership = await this.getLeadershipMembership(userId);
@@ -1481,7 +1578,8 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
     const teamTransfers = transfers.filter((transfer) => transfer.sourceTeamId === teamId || transfer.destinationTeamId === teamId);
     const teamNotifications = notifications.filter((notification) => notification.recipientUserId === userId && (!notification.teamId || notification.teamId === teamId));
     const teamMessages = messages.filter((message) => message.fromTeamId === teamId || message.toTeamId === teamId);
-    return this.publicValue({ environmentId: this.environmentId, team: clone(team), membership: membership ? { teamId, role: membership.role, active: membership.active } : null, dashboard: dashboardFor(teamId, rocks, todos, teamIssues), rocks: clone(rocks), tasks: clone(tasks), todos: clone(todos), issues: clone(teamIssues), transfers: clone(teamTransfers), notifications: clone(teamNotifications), messages: clone(teamMessages), meetings: clone(meetings), etag: etagFor([...rocks, ...tasks, ...todos, ...teamIssues, ...teamTransfers, ...teamMessages, ...meetings]) });
+    const normalizedMeetings = meetings.map((meeting) => ({ ...meeting, weekStartDate: meeting.weekStartDate ?? weekStartDateFor(new Date()) }));
+    return this.publicValue({ environmentId: this.environmentId, team: clone(team), membership: membership ? { teamId, role: membership.role, active: membership.active } : null, dashboard: dashboardFor(teamId, rocks, todos, teamIssues), rocks: clone(rocks), tasks: clone(tasks), todos: clone(todos), issues: clone(teamIssues), transfers: clone(teamTransfers), notifications: clone(teamNotifications), messages: clone(teamMessages), meetings: clone(normalizedMeetings), metrics: clone(metrics), scorecardResults: clone(scorecardResults), etag: etagFor([...rocks, ...tasks, ...todos, ...teamIssues, ...teamTransfers, ...teamMessages, ...normalizedMeetings, ...metrics, ...scorecardResults]) });
   }
 
   async getWorkspaceSnapshot(userId: string): Promise<WorkspaceSnapshot> {
@@ -1492,8 +1590,7 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
     const users = await this.orgRecords<UserProfile>('user');
     const memberships = await this.orgRecords<TeamMembership>('teamMembership');
     const settings = await this.ageSettings();
-    const [metrics, headlines, audit] = await Promise.all([
-      this.orgRecords<WorkspaceRecord & { kind: 'scorecardMetric'; label: string; target: string; actual: string; unit: string; ownerId: string; status: 'on-track' | 'off-track'; trend: 'up' | 'down' | 'flat'; trendLabel: string }>('scorecardMetric'),
+    const [headlines, audit] = await Promise.all([
       this.orgRecords<WorkspaceRecord & { kind: 'headline'; authorId: string; type: 'win' | 'concern'; title: string; detail: string; issueId?: string }>('headline'),
       this.orgRecords<AuditEventRecord>('auditEvent'),
     ]);
@@ -1506,8 +1603,11 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
     const notifications = unique(teamWorkspaces.flatMap((workspace) => workspace.notifications));
     const messages = unique(teamWorkspaces.flatMap((workspace) => workspace.messages));
     const meetings = unique(teamWorkspaces.flatMap((workspace) => workspace.meetings));
+    const metrics = unique(teamWorkspaces.flatMap((workspace) => workspace.metrics));
+    const quarterStart = '2026-07-01';
     const visibleTeamIds = new Set(teams.map((team) => team.teamId));
     const quarterEnd = new Date('2026-09-30T23:59:59Z').getTime();
+    const scorecardResults = unique(teamWorkspaces.flatMap((workspace) => workspace.scorecardResults)).filter((result) => result.weekStartDate >= quarterStart && result.weekStartDate <= '2026-09-30');
     return this.publicValue({
       environmentId: this.environmentId,
       user: clone((await this.getUser(userId))!),
@@ -1523,11 +1623,12 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
       notifications: clone(notifications),
       messages: clone(messages),
       meetings: clone(meetings),
-      metrics: clone(metrics.filter((metric) => visibleTeamIds.has(metric.teamId ?? ''))),
+      metrics: clone(metrics.filter((metric) => visibleTeamIds.has(metric.teamId))),
+      scorecardResults: clone(scorecardResults.filter((result) => visibleTeamIds.has(result.teamId))),
       headlines: clone(headlines.filter((headline) => visibleTeamIds.has(headline.teamId ?? ''))),
       audit: clone(audit),
       quarter: { id: '2026-q3', label: 'Q3 2026', theme: 'Make Q3 feel lighter.', startDate: '2026-07-01', endDate: '2026-09-30', daysRemaining: Math.max(0, Math.ceil((quarterEnd - Date.now()) / DAY)) },
-      etag: etagFor([...teams, ...users, ...memberships, ...rocks, ...tasks, ...todos, ...issues, ...transfers, ...notifications, ...messages, ...meetings, ...metrics, ...headlines, ...audit]),
+      etag: etagFor([...teams, ...users, ...memberships, ...rocks, ...tasks, ...todos, ...issues, ...transfers, ...notifications, ...messages, ...meetings, ...metrics, ...scorecardResults, ...headlines, ...audit]),
     });
   }
 
@@ -1563,7 +1664,9 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
   async updateRock(rockId: string, input: Partial<Pick<RockRecord, 'title' | 'description' | 'notes' | 'ownerId' | 'progress' | 'dueDate' | 'priority'>>, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateRock(rockId, input, actorId, expectedVersion)); }
   async updateTodoStatus(todoId: string, status: TodoRecord['status'], actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateTodoStatus(todoId, status, actorId, expectedVersion)); }
   async updateTodo(todoId: string, input: Partial<Pick<TodoRecord, 'title' | 'notes' | 'ownerId' | 'dueDate' | 'status'>>, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateTodo(todoId, input, actorId, expectedVersion)); }
-  async moveTodoForward(todoId: string, dueDate: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.moveTodoForward(todoId, dueDate, actorId, expectedVersion)); }
+  async createScorecardMetric(input: { teamId: string; label: string; target: string; unit: string; ownerId: string }, actorId: string) { return this.withMutation(actorId, () => super.createScorecardMetric(input, actorId)); }
+  async updateScorecardMetric(metricId: string, input: Partial<Pick<ScorecardMetricRecord, 'label' | 'target' | 'unit' | 'ownerId'>>, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateScorecardMetric(metricId, input, actorId, expectedVersion)); }
+  async upsertScorecardResult(metricId: string, weekStartDate: string, input: Pick<ScorecardResultRecord, 'actual' | 'status'>, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.upsertScorecardResult(metricId, weekStartDate, input, actorId, expectedVersion)); }
   async createIssue(input: { teamId: string; title: string; detail?: string; category?: string; priority?: number; horizon?: IssueRecord['horizon']; raisedById: string; ownerId?: string; linkedRockId?: string; idsNote?: string }, actorId: string) { return this.withMutation(actorId, () => super.createIssue(input, actorId)); }
   async updateIssue(issueId: string, input: Partial<Pick<IssueRecord, 'title' | 'detail' | 'category' | 'priority' | 'horizon' | 'ownerId' | 'idsNote'>>, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateIssue(issueId, input, actorId, expectedVersion)); }
   async addMeetingIssueNote(issueId: string, meetingId: string, note: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.addMeetingIssueNote(issueId, meetingId, note, actorId, expectedVersion)); }

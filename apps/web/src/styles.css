@@ -1002,6 +1002,12 @@ img { max-width: 100%; }
 
 .detail-panel-head .icon-button { margin-left: auto; }
 
+.detail-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+
+.detail-title-row h2 { flex: 1; min-width: 0; }
+
+.detail-title-row .button { flex: 0 0 auto; min-height: 36px; margin-top: 16px; padding: 0 12px; font-size: 12px; }
+
 .focus-category, .detail-category { color: #9c99b6; font-size: 12px; }
 
 .issue-detail-panel h2 { max-width: 610px; margin: 22px 0 11px; color: #32425c; font-size: 27px; font-weight: 750; letter-spacing: -0.04em; line-height: 1.25; }
@@ -1075,7 +1081,17 @@ img { max-width: 100%; }
 
 .last-updated { color: #8a98aa; font-size: 12px; }
 
-.scorecard-metric-row { grid-template-columns: minmax(170px, 1.3fr) minmax(170px, 1fr) minmax(105px, 0.7fr) auto 76px; padding: 0 24px; }
+.scorecard-week-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 20px; padding: 16px 20px; box-shadow: none; }
+
+.scorecard-week-toolbar > div:first-child { display: flex; flex-direction: column; gap: 5px; }
+
+.scorecard-week-toolbar strong { color: var(--navy); font-size: 16px; }
+
+.scorecard-week-toolbar small { color: var(--muted); font-size: 12px; }
+
+.scorecard-week-controls, .scorecard-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+
+.scorecard-metric-row { grid-template-columns: minmax(170px, 1.3fr) minmax(170px, 1fr) minmax(105px, 0.7fr) auto minmax(150px, auto); padding: 0 24px; }
 
 .scorecard-metric-row .metric-name { display: block; }
 
@@ -1084,6 +1100,12 @@ img { max-width: 100%; }
 .scorecard-metric-row .metric-name > strong { vertical-align: middle; }
 
 .scorecard-metric-row .metric-name small { margin-left: 15px; }
+
+.metric-edit-button { min-height: 0; margin-left: 8px; padding: 0; font-size: 11px; }
+
+.missing-result-pill { display: inline-flex; align-items: center; padding: 6px 8px; border-radius: 6px; color: #728097; background: #f0f3f7; font-size: 11px; font-weight: 800; line-height: 1; white-space: nowrap; }
+
+.metric-missing { background: #aab4c2; }
 
 .metric-trend { display: flex; align-items: center; gap: 5px; color: #8a98aa; font-size: 12px; white-space: nowrap; }
 
@@ -1401,8 +1423,10 @@ img { max-width: 100%; }
   .company-filters { grid-template-columns: repeat(3, 1fr); }
   .company-table-row { grid-template-columns: 30px minmax(150px, 1fr) minmax(120px, 0.75fr) auto; }
   .company-table-row > .status-pill { display: none; }
-  .scorecard-metric-row { grid-template-columns: minmax(150px, 1.2fr) minmax(120px, 1fr) auto; }
+  .scorecard-metric-row { grid-template-columns: minmax(150px, 1.3fr) minmax(130px, 1fr) auto; min-height: 90px; padding-top: 10px; padding-bottom: 10px; }
   .scorecard-metric-row .metric-trend, .scorecard-metric-row .row-action-small { display: none; }
+  .scorecard-metric-row > .status-pill, .scorecard-metric-row > .missing-result-pill { grid-column: 3; grid-row: 1; justify-self: end; }
+  .scorecard-metric-row > .scorecard-row-actions { grid-column: 2 / -1; grid-row: 2; }
   .rock-sheet-list { grid-template-columns: 1fr; }
   .company-rollup-grid { grid-template-columns: repeat(2, 1fr); }
   .messages-layout { grid-template-columns: 1fr; }
@@ -1448,13 +1472,21 @@ img { max-width: 100%; }
   .issues-workbench { margin-top: 14px; }
   .issue-detail-panel { padding: 24px 19px; }
   .issue-detail-panel h2 { font-size: 22px; }
+  .detail-title-row { display: block; }
+  .detail-title-row .button { margin-top: 0; }
   .issue-detail-meta, .issue-provenance { align-items: flex-start; flex-direction: column; }
+  .scorecard-week-toolbar { align-items: stretch; flex-direction: column; }
+  .scorecard-week-controls { width: 100%; }
+  .scorecard-week-controls .button { flex: 1; }
   .scorecard-hero { align-items: flex-start; gap: 13px; padding: 22px; }
   .scorecard-orbit { width: 74px; height: 74px; border-width: 6px; }
   .scorecard-orbit span { font-size: 15px; }
   .scorecard-hero h2 { font-size: 20px; }
-  .scorecard-metric-row { grid-template-columns: minmax(0, 1fr) auto; padding: 0 17px; }
+  .metric-row.scorecard-metric-row { grid-template-columns: minmax(0, 1fr) auto; min-height: 95px; padding: 12px 17px; }
   .scorecard-metric-row .metric-values { display: none; }
+  .scorecard-metric-row .metric-trend { display: none; }
+  .scorecard-metric-row > .status-pill, .scorecard-metric-row > .missing-result-pill { grid-column: 2; grid-row: 1; align-self: start; }
+  .scorecard-metric-row > .scorecard-row-actions { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; }
   .admin-side { grid-template-columns: 1fr; }
   .inline-form { align-items: stretch; flex-direction: column; }
   .inline-form .button { width: 100%; }

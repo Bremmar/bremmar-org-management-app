@@ -76,8 +76,26 @@ operational work has been resolved or moved.
   checks for optimistic concurrency.
 - Rock, Issue, and To-Do detail edits are versioned. IDS notes are stored both on
   the meeting note record and as an append-only labeled entry on the Issue.
-- A To-Do moved forward four times is flagged and converted once into a linked
-  short-term Issue. The original To-Do remains visible for provenance.
+- Scorecard measurable definitions (`scorecardMetric`) and weekly results
+  (`scorecardResult`) are team-scoped records in the owning `team:{teamId}`
+  partition. Definitions keep the fixed target, unit, and accountable owner;
+  results are keyed by `metricId + weekStartDate`, store the actual and
+  explicitly selected status, and carry the derived trend. Workspace snapshots
+  include definitions for authorized teams and only bounded current-quarter
+  weekly results.
+- TeamLead, Member, and existing OrgAdmin memberships can edit scorecard
+  definitions and weekly results. Viewer memberships and Leadership-only
+  visibility can read them but cannot write them. Grouping-only nodes cannot
+  own scorecard measurables.
+- A To-Do due-date edit is the rollover action: when incomplete work receives a
+  later date, the API increments `carryForwardCount`, reopens it, synchronizes
+  any linked Rock Task, and flags/converts it once on the fourth rollover. An
+  unchanged or earlier date is an ordinary edit, and completed To-Dos never
+  accrue rollovers. The original To-Do remains visible for provenance.
+- Meetings carry an ISO Monday-start `weekStartDate`. New meetings set it at
+  creation; legacy records receive a non-destructive current-week fallback
+  during normalization. L10 Scorecard content and meeting recaps use only the
+  result matching that week key.
 - An Issue counted in IDS for three closed meetings is scheduled to escalate in
   seven days. At the due point it routes through the team’s configured hierarchy
   and notifies the current recipient; an unresolved next level can be routed
@@ -108,7 +126,14 @@ The Functions API exposes typed server contracts for:
 - Rock, Rock Task, To-Do, Issue, IDS, and Task-to-To-Do routes.
 - Team message send/read/convert-to-Issue routes and meeting IDS-note/close
   routes.
-- To-Do move-forward route, including rollover conversion behavior.
+- Weekly Scorecard routes:
+  - `POST /api/teams/{teamId}/scorecard/metrics` creates a team measurable.
+  - `PATCH /api/scorecard/metrics/{metricId}` edits its definition.
+  - `PUT /api/scorecard/metrics/{metricId}/weeks/{weekStartDate}` upserts one
+    Monday-start weekly actual and selected status, using `If-Match` for
+    existing result versions.
+- To-Do due-date rollover is handled by `PATCH /api/todos/{todoId}`; there is
+  no separate move-forward endpoint or control.
 - Issue transfer request, accept, reject, and cancel routes.
 - Platform administration routes for teams, users, memberships, aging settings,
   L10 section configuration, and escalation hierarchies.

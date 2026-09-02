@@ -40,6 +40,26 @@ If Azure Functions Core Tools is installed, copy
 `LOCAL_POC_MODE=true` for local development, build the API, and run it with
 `func start --script-root apps/api`.
 
+## Weekly scorecards and To-Do rollover
+
+Scorecard definitions and Monday-start weekly results are stored in the owning
+Cosmos `team:{teamId}` partition. The API exposes:
+
+- `POST /api/teams/{teamId}/scorecard/metrics`
+- `PATCH /api/scorecard/metrics/{metricId}`
+- `PUT /api/scorecard/metrics/{metricId}/weeks/{weekStartDate}`
+
+TeamLead, Member, and existing OrgAdmin team access can write these records;
+Viewer and Leadership-only access is read-only. L10 reads the result matching
+the meeting’s `weekStartDate`, while the Scorecard screen owns weekly entry and
+history. Teams with the Scorecard section disabled have no Scorecard navigation
+or L10 Scorecard content until an administrator enables it.
+
+Changing an incomplete To-Do’s due date to a later date automatically reopens it,
+increments its rollover count, synchronizes a linked Rock Task, and creates the
+linked IDS Issue on the fourth rollover. Completed, unchanged, and earlier-date
+edits do not count. There is no separate move-forward endpoint or button.
+
 ## Validation
 
 ```bash

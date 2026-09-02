@@ -23,6 +23,7 @@ export type RecordKind =
   | 'issue'
   | 'issueTransfer'
   | 'scorecardMetric'
+  | 'scorecardResult'
   | 'headline'
   | 'notification'
   | 'message'
@@ -39,6 +40,8 @@ export type IssueAgeBand = 'fresh' | 'aging' | 'stale' | 'critical';
 export type IssueTransferStatus = 'pending' | 'accepted' | 'rejected' | 'cancelled';
 export type NotificationType = 'issue-transfer-requested' | 'issue-transfer-decided' | 'team-message' | 'issue-escalation' | 'system';
 export type MessageStatus = 'unread' | 'read' | 'converted';
+export type ScorecardStatus = 'on-track' | 'off-track';
+export type ScorecardTrend = 'up' | 'down' | 'flat';
 export type EscalationState = 'not-scheduled' | 'scheduled' | 'due' | 'escalated';
 export type MeetingSection = 'segue' | 'scorecard' | 'rock-review' | 'headlines' | 'todo-review' | 'ids' | 'conclude';
 
@@ -227,6 +230,8 @@ export interface MeetingRecord extends WorkspaceRecord {
   teamId: string;
   label: string;
   dateLabel: string;
+  /** ISO Monday-start week used to match this meeting to Scorecard results. */
+  weekStartDate: string;
   status: 'upcoming' | 'in-progress' | 'closed';
   facilitatorId: string;
   attendeeIds: string[];
@@ -242,6 +247,26 @@ export interface MeetingRecord extends WorkspaceRecord {
   idsIssueIds: string[];
   createdTodoIds: string[];
   idsNotes: MeetingIssueNoteRecord[];
+}
+
+export interface ScorecardMetricRecord extends WorkspaceRecord {
+  kind: 'scorecardMetric';
+  teamId: string;
+  label: string;
+  target: string;
+  unit: string;
+  ownerId: string;
+}
+
+export interface ScorecardResultRecord extends WorkspaceRecord {
+  kind: 'scorecardResult';
+  teamId: string;
+  metricId: string;
+  weekStartDate: string;
+  actual: string;
+  status: ScorecardStatus;
+  trend: ScorecardTrend;
+  trendLabel: string;
 }
 
 export interface IssueAgeSettings {
@@ -297,6 +322,8 @@ export interface TeamWorkspace {
   notifications: NotificationRecord[];
   messages: TeamMessageRecord[];
   meetings: MeetingRecord[];
+  metrics: ScorecardMetricRecord[];
+  scorecardResults: ScorecardResultRecord[];
   etag: string;
 }
 
@@ -315,7 +342,8 @@ export interface WorkspaceSnapshot {
   notifications: NotificationRecord[];
   messages: TeamMessageRecord[];
   meetings: MeetingRecord[];
-  metrics: Array<WorkspaceRecord & { kind: 'scorecardMetric'; label: string; target: string; actual: string; unit: string; ownerId: string; status: 'on-track' | 'off-track'; trend: 'up' | 'down' | 'flat'; trendLabel: string }>;
+  metrics: ScorecardMetricRecord[];
+  scorecardResults: ScorecardResultRecord[];
   headlines: Array<WorkspaceRecord & { kind: 'headline'; authorId: string; type: 'win' | 'concern'; title: string; detail: string; issueId?: string }>;
   audit: AuditEventRecord[];
   quarter: { id: string; label: string; theme: string; startDate: string; endDate: string; daysRemaining: number };
@@ -358,6 +386,26 @@ export function meetingSectionsFor(team: Pick<TeamRecord, 'meetingSections'>): M
 }
 
 export const partitionFor = (scope: 'org' | 'team', id: string) => scope === 'org' ? 'org' : `team:${id}`;
+
+export function weekStartDateFor(value: string | Date = new Date()) {
+  const dateValue = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T12:00:00Z` : value;
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) throw new Error('Invalid date.');
+  const day = date.getUTCDay();
+  const daysFromMonday = day === 0 ? -6 : 1 - day;
+  date.setUTCDate(date.getUTCDate() + daysFromMonday);
+  return date.toISOString().slice(0, 10);
+}
+
+export function scorecardTrendFor(actual: string, priorActual?: string): { trend: ScorecardTrend; trendLabel: string } {
+  const current = Number(actual.trim().replace(/%$/, ''));
+  const prior = priorActual === undefined ? Number.NaN : Number(priorActual.trim().replace(/%$/, ''));
+  if (!Number.isFinite(current) || !Number.isFinite(prior)) return { trend: 'flat', trendLabel: 'No comparable prior result' };
+  const delta = current - prior;
+  if (delta === 0) return { trend: 'flat', trendLabel: 'No change vs prior week' };
+  const formatted = Number.isInteger(delta) ? String(delta) : delta.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+  return { trend: delta > 0 ? 'up' : 'down', trendLabel: `${delta > 0 ? '+' : ''}${formatted} vs prior week` };
+}
 
 export function canWriteTeam(role: UserRole | TeamRole) {
   return role === 'OrgAdmin' || role === 'TeamLead' || role === 'Member';

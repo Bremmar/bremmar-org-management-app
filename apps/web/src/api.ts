@@ -1,5 +1,5 @@
 import { defaultAgeBand, initialWorkspace, testWorkspace } from './data';
-import { meetingSectionsFor } from './types';
+import { meetingSectionsFor, scorecardTrendFor, weekStartDateFor } from './types';
 import type {
   CompanyOverview,
   EnvironmentAccess,
@@ -21,6 +21,7 @@ import type {
   RockTask,
   RockTaskStatus,
   ScorecardMetric,
+  ScorecardResult,
   Team,
   TeamMembership,
   TeamNodeType,
@@ -55,8 +56,10 @@ export interface WorkspaceApi {
   convertRockTaskToTodo(taskId: string): Promise<Workspace>;
   updateTodoStatus(todoId: string, status: TodoStatus, expectedVersion?: number): Promise<Workspace>;
   updateTodo(todoId: string, input: Partial<Pick<Todo, 'title' | 'notes' | 'ownerId' | 'dueDate' | 'status'>>, expectedVersion?: number): Promise<Workspace>;
-  moveTodoForward(todoId: string, dueDate: string, expectedVersion?: number): Promise<Workspace>;
   addTodo(input: Pick<Todo, 'title' | 'ownerId' | 'dueDate' | 'teamId'> & { notes?: string; linkedRockTaskId?: string }): Promise<Workspace>;
+  createScorecardMetric(input: Pick<ScorecardMetric, 'teamId' | 'label' | 'target' | 'unit' | 'ownerId'>): Promise<Workspace>;
+  updateScorecardMetric(metricId: string, input: Partial<Pick<ScorecardMetric, 'label' | 'target' | 'unit' | 'ownerId'>>, expectedVersion?: number): Promise<Workspace>;
+  upsertScorecardResult(metricId: string, weekStartDate: string, input: Pick<ScorecardResult, 'actual' | 'status'>, expectedVersion?: number): Promise<Workspace>;
   startIssue(issueId: string): Promise<Workspace>;
   solveIssue(issueId: string): Promise<Workspace>;
   addIssue(input: Pick<Issue, 'title' | 'detail' | 'category' | 'teamId' | 'raisedById'> & { horizon?: IssueHorizon; priority?: number; ownerId?: string; linkedRockId?: string; idsNote?: string }): Promise<Workspace>;
@@ -121,14 +124,18 @@ function meetingRecap(workspace: Workspace, team: Team, meeting: Workspace['meet
   const todos = workspace.todos.filter((todo) => todo.teamId === team.id);
   const issues = workspace.issues.filter((issue) => issue.teamId === team.id && issue.assignmentState !== 'redirected');
   const ids = meeting.idsIssueIds.map((id) => issues.find((issue) => issue.id === id)).filter((issue): issue is Issue => Boolean(issue));
-  const lines = [`${team.name} L10 recap · ${meeting.dateLabel}`, ''];
+  const lines = [`${team.name} L10 recap · ${meeting.dateLabel} · week of ${meeting.weekStartDate ?? weekStartDateFor(new Date())}`, ''];
   for (const section of sections) {
     const note = meeting.sectionNotes[section.id]?.trim();
     if (note) lines.push(`${section.label}: ${note}`);
   }
   if (sections.some((section) => section.id === 'scorecard')) {
-    const offTrack = workspace.metrics.filter((metric) => metric.teamId === team.id && metric.status === 'off-track').map((metric) => metric.label);
-    lines.push(`Scorecard: ${offTrack.length ? `off-track — ${offTrack.join(', ')}` : 'all visible measurables on track.'}`);
+    const week = meeting.weekStartDate ?? weekStartDateFor(new Date());
+    const teamMetrics = workspace.metrics.filter((metric) => metric.teamId === team.id);
+    const results = teamMetrics.map((metric) => ({ metric, result: workspace.scorecardResults.find((candidate) => candidate.metricId === metric.id && candidate.weekStartDate === week) }));
+    const offTrack = results.filter(({ result }) => result?.status === 'off-track').map(({ metric, result }) => `${metric.label} (${result?.actual ?? 'Not entered'})`);
+    const missing = results.filter(({ result }) => !result).map(({ metric }) => metric.label);
+    lines.push(`Scorecard: ${offTrack.length ? `off-track — ${offTrack.join(', ')}` : missing.length ? `not entered — ${missing.join(', ')}` : 'all visible measurables on track.'}`);
   }
   lines.push(`Rock Review: ${rocks.length ? rocks.map((rock) => `${rock.title} (${rock.progress}% · ${rock.status})`).join('; ') : 'no Rocks recorded.'}`);
   lines.push(`Headlines: ${workspace.headlines.filter((headline) => headline.teamId === team.id).map((headline) => headline.title).join('; ') || 'none recorded.'}`);
@@ -265,10 +272,11 @@ export class LocalWorkspaceApi implements WorkspaceApi {
       memberCount: this.workspace.memberships.filter((membership) => membership.teamId === team.id && membership.active).length,
     }));
     this.workspace.todos = this.workspace.todos.map((todo) => ({ ...todo, carryForwardCount: todo.carryForwardCount ?? 0, flagged: todo.flagged ?? false, isMine: todo.ownerId === this.workspace.currentUser.id }));
+    this.workspace.scorecardResults = this.workspace.scorecardResults ?? [];
     this.workspace.meetings = this.workspace.meetings.map((meeting) => {
       const team = this.workspace.teams.find((candidate) => candidate.id === meeting.teamId);
       const sections = team ? meetingSectionsFor(team) : meetingSectionsFor({ meetingSections: [] });
-      return { ...meeting, agendaTotal: sections.length, sectionNotes: meeting.sectionNotes ?? {}, idsIssueIds: meeting.idsIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: meeting.idsNotes ?? [] };
+      return { ...meeting, weekStartDate: meeting.weekStartDate ?? weekStartDateFor(new Date()), agendaTotal: sections.length, sectionNotes: meeting.sectionNotes ?? {}, idsIssueIds: meeting.idsIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: meeting.idsNotes ?? [] };
     });
   }
 
@@ -469,44 +477,30 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const todo = this.todo(todoId);
     this.requireWrite(todo.teamId);
     this.requireVersion(todo.version, expectedVersion);
-    Object.assign(todo, input, { updatedAt: nowIso(), version: todo.version + 1 });
+    if (input.dueDate !== undefined && (!/^\d{4}-\d{2}-\d{2}$/.test(input.dueDate) || Number.isNaN(new Date(`${input.dueDate}T12:00:00Z`).getTime()))) throw new WorkspaceApiError('VALIDATION', 'Choose a valid due date.');
+    if (input.status !== undefined && !['open', 'done', 'not-done'].includes(input.status)) throw new WorkspaceApiError('VALIDATION', 'Choose a valid To-Do status.');
+    const isLaterDate = input.dueDate !== undefined && input.dueDate > todo.dueDate;
+    const isRollover = todo.status !== 'done' && isLaterDate;
+    const timestamp = nowIso();
+    const nextInput = isRollover ? { ...input, status: 'open' as const } : input;
+    if (isRollover) {
+      todo.carryForwardCount += 1;
+      todo.flagged = todo.carryForwardCount > 3;
+    }
+    Object.assign(todo, nextInput, { updatedAt: timestamp, version: todo.version + 1 });
     if (todo.linkedRockTaskId) {
       const linked = this.task(todo.linkedRockTaskId);
       this.requireWrite(linked.rock.teamId);
-      if (input.status) linked.task.status = input.status === 'done' ? 'done' : 'open';
+      if (isRollover) linked.task.status = 'open';
+      else if (input.status) linked.task.status = input.status === 'done' ? 'done' : 'open';
       if (input.ownerId) linked.task.assigneeId = input.ownerId;
       if (input.dueDate) linked.task.dueDate = input.dueDate;
-      linked.task.updatedAt = nowIso();
-      linked.task.version += 1;
-      linked.rock.updatedAt = nowIso();
-      linked.rock.version += 1;
-    }
-    return this.result();
-  }
-
-  async moveTodoForward(todoId: string, dueDate: string, expectedVersion?: number) {
-    const todo = this.todo(todoId);
-    this.requireWrite(todo.teamId);
-    this.requireVersion(todo.version, expectedVersion);
-    if (todo.status === 'done') throw new WorkspaceApiError('VALIDATION', 'Completed To-Dos do not need to be moved forward.');
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) throw new WorkspaceApiError('VALIDATION', 'Choose a valid future due date.');
-    const timestamp = nowIso();
-    todo.dueDate = dueDate;
-    todo.status = 'open';
-    todo.carryForwardCount += 1;
-    todo.flagged = todo.carryForwardCount > 3;
-    todo.updatedAt = timestamp;
-    todo.version += 1;
-    if (todo.linkedRockTaskId) {
-      const linked = this.task(todo.linkedRockTaskId);
-      linked.task.dueDate = dueDate;
-      linked.task.status = 'open';
       linked.task.updatedAt = timestamp;
       linked.task.version += 1;
       linked.rock.updatedAt = timestamp;
       linked.rock.version += 1;
     }
-    if (todo.flagged && !todo.convertedIssueId) {
+    if (isRollover && todo.flagged && !todo.convertedIssueId) {
       const issueId = `issue-todo-rollover-${todo.id}`;
       const issue: Issue = {
         id: issueId,
@@ -535,9 +529,79 @@ export class LocalWorkspaceApi implements WorkspaceApi {
       this.workspace.issues.unshift(issue);
       todo.convertedIssueId = issueId;
       this.audit('Converted repeated To-Do to Issue', issueId, `${todo.title} moved forward ${todo.carryForwardCount} times.`, 'issue');
-    } else {
+    } else if (isRollover) {
       this.audit('Moved To-Do forward', todo.id, `${todo.title} moved to ${todo.dueDate} (${todo.carryForwardCount} times).`, 'todo');
     }
+    return this.result();
+  }
+
+  private metric(metricId: string) {
+    const metric = this.workspace.metrics.find((item) => item.id === metricId);
+    if (!metric) throw new WorkspaceApiError('NOT_FOUND', 'Measurable not found.');
+    this.requireRead(metric.teamId);
+    return metric;
+  }
+
+  private validateScorecardOwner(teamId: string, ownerId: string) {
+    if (!this.workspace.users.some((user) => user.id === ownerId && user.active)) throw new WorkspaceApiError('VALIDATION', 'Measurable owner not found.');
+    if (!this.workspace.memberships.some((membership) => membership.teamId === teamId && membership.userId === ownerId && membership.active)) throw new WorkspaceApiError('VALIDATION', 'Measurable owner must be an active member of the team.');
+  }
+
+  private validateScorecardWeek(weekStartDate: string) {
+    try {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(weekStartDate) || weekStartDateFor(weekStartDate) !== weekStartDate) throw new WorkspaceApiError('VALIDATION', 'Week start must be a valid Monday date.');
+    } catch (error) {
+      if (error instanceof WorkspaceApiError) throw error;
+      throw new WorkspaceApiError('VALIDATION', 'Week start must be a valid Monday date.');
+    }
+  }
+
+  async createScorecardMetric(input: Pick<ScorecardMetric, 'teamId' | 'label' | 'target' | 'unit' | 'ownerId'>) {
+    this.requireWrite(input.teamId);
+    const team = this.workspace.teams.find((candidate) => candidate.id === input.teamId && candidate.active);
+    if (!team) throw new WorkspaceApiError('NOT_FOUND', 'Team not found.');
+    if (team.nodeType !== 'operational') throw new WorkspaceApiError('VALIDATION', 'Grouping-only teams cannot own measurables.');
+    if (!input.label.trim() || !input.target.trim() || !input.unit.trim()) throw new WorkspaceApiError('VALIDATION', 'Label, target, and unit are required.');
+    this.validateScorecardOwner(input.teamId, input.ownerId);
+    const timestamp = nowIso();
+    const metric: ScorecardMetric = { id: `metric-${slugify(input.label)}-${Date.now()}`, teamId: input.teamId, label: input.label.trim(), target: input.target.trim(), unit: input.unit.trim(), ownerId: input.ownerId, createdAt: timestamp, updatedAt: timestamp, version: 1 };
+    this.workspace.metrics.push(metric);
+    this.audit('Created Scorecard measurable', metric.id, metric.label, 'team');
+    return this.result();
+  }
+
+  async updateScorecardMetric(metricId: string, input: Partial<Pick<ScorecardMetric, 'label' | 'target' | 'unit' | 'ownerId'>>, expectedVersion?: number) {
+    const metric = this.metric(metricId);
+    this.requireWrite(metric.teamId);
+    this.requireVersion(metric.version, expectedVersion);
+    if (input.label !== undefined && !input.label.trim()) throw new WorkspaceApiError('VALIDATION', 'Measurable label is required.');
+    if (input.target !== undefined && !input.target.trim()) throw new WorkspaceApiError('VALIDATION', 'Measurable target is required.');
+    if (input.unit !== undefined && !input.unit.trim()) throw new WorkspaceApiError('VALIDATION', 'Measurable unit is required.');
+    if (input.ownerId !== undefined) this.validateScorecardOwner(metric.teamId, input.ownerId);
+    Object.assign(metric, { ...input, label: input.label?.trim() ?? metric.label, target: input.target?.trim() ?? metric.target, unit: input.unit?.trim() ?? metric.unit, updatedAt: nowIso(), version: metric.version + 1 });
+    this.audit('Updated Scorecard measurable', metric.id, metric.label, 'team');
+    return this.result();
+  }
+
+  async upsertScorecardResult(metricId: string, weekStartDate: string, input: Pick<ScorecardResult, 'actual' | 'status'>, expectedVersion?: number) {
+    const metric = this.metric(metricId);
+    this.requireWrite(metric.teamId);
+    this.validateScorecardWeek(weekStartDate);
+    if (typeof input.actual !== 'string' || !input.actual.trim()) throw new WorkspaceApiError('VALIDATION', 'Actual value is required.');
+    if (!['on-track', 'off-track'].includes(input.status)) throw new WorkspaceApiError('VALIDATION', 'Choose a valid measurable status.');
+    const result = this.workspace.scorecardResults.find((candidate) => candidate.metricId === metricId && candidate.weekStartDate === weekStartDate);
+    const priorWeek = weekStartDateFor(new Date(new Date(`${weekStartDate}T12:00:00Z`).getTime() - 7 * DAY));
+    const prior = this.workspace.scorecardResults.find((candidate) => candidate.metricId === metricId && candidate.weekStartDate === priorWeek);
+    const trend = scorecardTrendFor(input.actual, prior?.actual);
+    const timestamp = nowIso();
+    if (result) {
+      this.requireVersion(result.version, expectedVersion);
+      Object.assign(result, { actual: input.actual.trim(), status: input.status, ...trend, updatedAt: timestamp, version: result.version + 1 });
+    } else {
+      if (expectedVersion !== undefined) throw new WorkspaceApiError('CONFLICT', 'This weekly result does not exist yet. Refresh and try again.');
+      this.workspace.scorecardResults.push({ id: `result-${metricId}-${weekStartDate}`, metricId, teamId: metric.teamId, weekStartDate, actual: input.actual.trim(), status: input.status, ...trend, createdAt: timestamp, updatedAt: timestamp, version: 1 });
+    }
+    this.audit('Updated Scorecard result', result?.id ?? `result-${metricId}-${weekStartDate}`, `${metric.label} · ${weekStartDate}`, 'team');
     return this.result();
   }
 
@@ -793,7 +857,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const team: Team = { ...input, id, meetingSections: input.meetingSections ?? meetingSectionsFor({ meetingSections: [] }), escalationUserIds: input.escalationUserIds ?? [], memberCount: 0, active: true };
     this.workspace.teams.push(team);
     if (team.nodeType === 'operational') {
-      this.workspace.meetings.push({ id: `meeting-${team.id}-current`, teamId: team.id, label: `${team.shortName} L10`, dateLabel: `This week · ${team.meetingDay}`, status: 'upcoming', facilitatorId: team.escalationUserIds[0] ?? this.workspace.currentUser.id, attendeeIds: [], lastRating: 0, agendaProgress: 0, agendaTotal: meetingSectionsFor(team).length, idsSolved: 0, idsTotal: 0, recap: '', startedAt: undefined, closedAt: undefined, sectionNotes: {}, idsIssueIds: [], createdTodoIds: [], idsNotes: [], } as Workspace['meetings'][number]);
+      this.workspace.meetings.push({ id: `meeting-${team.id}-current`, teamId: team.id, label: `${team.shortName} L10`, dateLabel: `This week · ${team.meetingDay}`, weekStartDate: weekStartDateFor(new Date()), status: 'upcoming', facilitatorId: team.escalationUserIds[0] ?? this.workspace.currentUser.id, attendeeIds: [], lastRating: 0, agendaProgress: 0, agendaTotal: meetingSectionsFor(team).length, idsSolved: 0, idsTotal: 0, recap: '', startedAt: undefined, closedAt: undefined, sectionNotes: {}, idsIssueIds: [], createdTodoIds: [], idsNotes: [], } as Workspace['meetings'][number]);
     }
     this.audit('Created team', id, input.name, 'team');
     return this.result();
@@ -870,7 +934,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     advanceIssueEscalations(this.workspace, activeTeam, meeting, timestamp, this.notify.bind(this));
     const nextDate = new Date(new Date(timestamp).getTime() + 7 * DAY);
     const carriedIssueIds = meeting.idsIssueIds.filter((issueId) => this.workspace.issues.find((issue) => issue.id === issueId)?.status !== 'solved');
-    const nextMeeting: Workspace['meetings'][number] = { id: `meeting-${activeTeam.id}-${nextDate.toISOString().slice(0, 10)}-${Date.now()}`, teamId: activeTeam.id, label: `${activeTeam.shortName} L10`, dateLabel: `${activeTeam.meetingDay} · ${nextDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`, status: 'upcoming', facilitatorId: activeTeam.escalationUserIds[0] ?? meeting.facilitatorId, attendeeIds: [...meeting.attendeeIds], lastRating: meeting.lastRating, agendaProgress: 0, agendaTotal: sections.length, idsSolved: 0, idsTotal: carriedIssueIds.length, recap: '', sectionNotes: {}, idsIssueIds: carriedIssueIds, createdTodoIds: [], idsNotes: [] };
+    const nextMeeting: Workspace['meetings'][number] = { id: `meeting-${activeTeam.id}-${nextDate.toISOString().slice(0, 10)}-${Date.now()}`, teamId: activeTeam.id, label: `${activeTeam.shortName} L10`, dateLabel: `${activeTeam.meetingDay} · ${nextDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`, weekStartDate: weekStartDateFor(nextDate), status: 'upcoming', facilitatorId: activeTeam.escalationUserIds[0] ?? meeting.facilitatorId, attendeeIds: [...meeting.attendeeIds], lastRating: meeting.lastRating, agendaProgress: 0, agendaTotal: sections.length, idsSolved: 0, idsTotal: carriedIssueIds.length, recap: '', sectionNotes: {}, idsIssueIds: carriedIssueIds, createdTodoIds: [], idsNotes: [] };
     this.workspace.meetings.push(nextMeeting);
     this.audit('Closed L10 meeting', meeting.id, recap || 'Meeting closed without a recap.', 'meeting');
     return this.result();
@@ -893,6 +957,7 @@ type ApiSnapshot = {
   messages: TeamMessage[];
   meetings: Workspace['meetings'];
   metrics: ScorecardMetric[];
+  scorecardResults: ScorecardResult[];
   headlines: Workspace['headlines'];
   audit: Array<{ id: string; actorId: string; action: string; target: string; detail: string; createdAt: string; eventType?: string; type?: string }>;
   quarter: QuarterDto;
@@ -932,6 +997,7 @@ function mapSnapshot(snapshot: ApiSnapshot): Workspace {
     transfers: snapshot.transfers,
     notifications: snapshot.notifications,
     metrics: snapshot.metrics,
+    scorecardResults: snapshot.scorecardResults ?? [],
     headlines: snapshot.headlines,
     meetings: snapshot.meetings,
     activity: snapshot.audit.map((event) => ({ id: event.id, actorId: event.actorId, action: event.action, target: event.target, detail: event.detail, createdAt: event.createdAt, type: (event.type ?? event.eventType) === 'admin' ? 'team' : (event.type ?? event.eventType ?? 'team') as Workspace['activity'][number]['type'] })),
@@ -998,8 +1064,10 @@ export class HttpWorkspaceApi implements WorkspaceApi {
   async convertRockTaskToTodo(taskId: string) { return this.mutate(`/rock-tasks/${taskId}/todo`, 'POST'); }
   async updateTodoStatus(todoId: string, status: TodoStatus, expectedVersion?: number) { return this.mutate(`/todos/${todoId}/status`, 'PATCH', { status }, expectedVersion); }
   async updateTodo(todoId: string, input: Partial<Pick<Todo, 'title' | 'notes' | 'ownerId' | 'dueDate' | 'status'>>, expectedVersion?: number) { return this.mutate(`/todos/${todoId}`, 'PATCH', input, expectedVersion); }
-  async moveTodoForward(todoId: string, dueDate: string, expectedVersion?: number) { return this.mutate(`/todos/${todoId}/move-forward`, 'POST', { dueDate }, expectedVersion); }
   async addTodo(input: Pick<Todo, 'title' | 'ownerId' | 'dueDate' | 'teamId'> & { notes?: string; linkedRockTaskId?: string }) { return this.mutate(`/teams/${input.teamId}/todos`, 'POST', input); }
+  async createScorecardMetric(input: Pick<ScorecardMetric, 'teamId' | 'label' | 'target' | 'unit' | 'ownerId'>) { return this.mutate(`/teams/${input.teamId}/scorecard/metrics`, 'POST', input); }
+  async updateScorecardMetric(metricId: string, input: Partial<Pick<ScorecardMetric, 'label' | 'target' | 'unit' | 'ownerId'>>, expectedVersion?: number) { return this.mutate(`/scorecard/metrics/${metricId}`, 'PATCH', input, expectedVersion); }
+  async upsertScorecardResult(metricId: string, weekStartDate: string, input: Pick<ScorecardResult, 'actual' | 'status'>, expectedVersion?: number) { return this.mutate(`/scorecard/metrics/${metricId}/weeks/${weekStartDate}`, 'PUT', input, expectedVersion); }
   async startIssue(issueId: string) { return this.mutate(`/issues/${issueId}/ids`, 'POST'); }
   async solveIssue(issueId: string) { return this.mutate(`/issues/${issueId}/solve`, 'POST'); }
   async addIssue(input: Pick<Issue, 'title' | 'detail' | 'category' | 'teamId' | 'raisedById'> & { horizon?: IssueHorizon; priority?: number; ownerId?: string; linkedRockId?: string; idsNote?: string }) { return this.mutate(`/teams/${input.teamId}/issues`, 'POST', input); }
