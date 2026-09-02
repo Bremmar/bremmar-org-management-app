@@ -31,6 +31,10 @@ jobs:
         run: npm ci
 
       - name: Build frontend
+        env:
+          # Production and preview deployments use the authenticated API;
+          # the local seeded adapter is opt-in for developer workstations.
+          VITE_LOCAL_POC_MODE: 'false'
         run: npm run build:web
 
       - name: Get ID token

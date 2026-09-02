@@ -1,21 +1,22 @@
 import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } from '@azure/functions';
-import { getClientPrincipal } from '../auth.js';
-import { assertTeamMember, repository } from '../data/repository.js';
+import { isResponse, repositoryErrorResponse, requestScope } from './http.js';
 
 async function teamDashboardHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
-  const principal = getClientPrincipal(request);
-  if (!principal) return { status: 401, jsonBody: { error: 'Authentication required' } };
+  const scope = await requestScope(request);
+  if (isResponse(scope)) return scope;
+  const { principal, repository } = scope;
 
   const teamId = request.params.teamId;
   if (!teamId) return { status: 400, jsonBody: { error: 'teamId is required' } };
 
   try {
-    const membership = await assertTeamMember(principal, teamId);
-    const dashboard = await repository.getTeamDashboard(teamId);
-    return { status: 200, jsonBody: { dashboard, membership: { role: membership.role } } };
+    const membership = await repository.getTeamMembership(teamId, principal.userId);
+    const leadership = await repository.getLeadershipMembership(principal.userId);
+    if (!membership && !leadership) return { status: 403, jsonBody: { error: 'You do not have access to this team' } };
+    const dashboard = await repository.getTeamDashboard(teamId, principal.userId);
+    return { status: 200, jsonBody: { dashboard, membership: { role: membership?.role ?? 'Viewer', readOnly: !membership } } };
   } catch (error) {
-    if (error instanceof Error && error.message === 'TEAM_ACCESS_DENIED') return { status: 403, jsonBody: { error: 'You do not have access to this team' } };
-    return { status: 500, jsonBody: { error: 'Unable to load the team dashboard' } };
+    return repositoryErrorResponse(error);
   }
 }
 

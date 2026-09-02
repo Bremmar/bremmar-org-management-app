@@ -1,127 +1,168 @@
-# Connect Bremmar to live data
+# Live data and rollout plan
 
-## Summary
+## Product boundary
 
-Replace the in-memory demo workspace with a production API-backed workspace:
+Bremmar is the source of truth for the EOS operating system. The current phase
+does not synchronize with Microsoft Planner, Teams, Graph, email, or any other
+external service. Work is stored in the application data model and surfaced in
+standalone team workspaces and L10 meetings.
 
-- React loads data from `/api`.
-- Azure Functions reads and writes Cosmos DB.
-- Microsoft Entra authenticates users.
-- Bremmar manages roles and team membership.
-- All Planner tasks are migrated once through a CSV import.
-- Bremmar becomes the source of truth; no ongoing Planner sync.
+The browser can run against an explicit local POC fixture or the Functions API.
+The API contains the production boundary for Cosmos DB and keeps the
+authorization model independent of the eventual identity provider.
 
-Static Web Apps uses the workflow's `api_location` and `api_build_command` to
-deploy the Functions API. See the [Static Web Apps build configuration](https://learn.microsoft.com/en-us/azure/static-web-apps/build-configuration).
+## Live and Test environments
 
-## Implementation changes
+The application has one shared frontend and one API deployment backed by three
+Cosmos databases:
 
-### API and data
+- `eos-control` stores environment definitions, per-user Test grants, and grant
+  audit events.
+- `eos-live` stores the production workspace.
+- `eos-test` stores the dedicated sanitized Test workspace.
 
-Expand the Functions API with:
+Live is always the post-sign-in default. An authenticated organization user has
+Live access by default; Test is shown only when an OrgAdmin has granted access
+for that user's stable Entra object ID. Test access does not copy or modify Live
+memberships, roles, teams, or work records, and there is no automatic
+Live-to-Test synchronization.
 
-- `GET /api/me`
-- `GET /api/teams/{teamId}/workspace`
-- Rock status updates
-- To-Do creation and status updates
-- Issue creation, IDS start, and solve actions
-- Meeting close and recap persistence
-- Planner CSV preview and commit endpoints
+The selected environment is held in a signed, `HttpOnly`, `Secure`,
+`SameSite=Lax` cookie. The API validates the signature and the current control
+plane grant on every request before selecting a workspace repository. Missing,
+malformed, or tampered cookies resolve to Live; a revoked Test grant returns
+`403` even if an old Test cookie remains in the browser. The client never uses a
+query parameter or local-storage value as an authorization signal.
 
-Every request will:
+## Workspace hierarchy
 
-- Read the Entra client principal supplied by Static Web Apps.
-- Resolve the stable user ID.
-- Validate Bremmar membership and role in Cosmos.
-- Reject unauthorized team access server-side.
-- Use Cosmos partition `team:{teamId}` for team records.
-- Use optimistic concurrency with ETags/version checks.
-- Write immutable audit events for important changes.
+The seeded hierarchy is:
 
-The frontend will receive typed DTOs rather than Cosmos documents.
+```text
+Leadership Team
+├── Professional Services
+│   ├── Projects
+│   └── Cybersecurity
+└── Managed Services
+    ├── Service Development
+    └── Service Delivery
+```
 
-### Frontend
+Every seeded node is operational and can own its own Rocks, Tasks, To-Dos,
+Issues, Scorecard, and L10. The Scorecard is configurable per team; for example,
+Cybersecurity is seeded without it. Platform administrators can add nodes,
+re-parent them, configure enabled L10 sections and section durations, define the
+ordered escalation recipients, or make a node grouping-only after its direct
+operational work has been resolved or moved.
 
-Add an `HttpWorkspaceApi` implementation and make it the production default.
+## Data and authorization
 
-The app will:
+- Operational records use `team:{teamId}` as their Cosmos DB partition key.
+- Users, teams, memberships, settings, transfer envelopes, notifications, team
+  messages, and audit events use the `org` partition. Meetings and their IDS
+  notes remain in the team partition with the operational records they coordinate.
+- Issues keep their stable ID and original `createdAt`. Because Cosmos
+  partition keys are immutable, an accepted transfer is a versioned copy and
+  redirect state machine: the source copy is redirected and the destination
+  copy becomes active.
+- Transfer decisions use a pending envelope, source version, transfer version,
+  and idempotency key. The first valid TeamLead/Member decision wins.
+- `PlatformAdmin` is a separate capability. It grants administration of
+  organization configuration, not access to work data. Leadership membership
+  grants read-only company visibility and read-only team drill-downs.
+- All API reads and writes resolve access on the server. A selected team ID is
+  never treated as proof of access.
+- Important mutations produce immutable audit events and use version/ETag
+  checks for optimistic concurrency.
+- Rock, Issue, and To-Do detail edits are versioned. IDS notes are stored both on
+  the meeting note record and as an append-only labeled entry on the Issue.
+- A To-Do moved forward four times is flagged and converted once into a linked
+  short-term Issue. The original To-Do remains visible for provenance.
+- An Issue counted in IDS for three closed meetings is scheduled to escalate in
+  seven days. At the due point it routes through the team’s configured hierarchy
+  and notifies the current recipient; an unresolved next level can be routed
+  after the next seven-day interval.
 
-- Load the signed-in user and accessible teams from `/api/me`.
-- Load the selected team's live workspace from Cosmos.
-- Show loading, retry, empty, unauthorized, and API-error states.
-- Never silently fall back to fake data in production.
-- Keep `initialWorkspace` only as an explicit local-development fixture.
-- Preserve the existing Rocks, To-Dos, Issues, Scorecard, and L10 workflows against live API mutations.
+The partitioning and transactional design follows the Cosmos DB guidance for
+[partition keys](https://learn.microsoft.com/en-us/azure/cosmos-db/partitioning)
+and
+[transactional batches](https://learn.microsoft.com/en-us/azure/cosmos-db/transactional-batch).
+Cross-partition Issue transfers must remain idempotent and recoverable because
+the source and destination cannot be committed as one cross-partition batch.
 
-The existing Functions v4 entry point will remain `dist/index.js`, as required
-by the Functions runtime. See the [Azure Functions TypeScript build options](https://learn.microsoft.com/en-us/azure/azure-functions/typescript-build-options).
+## API surface
 
-### Cosmos and Azure configuration
+The Functions API exposes typed server contracts for:
 
-Configure the existing Static Web App API settings with:
+- `GET /api/me` — local identity/session context and accessible hierarchy.
+- `PUT /api/me/environment` — select `live` or granted `test` and set the signed
+  environment cookie.
+- `GET /api/workspace` — load the environment-scoped workspace snapshot used by
+  the authenticated shell.
+- `GET/PATCH /api/admin/environment-access...` — OrgAdmin-managed Test access
+  grants and immutable grant audit records; these routes are available from the
+  Live Admin center only.
+- `GET /api/teams/{teamId}/workspace` and the legacy dashboard route.
+- `GET /api/company/overview` — Leadership-only read-only rollups.
+- `GET/PATCH /api/notifications...` and `GET/PATCH /api/profile`.
+- Rock, Rock Task, To-Do, Issue, IDS, and Task-to-To-Do routes.
+- Team message send/read/convert-to-Issue routes and meeting IDS-note/close
+  routes.
+- To-Do move-forward route, including rollover conversion behavior.
+- Issue transfer request, accept, reject, and cancel routes.
+- Platform administration routes for teams, users, memberships, aging settings,
+  L10 section configuration, and escalation hierarchies.
 
-- `COSMOS_ENDPOINT`
-- `COSMOS_KEY`
-- `COSMOS_DATABASE`
-- `COSMOS_CONTAINER`
-- `BREMMAR_ORG_ID`
-- Bootstrap administrator object ID
+The API returns `401`, `403`, `404`, `409`, and `422` for the corresponding
+authentication, authorization, not-found, concurrency, and validation cases.
 
-The Cosmos key will exist only as a server-side Static Web Apps API setting and
-will never be sent to the browser.
+## Local POC mode
 
-Before deployment, verify that the existing Cosmos account permits key
-authentication and network access from the Static Web Apps API. If key
-authentication is prohibited, switch to the standalone Function App model with
-managed identity; Static Web Apps managed APIs do not provide the same
-managed-identity option. See the [Static Web Apps FAQ](https://learn.microsoft.com/en-us/azure/static-web-apps/faq).
+Copy the API sample settings when running Azure Functions locally and keep
+`LOCAL_POC_MODE=true` only for local development:
 
-## Planner migration
+```json
+{
+  "LOCAL_POC_MODE": "true",
+  "LOCAL_POC_USER_ID": "ava-khan"
+}
+```
 
-Build an Admin-only CSV migration flow:
+The POC has one seeded local PlatformAdmin user. This bypasses real login only
+when explicitly enabled. Before shared or production deployment, disable the
+flag and connect the existing `getClientPrincipal` seam to the approved
+single-tenant identity provider. The application-level memberships and
+capabilities remain the authorization source of truth.
 
-1. Upload Planner exports.
-2. Preview detected plans, teams, owners, dates, statuses, and duplicates.
-3. Map Planner plans to Bremmar teams.
-4. Resolve owners to Entra users.
-5. Import every Planner task with source metadata and import-batch ID.
-6. Convert Planner tasks into To-Dos only.
-7. Store completed or old tasks as historical or archived records so they do not clutter the active weekly view.
-8. Require explicit creation of Rocks and Issues in Bremmar.
-9. Make imports idempotent using the Planner task ID.
-10. Preserve rejected rows and warnings for correction.
+## Rollout sequence
 
-After validation, freeze Planner edits and use Bremmar as the operational
-source of truth.
+1. Validate the local hierarchy, role matrix, transfer and messaging workflows,
+   aging/escalation behavior, task/To-Do synchronization, meeting recap/IDS
+   notes, and readable responsive layouts.
+2. Provision the three databases and control/workspace containers with managed
+   identity, then run `bootstrap:environments` with the initial OrgAdmin and
+   approved Test administrator object IDs.
+3. Verify the smoke path: authenticate, confirm Live is selected, grant Test
+   access from Live Admin, switch to Test, edit a record, switch back to Live,
+   and confirm the Live workspace is unchanged.
+4. Verify the Cosmos conditional ETag writes and same-partition transactional
+   batches in the deployment smoke test before selecting the API for shared
+   traffic.
+5. Disable local POC mode and enable the approved identity adapter.
+6. Pilot with one operational team, then add the remaining teams and validate
+   Leadership read-only rollups.
 
-## Testing and rollout
+No Planner import, migration, or two-way synchronization is part of this
+phase. A future import can be designed as a separate, explicit migration with
+provenance and validation if the product decision changes.
 
-Add tests for:
+## Follow-on roadmap
 
-- API authentication and cross-team authorization.
-- OrgAdmin, TeamLead, Member, and Viewer permissions.
-- Cosmos partition selection.
-- ETag conflict handling.
-- Rock, To-Do, Issue, IDS, and meeting transitions.
-- Planner import mapping, duplicate detection, owner resolution, and archived tasks.
-- Frontend loading, API errors, team switching, and mutation rollback.
+The current UI includes long-term Issues, Issue history/audit, priorities,
+Rock Tasks/Milestones, linked To-Dos, team workspaces, role-aware visibility,
+company rollups, and profile avatars.
 
-Roll out in this order:
-
-1. Configure Entra and Cosmos settings in a non-production Static Web Apps environment.
-2. Bootstrap Bremmar's first OrgAdmin.
-3. Import Planner data using preview mode.
-4. Validate one pilot team.
-5. Run the complete migration.
-6. Verify `/api/health`, authenticated `/api/me`, team reads, and writes.
-7. Move teams from Planner to Bremmar.
-
-## Assumptions
-
-- Bremmar already has the Static Web App, Cosmos account, and Entra tenant.
-- The managed Static Web Apps API remains the selected production model.
-- A server-side Cosmos key is acceptable for that model.
-- A one-time migration is required; there will be no two-way Graph/Planner synchronization.
-- All Planner tasks are migrated; completed and old tasks are archived from the active weekly view.
-- Planner tasks become To-Dos; Rocks and Issues are created or reviewed manually.
-- AI remains disconnected until explicitly enabled through the existing AI Function App.
+Follow-on capabilities remain intentionally separate: My 90 personal view,
+comments/followers, notification preferences, archive/restore, permission-aware
+search, ranking/voting/Top 3, deadline-based conversion, and Org Chart seats and
+directory enhancements.

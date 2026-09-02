@@ -1,8 +1,10 @@
 # Bremmar · EOS operating hub
 
-Bremmar is a React-based operating hub for multi-team EOS Level 10 meetings.
-It brings quarterly Rocks, weekly To-Dos, Issues/IDS, Scorecard measurables,
-Headlines, and meeting history into one shared workspace.
+Bremmar is a standalone React/Azure Functions operating system for multi-team
+EOS work. It brings hierarchical team workspaces, quarterly Rocks and Tasks,
+weekly To-Dos, Issues/IDS, Scorecard measurables, Headlines, meeting history,
+cross-team messages and Issue handoffs, configurable L10 agendas, escalation
+paths, and Leadership rollups into one source of truth.
 
 ## Repository layout
 
@@ -18,12 +20,25 @@ npm install
 npm run dev
 ```
 
-The frontend currently runs with a local workspace API so the product flow can
-be explored before Azure resources and Microsoft Entra configuration are
-available. The API package can be built independently with `npm run build:api`.
+The frontend currently runs with an explicit local seeded workspace API so the
+product flow can be explored without login or Azure resources. The local POC
+contains the Leadership → Professional Services / Managed Services hierarchy,
+one PlatformAdmin profile, role-aware team membership, and sample transfer
+notices, editable Rock/Issue/To-Do detail, meeting-specific IDS notes, automatic
+To-Do rollover Issues, and per-team L10/escalation configuration. The API package
+can be built independently with `npm run build:api`.
 
-If Azure Functions Core Tools is installed, build the API first and run it
-locally with `func start --script-root apps/api`.
+The local POC keeps independent Live and Test workspace copies. Live is selected
+on startup; the seeded POC administrator can switch to Test from the authenticated
+shell, where edits remain isolated from Live. Set `VITE_LOCAL_POC_MODE=false` to
+use the Functions API instead of the local fixture. The API's local settings use
+`LOCAL_POC_MODE=true` and a signed-cookie fallback secret only for this local POC
+mode.
+
+If Azure Functions Core Tools is installed, copy
+`apps/api/local.settings.sample.json` to `local.settings.json`, keep
+`LOCAL_POC_MODE=true` for local development, build the API, and run it with
+`func start --script-root apps/api`.
 
 ## Validation
 
@@ -45,5 +60,17 @@ Functions API under `/api`. The API's `main` field points Azure Functions at
 `infra/main.bicep` also contains a separate Bring Your Own Functions deployment
 for environments that require a dedicated Function App and managed identity
 for Cosmos DB. Choose one API hosting mode per environment; do not deploy both
-to the same `/api` route. Configure a single-tenant Microsoft Entra provider
-before allowing production traffic.
+to the same `/api` route. Disable local POC mode and configure the approved
+single-tenant identity adapter before allowing shared or production traffic.
+
+The Bicep foundation provisions `eos-control`, `eos-live`, and `eos-test` in one
+Cosmos account. The control database stores environment metadata and Test access
+grants; all workspace records are stored only in their selected database. Supply
+the secure `environmentCookieSecret` parameter and run
+`npm run bootstrap:environments --workspace @eos/api` after deployment with the
+initial Entra object IDs. Bootstrap initializes Live with configuration only,
+seeds Test from the dedicated sanitized fixture, and is additive/idempotent.
+
+Planner, Teams, Graph, email, and other external synchronization are out of
+scope for this phase. See [docs/live-data-plan.md](docs/live-data-plan.md) for
+the API/data boundary and rollout notes.

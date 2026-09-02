@@ -1,2 +1,12 @@
 import './functions/health.js';
 import './functions/teamDashboard.js';
+import './functions/me.js';
+import './functions/workspace.js';
+import './functions/company.js';
+import './functions/notifications.js';
+import './functions/issues.js';
+import './functions/workItems.js';
+import './functions/admin.js';
+import './functions/profile.js';
+import './functions/messages.js';
+import './functions/meetings.js';

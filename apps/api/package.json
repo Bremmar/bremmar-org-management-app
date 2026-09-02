@@ -6,9 +6,10 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "bootstrap:environments": "npm run build && node dist/bootstrap.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "tsc --noEmit -p tsconfig.json",
-    "test": "npm run build && node --test dist/domain.test.js"
+    "test": "npm run build && node --test dist/domain.test.js dist/data/repository.test.js dist/environment.test.js dist/functions/http.test.js"
   },
   "dependencies": {
     "@azure/cosmos": "^4.9.0",

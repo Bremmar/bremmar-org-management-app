@@ -3,7 +3,16 @@
   "Values": {
     "FUNCTIONS_WORKER_RUNTIME": "node",
     "COSMOS_ENDPOINT": "https://your-account.documents.azure.com:443/",
-    "COSMOS_DATABASE": "eos",
-    "COSMOS_CONTAINER": "workspace"
+    "COSMOS_CONTROL_DATABASE": "eos-control",
+    "COSMOS_LIVE_DATABASE": "eos-live",
+    "COSMOS_TEST_DATABASE": "eos-test",
+    "COSMOS_CONTROL_CONTAINER": "environment-access",
+    "COSMOS_LIVE_CONTAINER": "workspace",
+    "COSMOS_TEST_CONTAINER": "workspace",
+    "ENVIRONMENT_COOKIE_SECRET": "replace-with-a-local-only-secret",
+    "INITIAL_ORG_ADMIN_OBJECT_ID": "ava-khan",
+    "INITIAL_TEST_ACCESS_OBJECT_IDS": "ava-khan",
+    "LOCAL_POC_MODE": "true",
+    "LOCAL_POC_USER_ID": "ava-khan"
   }
 }
