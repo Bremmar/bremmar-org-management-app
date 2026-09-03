@@ -12,6 +12,7 @@ import {
 } from './domain.js';
 import { AzureTableControlPlaneRepository } from './data/environment.js';
 import { MemoryWorkspaceRepository } from './data/repository.js';
+import { normalizeObjectId } from './auth.js';
 
 const ORG_ID = process.env.BREMMAR_ORG_ID ?? 'bremmar';
 const CONTROL_PARTITION = 'org';
@@ -24,6 +25,11 @@ function recordBase(id: string, kind: WorkspaceRecord['kind'], teamId?: string, 
 
 function safeId(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 80) || 'admin';
+}
+
+function stableIdentityId(value: string) {
+  const trimmed = value.trim();
+  return normalizeObjectId(trimmed) ?? trimmed;
 }
 
 function adminUser(userId: string, name: string, email: string, environmentId: EnvironmentId = 'live'): UserProfile {
@@ -95,31 +101,32 @@ export async function bootstrapEnvironments(options: { orgAdminObjectId: string;
   const client = new CosmosClient(cosmosConnectionString);
   const live = client.database(liveDatabase).container(liveContainerName);
   const test = client.database(testDatabase).container(testContainerName);
-  const initialTestAccessObjectIds = [...new Set(options.initialTestAccessObjectIds.map((userId) => userId.trim()).filter(Boolean))];
+  const orgAdminObjectId = stableIdentityId(options.orgAdminObjectId);
+  const initialTestAccessObjectIds = [...new Set(options.initialTestAccessObjectIds.map(stableIdentityId).filter(Boolean))];
 
   if (!await hasAnyWorkspaceRecords(live)) {
-    await writeRecords(live, liveBootstrapRecords(options.orgAdminObjectId, options.adminName, options.adminEmail));
+    await writeRecords(live, liveBootstrapRecords(orgAdminObjectId, options.adminName, options.adminEmail));
   } else {
     const existing = await live.items.query<WorkspaceRecord>({ query: 'SELECT * FROM c WHERE c.pk = @pk', parameters: [{ name: '@pk', value: CONTROL_PARTITION }] }, { partitionKey: CONTROL_PARTITION }).fetchAll();
     const records = existing.resources;
-    addBootstrapAdmin(records, options.orgAdminObjectId, options.adminName, options.adminEmail, 'live');
+    addBootstrapAdmin(records, orgAdminObjectId, options.adminName, options.adminEmail, 'live');
     await writeRecords(live, records.filter((record) => record.kind === 'user' || record.kind === 'teamMembership'));
   }
 
   if (!await hasAnyWorkspaceRecords(test)) {
     const fixture = new MemoryWorkspaceRepository('test').exportWorkspaceRecords();
-    addBootstrapAdmin(fixture, options.orgAdminObjectId, options.adminName, options.adminEmail, 'test');
+    addBootstrapAdmin(fixture, orgAdminObjectId, options.adminName, options.adminEmail, 'test');
     for (const userId of initialTestAccessObjectIds) addBootstrapAdmin(fixture, userId, options.adminName, options.adminEmail, 'test');
     await writeRecords(test, fixture);
   } else {
     const existing = await test.items.query<WorkspaceRecord>({ query: 'SELECT * FROM c WHERE c.pk = @pk', parameters: [{ name: '@pk', value: CONTROL_PARTITION }] }, { partitionKey: CONTROL_PARTITION }).fetchAll();
     const records = existing.resources;
-    addBootstrapAdmin(records, options.orgAdminObjectId, options.adminName, options.adminEmail, 'test');
+    addBootstrapAdmin(records, orgAdminObjectId, options.adminName, options.adminEmail, 'test');
     for (const userId of initialTestAccessObjectIds) addBootstrapAdmin(records, userId, options.adminName, options.adminEmail, 'test');
     await writeRecords(test, records.filter((record) => record.kind === 'user' || record.kind === 'teamMembership'));
   }
 
-  if (initialTestAccessObjectIds.length) await control.seedTestAccess(initialTestAccessObjectIds, options.orgAdminObjectId);
+  if (initialTestAccessObjectIds.length) await control.seedTestAccess(initialTestAccessObjectIds, orgAdminObjectId);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

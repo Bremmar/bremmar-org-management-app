@@ -1,13 +1,13 @@
 import type { HttpRequest, HttpResponseInit } from '@azure/functions';
-import { getClientPrincipal, type ClientPrincipal } from '../auth.js';
+import { IdentityResolutionError, resolveClientPrincipal, type ClientPrincipal } from '../auth.js';
 import { readEnvironmentCookie } from '../environment.js';
 import type { EnvironmentId } from '../domain.js';
 import { environmentRepositories } from '../data/services.js';
 import { RepositoryError } from '../data/repository.js';
 import type { WorkspaceRepository } from '../data/repository.js';
 
-export function authenticatedPrincipal(request: HttpRequest): ClientPrincipal | HttpResponseInit {
-  const principal = getClientPrincipal(request);
+export async function authenticatedPrincipal(request: HttpRequest): Promise<ClientPrincipal | HttpResponseInit> {
+  const principal = await resolveClientPrincipal(request);
   return principal ?? { status: 401, jsonBody: { error: 'Authentication required' } };
 }
 
@@ -28,7 +28,7 @@ export interface RequestScope {
  */
 export async function requestScope(request: HttpRequest): Promise<RequestScope | HttpResponseInit> {
   try {
-    const principal = authenticatedPrincipal(request);
+    const principal = await authenticatedPrincipal(request);
     if (isResponse(principal)) return principal;
     const environment = readEnvironmentCookie(request);
     const control = environmentRepositories.getControlRepository();
@@ -42,6 +42,7 @@ export async function requestScope(request: HttpRequest): Promise<RequestScope |
 }
 
 export function repositoryErrorResponse(error: unknown): HttpResponseInit {
+  if (error instanceof IdentityResolutionError) return { status: 503, jsonBody: { error: error.message, code: error.code } };
   if (error instanceof RepositoryError) {
     const status = error.code === 'NOT_FOUND' ? 404 : error.code === 'FORBIDDEN' ? 403 : error.code === 'CONFLICT' ? 409 : error.code === 'VALIDATION' ? 422 : 503;
     return { status, jsonBody: { error: error.message, code: error.code } };

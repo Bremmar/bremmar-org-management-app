@@ -95,6 +95,33 @@ applicable, and run
 initial Entra object IDs. Bootstrap initializes Live with configuration only,
 seeds Test from the dedicated sanitized fixture, and is additive/idempotent.
 
+### Entra identity mapping
+
+Azure Static Web Apps assigns each signed-in user an app-specific `userId`; it
+is not the Entra directory object ID used by bootstrap. The API therefore
+resolves the signed-in Entra username/email through Microsoft Graph and uses the
+returned directory `id` as the application identity key. This is an identity
+lookup only—Bremmar does not synchronize Graph users or groups into workspace
+data.
+
+For the managed Static Web Apps API, add these settings to the Static Web App's
+Configuration page (never commit the secret):
+
+```text
+ENTRA_TENANT_ID=<your Entra tenant ID>
+ENTRA_GRAPH_CLIENT_ID=<app registration client ID>
+ENTRA_GRAPH_CLIENT_SECRET=<client secret value>
+```
+
+The app registration must be in the organization tenant, have the Microsoft
+Graph **Application** permission `User.Read.All`, and have admin consent. The
+dedicated Function App provisioned by `infra/main.bicep` receives a system-
+assigned managed identity and the tenant setting; grant that identity the same
+Graph permission, or configure the three settings above on that Function App.
+Do not use the Static Web Apps `userId` as the bootstrap object ID. After adding
+the settings, sign out/in once and reload the app; existing profiles bootstrapped
+with the Entra object ID do not need to be recreated.
+
 Planner, Teams, Graph, email, and other external synchronization are out of
 scope for this phase. See [docs/live-data-plan.md](docs/live-data-plan.md) for
 the API/data boundary and rollout notes.

@@ -29,7 +29,7 @@ async function meHandler(request: HttpRequest, _context: InvocationContext): Pro
 }
 
 async function selectEnvironmentHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
-  const principal = authenticatedPrincipal(request);
+  const principal = await authenticatedPrincipal(request);
   if (isResponse(principal)) return principal;
   try {
     const body = await requestJson<{ environment?: unknown }>(request);

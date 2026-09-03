@@ -3,13 +3,16 @@
 ## Product boundary
 
 Bremmar is the source of truth for the EOS operating system. The current phase
-does not synchronize with Microsoft Planner, Teams, Graph, email, or any other
-external service. Work is stored in the application data model and surfaced in
-standalone team workspaces and L10 meetings.
+does not synchronize workspace data with Microsoft Planner, Teams, Graph,
+email, or any other external service. Microsoft Graph is used only to resolve a
+signed-in Entra username to its stable directory object ID at the API boundary.
+Work is stored in the application data model and surfaced in standalone team
+workspaces and L10 meetings.
 
 The browser can run against an explicit local POC fixture or the Functions API.
-The API contains the production boundary for Cosmos DB and keeps the
-authorization model independent of the eventual identity provider.
+The API contains the production boundary for Cosmos DB and maps the
+Static-Web-Apps-specific principal ID to the Entra object ID before applying
+application authorization.
 
 ## Live and Test environments
 
@@ -157,9 +160,10 @@ Copy the API sample settings when running Azure Functions locally and keep
 
 The POC has one seeded local PlatformAdmin user. This bypasses real login only
 when explicitly enabled. Before shared or production deployment, disable the
-flag and connect the existing `getClientPrincipal` seam to the approved
-single-tenant identity provider. The application-level memberships and
-capabilities remain the authorization source of truth.
+flag and configure the API's Entra identity resolver with the tenant and
+Microsoft Graph application credentials (or a managed identity with
+`User.Read.All`). The application-level memberships and capabilities remain the
+authorization source of truth.
 
 ## Rollout sequence
 
@@ -176,7 +180,9 @@ capabilities remain the authorization source of truth.
 4. Verify the Cosmos conditional ETag writes and same-partition transactional
    batches in the deployment smoke test before selecting the API for shared
    traffic.
-5. Disable local POC mode and enable the approved identity adapter.
+5. Disable local POC mode, configure the approved Entra identity resolver, and
+   verify that the signed-in user's Graph object ID matches the bootstrapped
+   local profile ID.
 6. Pilot with one operational team, then add the remaining teams and validate
    Leadership read-only rollups.
 

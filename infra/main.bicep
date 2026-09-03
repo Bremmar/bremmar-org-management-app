@@ -173,6 +173,9 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   name: functionAppName
   location: location
   kind: 'functionapp,linux'
+  identity: {
+    type: 'SystemAssigned'
+  }
   properties: {
     serverFarmId: functionPlan.id
     httpsOnly: true
@@ -223,6 +226,10 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           name: 'ENVIRONMENT_COOKIE_SECRET'
           value: environmentCookieSecret
+        }
+        {
+          name: 'ENTRA_TENANT_ID'
+          value: tenantId
         }
       ]
     }

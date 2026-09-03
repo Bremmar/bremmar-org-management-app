@@ -21,7 +21,7 @@ existing AI Function App is intentionally not provisioned or connected here.
 
 ## Parameters
 
-At minimum provide unique names for `staticWebAppName`, `functionAppName`, `functionStorageName`, and `cosmosAccountName`, plus the organization's `tenantId`, initial administrator object ID, and `environmentCookieSecret`. The cookie secret must be supplied as a secure deployment parameter and is written only to the Function App setting.
+At minimum provide unique names for `staticWebAppName`, `functionAppName`, `functionStorageName`, and `cosmosAccountName`, plus the organization's `tenantId`, initial administrator object ID, and `environmentCookieSecret`. The cookie secret must be supplied as a secure deployment parameter and is written only to the Function App setting. The dedicated Function App is provisioned with a system-assigned managed identity and receives `ENTRA_TENANT_ID` for the API's Entra identity lookup.
 
 The API reads `COSMOS_LIVE_DATABASE` and `COSMOS_TEST_DATABASE`; the default
 container name is `workspace` for both databases. The control plane reads
@@ -30,6 +30,18 @@ defaults to `EnvironmentAccess`. The Bicep template creates the table and
 populates the storage connection string for the dedicated Function App. It
 also populates `COSMOS_CONNECTION_STRING` from the Cosmos account connection
 string; neither secret is emitted as an output.
+
+Static Web Apps exposes an app-specific `x-ms-client-principal.userId`, not the
+Entra directory object ID. The API resolves the principal's signed-in
+`userDetails` value through Microsoft Graph before it performs local profile,
+membership, or Test-access checks. For the managed Static Web Apps API, add
+`ENTRA_TENANT_ID`, `ENTRA_GRAPH_CLIENT_ID`, and
+`ENTRA_GRAPH_CLIENT_SECRET` as application settings. The client app must have
+the Microsoft Graph **Application** permission `User.Read.All` with admin
+consent. For the alternative Function App, grant the same permission to its
+system-assigned managed identity instead; the API will use the platform-managed
+identity endpoint automatically. Graph is used only for identity resolution,
+not workspace synchronization.
 
 After deployment, run the API environment bootstrap with the initial Entra
 object IDs. Bootstrap is additive and idempotent: it creates control metadata
