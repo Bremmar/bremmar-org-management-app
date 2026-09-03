@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { MemoryWorkspaceRepository, RepositoryError } from './repository.js';
-import { DEFAULT_MEETING_SECTIONS } from '../domain.js';
+import type { Container } from '@azure/cosmos';
+import { CosmosWorkspaceRepository, MemoryWorkspaceRepository, RepositoryError } from './repository.js';
+import { DEFAULT_MEETING_SECTIONS, type WorkspaceRecord } from '../domain.js';
 
 async function rejectsWithCode(operation: Promise<unknown>, code: RepositoryError['code']) {
   await assert.rejects(operation, (error: unknown) => error instanceof RepositoryError && error.code === code);
@@ -235,6 +236,47 @@ test('administrators can disable a team Scorecard while retaining IDS and Conclu
   const workspace = await repository.getTeamWorkspace(created.teamId, 'ava-khan');
   assert.equal(workspace.meetings.length, 1);
   assert.equal(workspace.meetings[0].agendaTotal, DEFAULT_MEETING_SECTIONS.length);
+});
+
+test('team cadence is persisted and the current meeting can be moved with optimistic concurrency', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const created = await repository.createTeam({ name: 'Monthly Operations', shortName: 'Monthly Ops', description: 'A monthly operating team.', parentTeamId: 'leadership', nodeType: 'operational', meetingCadence: 'monthly', meetingDay: '31', meetingTime: '10:00 AM', accent: '#4c8f86', initials: 'MO', meetingSections: DEFAULT_MEETING_SECTIONS, escalationUserIds: ['ava-khan'] }, 'ava-khan');
+  await repository.upsertMembership({ userId: 'ava-khan', teamId: created.teamId, role: 'TeamLead' }, 'ava-khan');
+  const before = await repository.getTeamWorkspace(created.teamId, 'ava-khan');
+  const meeting = before.meetings[0];
+  assert.equal(before.team.meetingCadence, 'monthly');
+  assert.equal(meeting.scheduledTime, '10:00 AM');
+  assert.match(meeting.scheduledDate, /^\d{4}-\d{2}-\d{2}$/);
+
+  const moved = await repository.updateMeetingSchedule(created.teamId, meeting.id, { scheduledDate: '2026-09-21', scheduledTime: '2:30 PM' }, 'ava-khan', meeting.version);
+  assert.deepEqual({ scheduledDate: moved.scheduledDate, scheduledTime: moved.scheduledTime, dateLabel: moved.dateLabel, weekStartDate: moved.weekStartDate, version: moved.version }, { scheduledDate: '2026-09-21', scheduledTime: '2:30 PM', dateLabel: 'Monday · Sep 21', weekStartDate: '2026-09-21', version: (meeting.version ?? 1) + 1 });
+  await rejectsWithCode(repository.updateMeetingSchedule(created.teamId, meeting.id, { scheduledDate: '2026-09-22', scheduledTime: '2:30 PM' }, 'ava-khan', meeting.version), 'CONFLICT');
+
+  const closed = await repository.closeMeeting(created.teamId, meeting.id, 'Monthly review complete.', 9, 'ava-khan', moved.version);
+  assert.equal(closed.status, 'closed');
+  const after = await repository.getTeamWorkspace(created.teamId, 'ava-khan');
+  assert.equal(after.meetings.some((item) => item.status === 'upcoming'), true);
+  assert.equal(after.meetings.find((item) => item.status === 'upcoming')?.scheduledTime, '10:00 AM');
+});
+
+test('new-team writes fall back to ordinary Cosmos creates when transactional batches are rejected', async () => {
+  const seed = new MemoryWorkspaceRepository().exportWorkspaceRecords();
+  const created: WorkspaceRecord[] = [];
+  let batchCalls = 0;
+  const container = {
+    items: {
+      query: (_spec: unknown, options?: { partitionKey?: string }) => ({ fetchAll: async () => ({ resources: seed.filter((record) => !options?.partitionKey || record.pk === options.partitionKey) }) }),
+      batch: async (operations: unknown[]) => { batchCalls += 1; return { result: operations.map(() => ({ statusCode: 400 })) }; },
+      create: async (record: WorkspaceRecord) => { created.push(record); return { resource: { ...record, _etag: `etag-${created.length}` } }; },
+    },
+  } as unknown as Container;
+  const repository = new CosmosWorkspaceRepository(container);
+
+  const team = await repository.createTeam({ name: 'Batch Fallback', shortName: 'Fallback', description: 'Verifies ordinary writes remain available.', parentTeamId: 'leadership', nodeType: 'operational', meetingCadence: 'weekly', meetingDay: 'Friday', meetingTime: '9:00 AM', accent: '#4c8f86', initials: 'BF', meetingSections: DEFAULT_MEETING_SECTIONS, escalationUserIds: [] }, 'ava-khan');
+  assert.equal(team.name, 'Batch Fallback');
+  assert.equal(batchCalls, 1);
+  assert.equal(created.some((record) => record.kind === 'team' && record.id === team.teamId), true);
+  assert.equal(created.some((record) => record.kind === 'meeting' && record.teamId === team.teamId), true);
 });
 
 test('an unresolved Issue is scheduled for escalation after three meetings', async () => {

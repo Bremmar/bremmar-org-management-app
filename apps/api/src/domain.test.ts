@@ -1,10 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { canAcceptTransfer, canAdministerPlatform, canManageTeam, canWriteTeam, issueAgeBand, nextTodoStatus, partitionFor, validateAgeSettings, validateHierarchy } from './domain.js';
+import { canAcceptTransfer, canAdministerPlatform, canManageTeam, canWriteTeam, issueAgeBand, nextConfiguredMeetingDateAfter, nextMeetingDateAfter, nextMeetingDateFor, nextTodoStatus, partitionFor, validateAgeSettings, validateHierarchy } from './domain.js';
 
 test('team partitions are stable and explicit', () => {
   assert.equal(partitionFor('org', 'bremmar'), 'org');
   assert.equal(partitionFor('team', 'leadership'), 'team:leadership');
+});
+
+test('meeting recurrence supports weekly and month-end monthly schedules', () => {
+  assert.equal(nextMeetingDateFor('2026-09-07', 'weekly'), '2026-09-14');
+  assert.equal(nextMeetingDateFor('2026-01-31', 'monthly'), '2026-02-28');
+  assert.equal(nextMeetingDateFor('2026-02-28', 'monthly'), '2026-03-28');
+  assert.equal(nextMeetingDateAfter('2026-08-31', 'weekly', '2026-09-03'), '2026-09-07');
+  assert.equal(nextConfiguredMeetingDateAfter({ meetingCadence: 'monthly', meetingDay: '31' }, '2026-02-28', '2026-02-28'), '2026-03-31');
+  assert.equal(nextConfiguredMeetingDateAfter({ meetingCadence: 'weekly', meetingDay: 'Monday' }, '2026-09-09', '2026-09-09'), '2026-09-14');
 });
 
 test('role capabilities keep viewers read-only', () => {

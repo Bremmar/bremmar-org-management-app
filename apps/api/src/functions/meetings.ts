@@ -33,5 +33,25 @@ async function closeMeetingHandler(request: HttpRequest, _context: InvocationCon
   }
 }
 
+async function updateMeetingScheduleHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
+  const scope = await requestScope(request);
+  if (isResponse(scope)) return scope;
+  const { principal, repository } = scope;
+  const teamId = request.params.teamId;
+  const meetingId = request.params.meetingId;
+  if (!teamId || !meetingId) return { status: 422, jsonBody: { error: 'teamId and meetingId are required', code: 'VALIDATION' } };
+  try {
+    const body = await requestJson<{ scheduledDate?: string; scheduledTime?: string }>(request);
+    const meeting = await repository.updateMeetingSchedule(teamId, meetingId, {
+      scheduledDate: typeof body?.scheduledDate === 'string' ? body.scheduledDate : '',
+      scheduledTime: typeof body?.scheduledTime === 'string' ? body.scheduledTime : '',
+    }, principal.userId, expectedVersion(request));
+    return responseWithEtag(meeting, `W/\"${meeting.version}\"`);
+  } catch (error) {
+    return repositoryErrorResponse(error);
+  }
+}
+
 app.http('addMeetingIssueNote', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/issues/{issueId}/notes', handler: addMeetingNoteHandler });
+app.http('updateMeetingSchedule', { methods: ['PATCH'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}', handler: updateMeetingScheduleHandler });
 app.http('closeMeeting', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/close', handler: closeMeetingHandler });

@@ -2,7 +2,7 @@ import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } 
 import { lookupEntraObjectId } from '../auth.js';
 import { expectedVersion, isResponse, repositoryErrorResponse, requestJson, requestScope, responseWithEtag } from './http.js';
 import { DEFAULT_MEETING_SECTIONS } from '../domain.js';
-import type { IssueAgeSettings, MeetingSectionConfig, TeamMembership, TeamNodeType } from '../domain.js';
+import type { IssueAgeSettings, MeetingCadence, MeetingSectionConfig, TeamMembership, TeamNodeType } from '../domain.js';
 import { RepositoryError } from '../data/repository.js';
 import { environmentRepositories } from '../data/services.js';
 
@@ -13,12 +13,17 @@ interface TeamBody {
   description?: string;
   parentTeamId?: string | null;
   nodeType?: TeamNodeType;
+  meetingCadence?: MeetingCadence;
   meetingDay?: string;
   meetingTime?: string;
   accent?: string;
   initials?: string;
   meetingSections?: MeetingSectionConfig[];
   escalationUserIds?: string[];
+}
+
+function omitUndefined<T extends object>(value: T): Partial<T> {
+  return Object.fromEntries(Object.entries(value).filter(([, field]) => field !== undefined)) as Partial<T>;
 }
 
 async function adminSnapshotHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
@@ -39,7 +44,7 @@ async function createTeamHandler(request: HttpRequest, _context: InvocationConte
   const { principal, repository } = scope;
   try {
     const body = await requestJson<TeamBody>(request);
-    const team = await repository.createTeam({ teamId: body.teamId, name: body.name ?? '', shortName: body.shortName ?? '', description: body.description ?? '', parentTeamId: body.parentTeamId ?? null, nodeType: body.nodeType ?? 'operational', meetingDay: body.meetingDay ?? 'Monday', meetingTime: body.meetingTime ?? '9:00 AM', accent: body.accent ?? '#4c8f86', initials: body.initials ?? (body.shortName ?? '').slice(0, 2).toUpperCase(), meetingSections: body.meetingSections ?? DEFAULT_MEETING_SECTIONS, escalationUserIds: body.escalationUserIds ?? [] }, principal.userId);
+    const team = await repository.createTeam({ teamId: body.teamId, name: body.name ?? '', shortName: body.shortName ?? '', description: body.description ?? '', parentTeamId: body.parentTeamId ?? null, nodeType: body.nodeType ?? 'operational', meetingCadence: body.meetingCadence ?? 'weekly', meetingDay: body.meetingDay ?? 'Monday', meetingTime: body.meetingTime ?? '9:00 AM', accent: body.accent ?? '#4c8f86', initials: body.initials ?? (body.shortName ?? '').slice(0, 2).toUpperCase(), meetingSections: body.meetingSections ?? DEFAULT_MEETING_SECTIONS, escalationUserIds: body.escalationUserIds ?? [] }, principal.userId);
     return responseWithEtag(team, `W/\"${team.version}\"`, 201);
   } catch (error) {
     return repositoryErrorResponse(error);
@@ -54,7 +59,20 @@ async function updateTeamHandler(request: HttpRequest, _context: InvocationConte
   if (!teamId) return { status: 422, jsonBody: { error: 'teamId is required', code: 'VALIDATION' } };
   try {
     const body = await requestJson<TeamBody>(request);
-    const team = await repository.updateTeam(teamId, body, principal.userId, expectedVersion(request));
+    const team = await repository.updateTeam(teamId, omitUndefined({
+      name: body.name,
+      shortName: body.shortName,
+      description: body.description,
+      parentTeamId: body.parentTeamId,
+      nodeType: body.nodeType,
+      meetingCadence: body.meetingCadence,
+      meetingDay: body.meetingDay,
+      meetingTime: body.meetingTime,
+      accent: body.accent,
+      initials: body.initials,
+      meetingSections: body.meetingSections,
+      escalationUserIds: body.escalationUserIds,
+    }), principal.userId, expectedVersion(request));
     return responseWithEtag(team, `W/\"${team.version}\"`);
   } catch (error) {
     return repositoryErrorResponse(error);

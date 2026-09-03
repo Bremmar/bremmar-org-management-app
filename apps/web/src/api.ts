@@ -1,5 +1,5 @@
 import { defaultAgeBand, initialWorkspace, testWorkspace } from './data';
-import { meetingSectionsFor, scorecardTrendFor, weekStartDateFor } from './types';
+import { meetingDateFor, meetingDateLabel, meetingSectionsFor, nextConfiguredMeetingDateAfter, normalizeMeeting, scorecardTrendFor, weekStartDateFor } from './types';
 import type {
   CompanyOverview,
   EnvironmentAccess,
@@ -33,6 +33,7 @@ import type {
 } from './types';
 
 const DAY = 24 * 60 * 60 * 1000;
+const weekdayNames = new Set(['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']);
 
 export class WorkspaceApiError extends Error {
   constructor(public readonly code: 'NOT_FOUND' | 'FORBIDDEN' | 'CONFLICT' | 'VALIDATION' | 'UNAVAILABLE', message: string) {
@@ -74,8 +75,9 @@ export interface WorkspaceApi {
   createIssueFromMessage(messageId: string, input: Pick<Issue, 'title' | 'detail' | 'category' | 'priority' | 'horizon' | 'ownerId'>): Promise<Workspace>;
   markNotificationRead(notificationId: string): Promise<Workspace>;
   updateProfile(input: Pick<Partial<User>, 'name' | 'email' | 'avatarDataUrl'>): Promise<Workspace>;
-  createTeam(input: Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials'> & { meetingSections?: MeetingSectionConfig[]; escalationUserIds?: string[] }): Promise<Workspace>;
-  updateTeam(teamId: string, input: Partial<Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds'>>): Promise<Workspace>;
+  updateMeetingSchedule(teamId: string, meetingId: string, input: { scheduledDate: string; scheduledTime: string }, expectedVersion?: number): Promise<Workspace>;
+  createTeam(input: Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials'> & { meetingSections?: MeetingSectionConfig[]; escalationUserIds?: string[] }): Promise<Workspace>;
+  updateTeam(teamId: string, input: Partial<Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds'>>): Promise<Workspace>;
   createUser(input: Pick<User, 'name' | 'email' | 'accent'> & { platformAdmin?: boolean }): Promise<Workspace>;
   upsertMembership(input: Pick<TeamMembership, 'userId' | 'teamId' | 'role'>): Promise<Workspace>;
   updateAgeSettings(settings: IssueAgeSettings): Promise<Workspace>;
@@ -101,6 +103,14 @@ function ageFor(issue: Issue, settings: IssueAgeSettings, at = Date.now()): Issu
 
 function activeIssues(issues: Issue[]) {
   return issues.filter((issue) => issue.assignmentState !== 'redirected');
+}
+
+function validateMeetingConfiguration(cadence: Team['meetingCadence'], meetingDay: string, meetingTime: string) {
+  if (!meetingDay.trim()) throw new WorkspaceApiError('VALIDATION', cadence === 'monthly' ? 'Meeting date is required.' : 'Meeting day is required.');
+  if (!meetingTime.trim()) throw new WorkspaceApiError('VALIDATION', 'Meeting time is required.');
+  const normalizedDay = meetingDay.trim().toLowerCase();
+  if (cadence === 'monthly' && !/^(?:[1-9]|[12]\d|3[01])$/.test(normalizedDay)) throw new WorkspaceApiError('VALIDATION', 'Monthly meeting date must be a day number from 1 to 31.');
+  if (cadence === 'weekly' && !weekdayNames.has(normalizedDay)) throw new WorkspaceApiError('VALIDATION', 'Weekly meeting day must be Sunday through Saturday.');
 }
 
 function activeTransfer(transfers: IssueTransfer[], transferId: string) {
@@ -257,6 +267,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
   private refreshDerivedState() {
     this.workspace.teams = this.workspace.teams.map((team) => ({
       ...team,
+      meetingCadence: team.meetingCadence ?? 'weekly',
       meetingSections: team.meetingSections?.length ? team.meetingSections : meetingSectionsFor({ meetingSections: [] }),
       escalationUserIds: team.escalationUserIds ?? [],
     }));
@@ -276,7 +287,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     this.workspace.meetings = this.workspace.meetings.map((meeting) => {
       const team = this.workspace.teams.find((candidate) => candidate.id === meeting.teamId);
       const sections = team ? meetingSectionsFor(team) : meetingSectionsFor({ meetingSections: [] });
-      return { ...meeting, weekStartDate: meeting.weekStartDate ?? weekStartDateFor(new Date()), agendaTotal: sections.length, sectionNotes: meeting.sectionNotes ?? {}, idsIssueIds: meeting.idsIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: meeting.idsNotes ?? [] };
+      return normalizeMeeting({ ...meeting, agendaTotal: sections.length, sectionNotes: meeting.sectionNotes ?? {}, idsIssueIds: meeting.idsIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: meeting.idsNotes ?? [] }, team);
     });
   }
 
@@ -848,22 +859,25 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     return this.result();
   }
 
-  async createTeam(input: Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials'> & { meetingSections?: MeetingSectionConfig[]; escalationUserIds?: string[] }) {
+  async createTeam(input: Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials'> & { meetingSections?: MeetingSectionConfig[]; escalationUserIds?: string[] }) {
     this.requireAdmin();
     if (!input.parentTeamId) throw new WorkspaceApiError('VALIDATION', 'New teams must be placed under the Leadership Team.');
     if (input.parentTeamId && !this.workspace.teams.some((team) => team.id === input.parentTeamId)) throw new WorkspaceApiError('VALIDATION', 'Parent team not found.');
     const id = slugify(input.name);
     if (this.workspace.teams.some((team) => team.id === id)) throw new WorkspaceApiError('CONFLICT', 'A team with that name already exists.');
+    if (input.meetingCadence !== 'weekly' && input.meetingCadence !== 'monthly') throw new WorkspaceApiError('VALIDATION', 'Meeting cadence must be weekly or monthly.');
+    validateMeetingConfiguration(input.meetingCadence, input.meetingDay, input.meetingTime);
     const team: Team = { ...input, id, meetingSections: input.meetingSections ?? meetingSectionsFor({ meetingSections: [] }), escalationUserIds: input.escalationUserIds ?? [], memberCount: 0, active: true };
     this.workspace.teams.push(team);
     if (team.nodeType === 'operational') {
-      this.workspace.meetings.push({ id: `meeting-${team.id}-current`, teamId: team.id, label: `${team.shortName} L10`, dateLabel: `This week · ${team.meetingDay}`, weekStartDate: weekStartDateFor(new Date()), status: 'upcoming', facilitatorId: team.escalationUserIds[0] ?? this.workspace.currentUser.id, attendeeIds: [], lastRating: 0, agendaProgress: 0, agendaTotal: meetingSectionsFor(team).length, idsSolved: 0, idsTotal: 0, recap: '', startedAt: undefined, closedAt: undefined, sectionNotes: {}, idsIssueIds: [], createdTodoIds: [], idsNotes: [], } as Workspace['meetings'][number]);
+      const scheduledDate = meetingDateFor(team);
+      this.workspace.meetings.push({ id: `meeting-${team.id}-current`, teamId: team.id, label: `${team.shortName} L10`, dateLabel: meetingDateLabel(scheduledDate), scheduledDate, scheduledTime: team.meetingTime, weekStartDate: weekStartDateFor(scheduledDate), status: 'upcoming', facilitatorId: team.escalationUserIds[0] ?? this.workspace.currentUser.id, attendeeIds: [], lastRating: 0, agendaProgress: 0, agendaTotal: meetingSectionsFor(team).length, idsSolved: 0, idsTotal: 0, recap: '', startedAt: undefined, closedAt: undefined, sectionNotes: {}, idsIssueIds: [], createdTodoIds: [], idsNotes: [], version: 1 });
     }
     this.audit('Created team', id, input.name, 'team');
     return this.result();
   }
 
-  async updateTeam(teamId: string, input: Partial<Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds'>>) {
+  async updateTeam(teamId: string, input: Partial<Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds'>>) {
     this.requireAdmin();
     const team = this.workspace.teams.find((item) => item.id === teamId);
     if (!team) throw new WorkspaceApiError('NOT_FOUND', 'Team not found.');
@@ -871,12 +885,27 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     if (teamId !== 'leadership' && input.parentTeamId === null) throw new WorkspaceApiError('VALIDATION', 'Teams must remain under the Leadership Team hierarchy.');
     if (input.parentTeamId === teamId || (input.parentTeamId && this.descendantIds(teamId).includes(input.parentTeamId))) throw new WorkspaceApiError('VALIDATION', 'A team cannot be its own ancestor.');
     if (input.parentTeamId && !this.workspace.teams.some((item) => item.id === input.parentTeamId)) throw new WorkspaceApiError('VALIDATION', 'Parent team not found.');
+    if (input.meetingCadence !== undefined && input.meetingCadence !== 'weekly' && input.meetingCadence !== 'monthly') throw new WorkspaceApiError('VALIDATION', 'Meeting cadence must be weekly or monthly.');
+    validateMeetingConfiguration(input.meetingCadence ?? team.meetingCadence, input.meetingDay ?? team.meetingDay, input.meetingTime ?? team.meetingTime);
     if (team.nodeType === 'operational' && input.nodeType === 'grouping' && (this.workspace.rocks.some((rock) => rock.teamId === teamId) || this.workspace.todos.some((todo) => todo.teamId === teamId) || activeIssues(this.workspace.issues).some((issue) => issue.teamId === teamId))) throw new WorkspaceApiError('VALIDATION', 'Resolve active work before changing this node to grouping-only.');
     if (input.meetingSections && (!input.meetingSections.some((section) => section.id === 'ids' && section.enabled) || !input.meetingSections.some((section) => section.id === 'conclude' && section.enabled))) throw new WorkspaceApiError('VALIDATION', 'IDS and Conclude must remain enabled for every L10.');
     if (input.meetingSections?.some((section) => !Number.isInteger(section.duration) || section.duration < 1 || section.duration > 180)) throw new WorkspaceApiError('VALIDATION', 'Meeting section durations must be whole minutes between 1 and 180.');
     if (input.escalationUserIds?.some((userId) => !this.workspace.users.some((user) => user.id === userId && user.active))) throw new WorkspaceApiError('VALIDATION', 'Every escalation recipient must be an active user.');
     Object.assign(team, input);
     this.audit('Updated team', team.id, team.name, 'team');
+    return this.result();
+  }
+
+  async updateMeetingSchedule(teamId: string, meetingId: string, input: { scheduledDate: string; scheduledTime: string }, expectedVersion?: number) {
+    this.requireWrite(teamId);
+    const meeting = this.workspace.meetings.find((item) => item.id === meetingId && item.teamId === teamId);
+    if (!meeting) throw new WorkspaceApiError('NOT_FOUND', 'Meeting not found.');
+    this.requireVersion(meeting.version ?? 1, expectedVersion);
+    if (meeting.status === 'closed') throw new WorkspaceApiError('CONFLICT', 'Closed meetings cannot be rescheduled.');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(input.scheduledDate) || (() => { const parsed = new Date(`${input.scheduledDate}T12:00:00Z`); return Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== input.scheduledDate; })()) throw new WorkspaceApiError('VALIDATION', 'Meeting date must be a valid date.');
+    if (!input.scheduledTime.trim()) throw new WorkspaceApiError('VALIDATION', 'Meeting time is required.');
+    Object.assign(meeting, { scheduledDate: input.scheduledDate, scheduledTime: input.scheduledTime.trim(), dateLabel: meetingDateLabel(input.scheduledDate), weekStartDate: weekStartDateFor(input.scheduledDate), updatedAt: nowIso(), version: (meeting.version ?? 1) + 1 });
+    this.audit('Updated meeting schedule', meeting.id, `Moved ${this.workspace.teams.find((team) => team.id === teamId)?.name ?? teamId} L10 to ${meeting.dateLabel} at ${meeting.scheduledTime}.`, 'meeting');
     return this.result();
   }
 
@@ -925,6 +954,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const sections = meetingSectionsFor(activeTeam);
     meeting.status = 'closed';
     meeting.closedAt = timestamp;
+    meeting.version = (meeting.version ?? 1) + 1;
     meeting.agendaProgress = sections.length;
     meeting.agendaTotal = sections.length;
     meeting.recap = meetingRecap(this.workspace, activeTeam, meeting, recap);
@@ -932,9 +962,9 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     meeting.idsTotal = meeting.idsIssueIds.length;
     meeting.idsSolved = meeting.idsIssueIds.filter((issueId) => this.workspace.issues.find((issue) => issue.id === issueId)?.status === 'solved').length;
     advanceIssueEscalations(this.workspace, activeTeam, meeting, timestamp, this.notify.bind(this));
-    const nextDate = new Date(new Date(timestamp).getTime() + 7 * DAY);
+    const nextDate = nextConfiguredMeetingDateAfter(activeTeam, meeting.scheduledDate ?? weekStartDateFor(new Date()), timestamp);
     const carriedIssueIds = meeting.idsIssueIds.filter((issueId) => this.workspace.issues.find((issue) => issue.id === issueId)?.status !== 'solved');
-    const nextMeeting: Workspace['meetings'][number] = { id: `meeting-${activeTeam.id}-${nextDate.toISOString().slice(0, 10)}-${Date.now()}`, teamId: activeTeam.id, label: `${activeTeam.shortName} L10`, dateLabel: `${activeTeam.meetingDay} · ${nextDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`, weekStartDate: weekStartDateFor(nextDate), status: 'upcoming', facilitatorId: activeTeam.escalationUserIds[0] ?? meeting.facilitatorId, attendeeIds: [...meeting.attendeeIds], lastRating: meeting.lastRating, agendaProgress: 0, agendaTotal: sections.length, idsSolved: 0, idsTotal: carriedIssueIds.length, recap: '', sectionNotes: {}, idsIssueIds: carriedIssueIds, createdTodoIds: [], idsNotes: [] };
+    const nextMeeting: Workspace['meetings'][number] = { id: `meeting-${activeTeam.id}-${nextDate}-${Date.now()}`, teamId: activeTeam.id, label: `${activeTeam.shortName} L10`, dateLabel: meetingDateLabel(nextDate), scheduledDate: nextDate, scheduledTime: activeTeam.meetingTime, weekStartDate: weekStartDateFor(nextDate), status: 'upcoming', facilitatorId: activeTeam.escalationUserIds[0] ?? meeting.facilitatorId, attendeeIds: [...meeting.attendeeIds], lastRating: meeting.lastRating, agendaProgress: 0, agendaTotal: sections.length, idsSolved: 0, idsTotal: carriedIssueIds.length, recap: '', sectionNotes: {}, idsIssueIds: carriedIssueIds, createdTodoIds: [], idsNotes: [], version: 1 };
     this.workspace.meetings.push(nextMeeting);
     this.audit('Closed L10 meeting', meeting.id, recap || 'Meeting closed without a recap.', 'meeting');
     return this.result();
@@ -971,7 +1001,7 @@ function codeForResponse(value: unknown): WorkspaceApiError['code'] {
 }
 
 function serverTeam(team: Team & { teamId?: string }): Team {
-  return { ...team, id: team.id || team.teamId || '', memberCount: team.memberCount ?? 0 };
+  return { ...team, id: team.id || team.teamId || '', memberCount: team.memberCount ?? 0, meetingCadence: team.meetingCadence ?? 'weekly' };
 }
 
 function serverMembership(membership: TeamMembership): TeamMembership {
@@ -999,7 +1029,7 @@ function mapSnapshot(snapshot: ApiSnapshot): Workspace {
     metrics: snapshot.metrics,
     scorecardResults: snapshot.scorecardResults ?? [],
     headlines: snapshot.headlines,
-    meetings: snapshot.meetings,
+    meetings: snapshot.meetings.map((meeting) => normalizeMeeting(meeting, teams.find((team) => team.id === meeting.teamId))),
     activity: snapshot.audit.map((event) => ({ id: event.id, actorId: event.actorId, action: event.action, target: event.target, detail: event.detail, createdAt: event.createdAt, type: (event.type ?? event.eventType) === 'admin' ? 'team' : (event.type ?? event.eventType ?? 'team') as Workspace['activity'][number]['type'] })),
   };
 }
@@ -1078,6 +1108,7 @@ export class HttpWorkspaceApi implements WorkspaceApi {
     if (!issue) throw new WorkspaceApiError('NOT_FOUND', 'Issue not found.');
     return this.mutate(`/teams/${issue.teamId}/meetings/${meetingId}/issues/${issueId}/notes`, 'POST', { note }, expectedVersion);
   }
+  async updateMeetingSchedule(teamId: string, meetingId: string, input: { scheduledDate: string; scheduledTime: string }, expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}`, 'PATCH', input, expectedVersion); }
   async requestIssueTransfer(issueId: string, destinationTeamId: string, note?: string) { return this.mutate(`/issues/${issueId}/transfers`, 'POST', { destinationTeamId, note }); }
   async acceptIssueTransfer(transferId: string, expectedVersion?: number) { return this.mutate(`/issue-transfers/${transferId}/accept`, 'POST', undefined, expectedVersion); }
   async rejectIssueTransfer(transferId: string, message: string, expectedVersion?: number) { return this.mutate(`/issue-transfers/${transferId}/reject`, 'POST', { message }, expectedVersion); }
@@ -1087,8 +1118,8 @@ export class HttpWorkspaceApi implements WorkspaceApi {
   async createIssueFromMessage(messageId: string, input: Pick<Issue, 'title' | 'detail' | 'category' | 'priority' | 'horizon' | 'ownerId'>) { return this.mutate(`/messages/${messageId}/issue`, 'POST', input); }
   async markNotificationRead(notificationId: string) { return this.mutate(`/notifications/${notificationId}/read`, 'PATCH'); }
   async updateProfile(input: Pick<Partial<User>, 'name' | 'email' | 'avatarDataUrl'>) { return this.mutate('/profile', 'PATCH', input); }
-  async createTeam(input: Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials'> & { meetingSections?: MeetingSectionConfig[]; escalationUserIds?: string[] }) { return this.mutate('/admin/teams', 'POST', input); }
-  async updateTeam(teamId: string, input: Partial<Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds'>>) { return this.mutate(`/admin/teams/${teamId}`, 'PATCH', input); }
+  async createTeam(input: Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials'> & { meetingSections?: MeetingSectionConfig[]; escalationUserIds?: string[] }) { return this.mutate('/admin/teams', 'POST', input); }
+  async updateTeam(teamId: string, input: Partial<Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds'>>) { return this.mutate(`/admin/teams/${teamId}`, 'PATCH', input); }
   async createUser(input: Pick<User, 'name' | 'email' | 'accent'> & { platformAdmin?: boolean }) { return this.mutate('/admin/users', 'POST', input); }
   async upsertMembership(input: Pick<TeamMembership, 'userId' | 'teamId' | 'role'>) { return this.mutate('/admin/memberships', 'PUT', input); }
   async updateAgeSettings(settings: IssueAgeSettings) { return this.mutate('/admin/settings/aging', 'PUT', settings); }

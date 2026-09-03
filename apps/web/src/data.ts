@@ -1,4 +1,4 @@
-import { defaultMeetingSections, scorecardTrendFor, weekStartDateFor } from './types';
+import { defaultMeetingSections, meetingDateFor, meetingDateLabel, scorecardTrendFor, weekStartDateFor } from './types';
 import type {
   AuditEvent,
   Headline,
@@ -67,31 +67,31 @@ const users: User[] = [
 const teams: Team[] = [
   {
     id: 'leadership', name: 'Leadership Team', shortName: 'Leadership', description: 'Company-wide operating rhythm and cross-functional priorities.',
-    parentTeamId: null, nodeType: 'operational', memberCount: 4, meetingDay: 'Monday', meetingTime: '9:00 AM', accent: '#007E32', initials: 'LT', active: true, meetingSections: defaultMeetingSections(), escalationUserIds: ['ava-khan'],
+    parentTeamId: null, nodeType: 'operational', memberCount: 4, meetingCadence: 'weekly', meetingDay: 'Monday', meetingTime: '9:00 AM', accent: '#007E32', initials: 'LT', active: true, meetingSections: defaultMeetingSections(), escalationUserIds: ['ava-khan'],
   },
   {
     id: 'professional-services', name: 'Professional Services', shortName: 'Prof. Services', description: 'Client-facing expertise, delivery quality, and specialist capability.',
-    parentTeamId: 'leadership', nodeType: 'operational', memberCount: 2, meetingDay: 'Tuesday', meetingTime: '9:00 AM', accent: '#4c8f86', initials: 'PS', active: true, meetingSections: defaultMeetingSections(), escalationUserIds: ['ava-khan', 'marcus-lee'],
+    parentTeamId: 'leadership', nodeType: 'operational', memberCount: 2, meetingCadence: 'weekly', meetingDay: 'Tuesday', meetingTime: '9:00 AM', accent: '#4c8f86', initials: 'PS', active: true, meetingSections: defaultMeetingSections(), escalationUserIds: ['ava-khan', 'marcus-lee'],
   },
   {
     id: 'projects', name: 'Projects', shortName: 'Projects', description: 'Predictable project delivery from kickoff through first value.',
-    parentTeamId: 'professional-services', nodeType: 'operational', memberCount: 2, meetingDay: 'Tuesday', meetingTime: '10:30 AM', accent: '#568e85', initials: 'PR', active: true, meetingSections: defaultMeetingSections(), escalationUserIds: ['marcus-lee', 'ava-khan'],
+    parentTeamId: 'professional-services', nodeType: 'operational', memberCount: 2, meetingCadence: 'weekly', meetingDay: 'Tuesday', meetingTime: '10:30 AM', accent: '#568e85', initials: 'PR', active: true, meetingSections: defaultMeetingSections(), escalationUserIds: ['marcus-lee', 'ava-khan'],
   },
   {
     id: 'cybersecurity', name: 'Cybersecurity', shortName: 'Cybersecurity', description: 'Security outcomes, readiness, and trusted specialist advice.',
-    parentTeamId: 'professional-services', nodeType: 'operational', memberCount: 2, meetingDay: 'Wednesday', meetingTime: '9:00 AM', accent: '#746cb5', initials: 'CY', active: true, meetingSections: defaultMeetingSections().map((section) => section.id === 'scorecard' ? { ...section, enabled: false } : section), escalationUserIds: ['priya-shah', 'ava-khan'],
+    parentTeamId: 'professional-services', nodeType: 'operational', memberCount: 2, meetingCadence: 'weekly', meetingDay: 'Wednesday', meetingTime: '9:00 AM', accent: '#746cb5', initials: 'CY', active: true, meetingSections: defaultMeetingSections().map((section) => section.id === 'scorecard' ? { ...section, enabled: false } : section), escalationUserIds: ['priya-shah', 'ava-khan'],
   },
   {
     id: 'managed-services', name: 'Managed Services', shortName: 'Managed Services', description: 'Calm, consistent operations and dependable customer support.',
-    parentTeamId: 'leadership', nodeType: 'operational', memberCount: 3, meetingDay: 'Wednesday', meetingTime: '10:30 AM', accent: '#d0a15b', initials: 'MS', active: true, meetingSections: defaultMeetingSections(), escalationUserIds: ['daniel-cho', 'ava-khan'],
+    parentTeamId: 'leadership', nodeType: 'operational', memberCount: 3, meetingCadence: 'weekly', meetingDay: 'Wednesday', meetingTime: '10:30 AM', accent: '#d0a15b', initials: 'MS', active: true, meetingSections: defaultMeetingSections(), escalationUserIds: ['daniel-cho', 'ava-khan'],
   },
   {
     id: 'service-development', name: 'Service Development', shortName: 'Service Dev', description: 'Evolve the service catalogue, tooling, and operating playbooks.',
-    parentTeamId: 'managed-services', nodeType: 'operational', memberCount: 2, meetingDay: 'Thursday', meetingTime: '9:00 AM', accent: '#6787b7', initials: 'SD', active: true, meetingSections: defaultMeetingSections(), escalationUserIds: ['maria-ortiz', 'daniel-cho'],
+    parentTeamId: 'managed-services', nodeType: 'operational', memberCount: 2, meetingCadence: 'weekly', meetingDay: 'Thursday', meetingTime: '9:00 AM', accent: '#6787b7', initials: 'SD', active: true, meetingSections: defaultMeetingSections(), escalationUserIds: ['maria-ortiz', 'daniel-cho'],
   },
   {
     id: 'service-delivery', name: 'Service Delivery', shortName: 'Service Delivery', description: 'Deliver a consistent, high-trust managed service every day.',
-    parentTeamId: 'managed-services', nodeType: 'operational', memberCount: 2, meetingDay: 'Thursday', meetingTime: '10:30 AM', accent: '#c17872', initials: 'SL', active: true, meetingSections: defaultMeetingSections(), escalationUserIds: ['jon-bell', 'daniel-cho'],
+    parentTeamId: 'managed-services', nodeType: 'operational', memberCount: 2, meetingCadence: 'weekly', meetingDay: 'Thursday', meetingTime: '10:30 AM', accent: '#c17872', initials: 'SL', active: true, meetingSections: defaultMeetingSections(), escalationUserIds: ['jon-bell', 'daniel-cho'],
   },
 ];
 
@@ -312,12 +312,15 @@ const headlines: Headline[] = [
   { id: 'headline-risk', teamId: 'cybersecurity', authorId: 'priya-shah', type: 'concern', title: 'A customer assurance request needs an owner', detail: 'The request is not blocked, but it needs an explicit decision this week.', createdAt: daysAgo(2), issueId: 'issue-cyber-owners' },
 ];
 
-const meetings: MeetingInstance[] = teams.map((team) => ({
-  id: `meeting-${team.id}-${currentWeekStartDate}`, teamId: team.id, label: `${team.shortName} L10`, dateLabel: 'Monday · Aug 31', weekStartDate: currentWeekStartDate, status: 'upcoming',
-  facilitatorId: memberships.find((membership) => membership.teamId === team.id && membership.role === 'TeamLead')?.userId ?? 'ava-khan',
-  attendeeIds: memberships.filter((membership) => membership.teamId === team.id && membership.active).map((membership) => membership.userId),
-  lastRating: 8.8, agendaProgress: 0, agendaTotal: team.meetingSections.filter((section) => section.enabled).length, idsSolved: 0, idsTotal: issues.filter((issue) => issue.teamId === team.id && issue.status !== 'solved').length, recap: '', sectionNotes: {}, idsIssueIds: [], createdTodoIds: [], idsNotes: [],
-}));
+const meetings: MeetingInstance[] = teams.map((team) => {
+  const scheduledDate = meetingDateFor(team, new Date(now));
+  return {
+    id: `meeting-${team.id}-${currentWeekStartDate}`, teamId: team.id, label: `${team.shortName} L10`, dateLabel: meetingDateLabel(scheduledDate), scheduledDate, scheduledTime: team.meetingTime, weekStartDate: weekStartDateFor(scheduledDate), status: 'upcoming',
+    facilitatorId: memberships.find((membership) => membership.teamId === team.id && membership.role === 'TeamLead')?.userId ?? 'ava-khan',
+    attendeeIds: memberships.filter((membership) => membership.teamId === team.id && membership.active).map((membership) => membership.userId),
+    lastRating: 8.8, agendaProgress: 0, agendaTotal: team.meetingSections.filter((section) => section.enabled).length, idsSolved: 0, idsTotal: issues.filter((issue) => issue.teamId === team.id && issue.status !== 'solved').length, recap: '', sectionNotes: {}, idsIssueIds: [], createdTodoIds: [], idsNotes: [], version: 1,
+  };
+});
 
 const activity: AuditEvent[] = [
   { id: 'audit-transfer-requested', actorId: 'marcus-lee', action: 'Requested transfer', target: 'issue-transfer-pending', detail: 'Sent the Issue from Projects to Leadership.', createdAt: daysAgo(2), type: 'transfer' },

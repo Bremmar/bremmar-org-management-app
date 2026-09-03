@@ -4,7 +4,9 @@ Bremmar is a standalone React/Azure Functions operating system for multi-team
 EOS work. It brings hierarchical team workspaces, quarterly Rocks and Tasks,
 weekly To-Dos, Issues/IDS, Scorecard measurables, Headlines, meeting history,
 cross-team messages and Issue handoffs, configurable L10 agendas, escalation
-paths, and Leadership rollups into one source of truth.
+paths, and Leadership rollups into one source of truth. Team configuration
+supports weekly or monthly L10 cadence, and an open/current meeting can be
+rescheduled when its date or time changes.
 
 ## Repository layout
 
@@ -54,6 +56,19 @@ Viewer and Leadership-only access is read-only. L10 reads the result matching
 the meeting’s `weekStartDate`, while the Scorecard screen owns weekly entry and
 history. Teams with the Scorecard section disabled have no Scorecard navigation
 or L10 Scorecard content until an administrator enables it.
+
+## Meeting cadence and rescheduling
+
+Team configuration stores `meetingCadence` as `weekly` or `monthly`. Monthly
+recurrence preserves the selected day of month and clamps month-end meetings
+to the last valid day. Every meeting occurrence stores its `scheduledDate` and
+`scheduledTime`. Team editors can update the current open occurrence through:
+
+- `PATCH /api/teams/{teamId}/meetings/{meetingId}`
+
+The schedule update is version-checked with `If-Match`, records an immutable
+meeting audit event, and leaves the team’s future cadence unchanged. Closed
+meeting records cannot be rescheduled.
 
 Changing an incomplete To-Do’s due date to a later date automatically reopens it,
 increments its rollover count, synchronizes a linked Rock Task, and creates the

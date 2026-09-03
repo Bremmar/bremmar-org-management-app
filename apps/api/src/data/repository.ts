@@ -8,6 +8,7 @@ import {
   DEFAULT_MEETING_SECTIONS,
   issueAgeBand,
   meetingSectionsFor,
+  nextConfiguredMeetingDateAfter,
   partitionFor,
   scorecardTrendFor,
   weekStartDateFor,
@@ -19,6 +20,7 @@ import {
   type IssueAgeSettingsRecord,
   type IssueRecord,
   type IssueTransferRecord,
+  type MeetingCadence,
   type MeetingIssueNoteRecord,
   type MeetingRecord,
   type TeamMessageRecord,
@@ -46,6 +48,13 @@ export class RepositoryError extends Error {
   }
 }
 
+class CosmosBatchError extends Error {
+  constructor(public readonly statusCode: number, message: string) {
+    super(message);
+    this.name = 'CosmosBatchError';
+  }
+}
+
 export interface AdminSnapshot {
   teams: TeamRecord[];
   users: UserProfile[];
@@ -63,6 +72,11 @@ export interface CreateUserInput {
   /** Normalized Entra directory object ID for a deployed identity-linked user. */
   identityId?: string;
 }
+
+export type CreateTeamInput = Omit<TeamRecord, keyof WorkspaceRecord | 'teamId' | 'active' | 'memberCount' | 'meetingCadence'> & {
+  teamId?: string;
+  meetingCadence?: MeetingCadence;
+};
 
 export interface WorkspaceRepository {
   readonly environmentId: EnvironmentId;
@@ -103,10 +117,11 @@ export interface WorkspaceRepository {
   sendTeamMessage(input: { fromTeamId: string; toTeamId: string; subject: string; body: string; senderId: string }): Promise<TeamMessageRecord>;
   markMessageRead(messageId: string, userId: string, expectedVersion?: number): Promise<TeamMessageRecord>;
   createIssueFromMessage(input: { messageId: string; title: string; detail: string; category?: string; priority?: number; horizon?: IssueRecord['horizon']; ownerId?: string }, actorId: string): Promise<IssueRecord>;
+  updateMeetingSchedule(teamId: string, meetingId: string, input: { scheduledDate: string; scheduledTime: string }, actorId: string, expectedVersion?: number): Promise<MeetingRecord>;
   closeMeeting(teamId: string, meetingId: string, recap: string, rating: number, actorId: string, expectedVersion?: number): Promise<MeetingRecord>;
   getAdminSnapshot(actorId: string): Promise<AdminSnapshot>;
-  createTeam(input: Omit<TeamRecord, keyof WorkspaceRecord | 'teamId' | 'active' | 'memberCount'> & { teamId?: string }, actorId: string): Promise<TeamRecord>;
-  updateTeam(teamId: string, input: Partial<Pick<TeamRecord, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds' | 'active'>>, actorId: string, expectedVersion?: number): Promise<TeamRecord>;
+  createTeam(input: CreateTeamInput, actorId: string): Promise<TeamRecord>;
+  updateTeam(teamId: string, input: Partial<Pick<TeamRecord, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds' | 'active'>>, actorId: string, expectedVersion?: number): Promise<TeamRecord>;
   createUser(input: CreateUserInput, actorId: string): Promise<UserProfile>;
   upsertMembership(input: { userId: string; teamId: string; role: TeamMembership['role'] }, actorId: string): Promise<TeamMembership>;
   updateAgeSettings(settings: IssueAgeSettings, actorId: string, expectedVersion?: number): Promise<IssueAgeSettings>;
@@ -183,7 +198,59 @@ function assertText(value: string, field: string) {
 }
 
 function assertDate(value: string, field: string) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(new Date(`${value}T12:00:00Z`).getTime())) throw new RepositoryError('VALIDATION', `${field} must be a valid date.`);
+  try {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || new Date(`${value}T12:00:00Z`).toISOString().slice(0, 10) !== value) throw new Error('Invalid date.');
+  } catch {
+    throw new RepositoryError('VALIDATION', `${field} must be a valid date.`);
+  }
+}
+
+function assertMeetingCadence(value: MeetingCadence | undefined) {
+  if (value !== undefined && value !== 'weekly' && value !== 'monthly') throw new RepositoryError('VALIDATION', 'Meeting cadence must be weekly or monthly.');
+}
+
+const weekdayOffsets: Record<string, number> = { sunday: 6, monday: 0, tuesday: 1, wednesday: 2, thursday: 3, friday: 4, saturday: 5 };
+
+function assertMeetingConfiguration(cadence: MeetingCadence, meetingDay: string, meetingTime: string) {
+  assertText(meetingDay, cadence === 'monthly' ? 'Meeting date' : 'Meeting day');
+  assertText(meetingTime, 'Meeting time');
+  const normalizedDay = meetingDay.trim().toLowerCase();
+  if (cadence === 'monthly' && !/^(?:[1-9]|[12]\d|3[01])$/.test(normalizedDay)) throw new RepositoryError('VALIDATION', 'Monthly meeting date must be a day number from 1 to 31.');
+  if (cadence === 'weekly' && weekdayOffsets[normalizedDay] === undefined) throw new RepositoryError('VALIDATION', 'Weekly meeting day must be Sunday through Saturday.');
+}
+
+function meetingDateFor(team: Pick<TeamRecord, 'meetingCadence' | 'meetingDay'>, value: string | Date = new Date()) {
+  const current = new Date(typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T12:00:00Z` : value);
+  if (Number.isNaN(current.getTime())) return new Date().toISOString().slice(0, 10);
+  if ((team.meetingCadence ?? 'weekly') === 'monthly') {
+    const requestedDay = Number.parseInt(team.meetingDay.trim(), 10);
+    if (Number.isInteger(requestedDay) && requestedDay >= 1 && requestedDay <= 31) {
+      const lastDay = new Date(Date.UTC(current.getUTCFullYear(), current.getUTCMonth() + 1, 0)).getUTCDate();
+      current.setUTCDate(Math.min(requestedDay, lastDay));
+    }
+    return current.toISOString().slice(0, 10);
+  }
+  const weekStart = new Date(`${weekStartDateFor(current)}T12:00:00Z`);
+  const offset = weekdayOffsets[team.meetingDay.trim().toLowerCase()];
+  weekStart.setUTCDate(weekStart.getUTCDate() + (offset ?? 0));
+  return weekStart.toISOString().slice(0, 10);
+}
+
+function meetingDateLabel(scheduledDate: string) {
+  return new Date(`${scheduledDate}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' }).replace(', ', ' · ');
+}
+
+function normalizedMeeting(team: TeamRecord | undefined, meeting: MeetingRecord): MeetingRecord {
+  const fallbackTeam = team ?? { meetingCadence: 'weekly' as const, meetingDay: 'Monday', meetingTime: '9:00 AM' };
+  let scheduledDate = meeting.scheduledDate;
+  try {
+    if (!scheduledDate) scheduledDate = meetingDateFor(fallbackTeam, meeting.weekStartDate ?? new Date());
+    assertDate(scheduledDate, 'Meeting date');
+  } catch {
+    scheduledDate = meetingDateFor(fallbackTeam, meeting.weekStartDate ?? new Date());
+  }
+  const scheduledTime = meeting.scheduledTime?.trim() || fallbackTeam.meetingTime || '9:00 AM';
+  return { ...meeting, scheduledDate, scheduledTime, dateLabel: meetingDateLabel(scheduledDate), weekStartDate: weekStartDateFor(scheduledDate), version: meeting.version ?? 1 };
 }
 
 function appendMeetingNote(current: string | undefined, label: string, note: string) {
@@ -224,6 +291,7 @@ function makeTeam(input: Partial<TeamRecord> & { teamId: string; name: string; s
     parentTeamId: input.parentTeamId,
     nodeType: input.nodeType,
     active: input.active ?? true,
+    meetingCadence: input.meetingCadence ?? 'weekly',
     meetingDay: input.meetingDay ?? 'Monday',
     meetingTime: input.meetingTime ?? '9:00 AM',
     accent: input.accent ?? '#4c8f86',
@@ -350,7 +418,8 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     this.meetings = this.teams.filter((team) => team.nodeType === 'operational').map((team) => {
       const issueIds = this.issues.filter((issue) => issue.teamId === team.teamId && issue.horizon === 'short-term' && issue.assignmentState !== 'redirected').map((issue) => issue.id);
       const sections = meetingSectionsFor(team);
-      return { ...baseRecord(`meeting-${team.teamId}-current`, 'meeting', team.teamId), kind: 'meeting', teamId: team.teamId, label: `${team.shortName} L10`, dateLabel: `This week · ${team.meetingDay}`, weekStartDate: weekStartDateFor(new Date()), status: 'upcoming', facilitatorId: team.escalationUserIds[0] ?? 'ava-khan', attendeeIds: this.memberships.filter((membership) => membership.teamId === team.teamId && membership.active).map((membership) => membership.userId), lastRating: 8, agendaProgress: 0, agendaTotal: sections.length, idsSolved: 0, idsTotal: issueIds.length, recap: '', sectionNotes: {}, idsIssueIds: [], createdTodoIds: [], idsNotes: [] } satisfies MeetingRecord;
+      const scheduledDate = meetingDateFor(team);
+      return { ...baseRecord(`meeting-${team.teamId}-current`, 'meeting', team.teamId), kind: 'meeting', teamId: team.teamId, label: `${team.shortName} L10`, dateLabel: meetingDateLabel(scheduledDate), scheduledDate, scheduledTime: team.meetingTime, weekStartDate: weekStartDateFor(scheduledDate), status: 'upcoming', facilitatorId: team.escalationUserIds[0] ?? 'ava-khan', attendeeIds: this.memberships.filter((membership) => membership.teamId === team.teamId && membership.active).map((membership) => membership.userId), lastRating: 8, agendaProgress: 0, agendaTotal: sections.length, idsSolved: 0, idsTotal: issueIds.length, recap: '', sectionNotes: {}, idsIssueIds: [], createdTodoIds: [], idsNotes: [] } satisfies MeetingRecord;
     });
     const currentWeekStartDate = weekStartDateFor(new Date());
     const previousWeekStartDate = weekStartDateFor(new Date(new Date(currentWeekStartDate).getTime() - 7 * DAY));
@@ -380,10 +449,10 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
   }
 
   protected refreshDerivedState() {
-    this.teams = this.teams.map((team) => ({ ...team, meetingSections: team.meetingSections?.length ? team.meetingSections : clone(DEFAULT_MEETING_SECTIONS), escalationUserIds: team.escalationUserIds ?? [] }));
+    this.teams = this.teams.map((team) => ({ ...team, meetingCadence: team.meetingCadence ?? 'weekly', meetingSections: team.meetingSections?.length ? team.meetingSections : clone(DEFAULT_MEETING_SECTIONS), escalationUserIds: team.escalationUserIds ?? [] }));
     this.todos = this.todos.map((todo) => ({ ...todo, carryForwardCount: todo.carryForwardCount ?? 0, flagged: todo.flagged ?? false }));
     this.issues = this.issues.map((issue) => ({ ...issue, meetingsPassed: issue.meetingsPassed ?? 0, escalationState: issue.escalationState ?? 'not-scheduled', escalationLevel: issue.escalationLevel ?? 0 }));
-    this.meetings = this.meetings.map((meeting) => ({ ...meeting, weekStartDate: meeting.weekStartDate ?? weekStartDateFor(new Date()), sectionNotes: meeting.sectionNotes ?? {}, idsIssueIds: meeting.idsIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: meeting.idsNotes ?? [], agendaTotal: meetingSectionsFor(this.team(meeting.teamId) ?? { meetingSections: DEFAULT_MEETING_SECTIONS }).length }));
+    this.meetings = this.meetings.map((meeting) => normalizedMeeting(this.team(meeting.teamId) ?? undefined, { ...meeting, sectionNotes: meeting.sectionNotes ?? {}, idsIssueIds: meeting.idsIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: meeting.idsNotes ?? [], agendaTotal: meetingSectionsFor(this.team(meeting.teamId) ?? { meetingSections: DEFAULT_MEETING_SECTIONS }).length }));
     this.issues = this.issues.map((issue) => issueAge(issue, this.settings));
   }
 
@@ -1185,6 +1254,31 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     }
   }
 
+  async updateMeetingSchedule(teamId: string, meetingId: string, input: { scheduledDate: string; scheduledTime: string }, actorId: string, expectedVersion?: number) {
+    this.requireWrite(teamId, actorId);
+    const team = this.team(teamId);
+    if (!team) throw new RepositoryError('NOT_FOUND', 'Team not found.');
+    const meeting = this.meetings.find((item) => item.id === meetingId && item.teamId === teamId);
+    if (!meeting) throw new RepositoryError('NOT_FOUND', 'Meeting not found.');
+    assertExpectedVersion(meeting.version, expectedVersion);
+    if (meeting.status === 'closed') throw new RepositoryError('CONFLICT', 'Closed meetings cannot be rescheduled.');
+    assertDate(input.scheduledDate, 'Meeting date');
+    assertText(input.scheduledTime, 'Meeting time');
+    const scheduledTime = input.scheduledTime.trim();
+    const timestamp = nowIso();
+    Object.assign(meeting, {
+      scheduledDate: input.scheduledDate,
+      scheduledTime,
+      dateLabel: meetingDateLabel(input.scheduledDate),
+      weekStartDate: weekStartDateFor(input.scheduledDate),
+      updatedAt: timestamp,
+      updatedBy: actorId,
+      version: meeting.version + 1,
+    });
+    this.recordAudit(actorId, 'Updated meeting schedule', meeting.id, `Moved ${team.name} L10 to ${meeting.dateLabel} at ${scheduledTime}.`, 'meeting');
+    return clone(meeting);
+  }
+
   async closeMeeting(teamId: string, meetingId: string, recap: string, rating: number, actorId: string, expectedVersion?: number) {
     this.requireWrite(teamId, actorId);
     const team = this.team(teamId);
@@ -1210,9 +1304,9 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     meeting.updatedBy = actorId;
     meeting.version += 1;
     this.advanceIssueEscalations(team, meeting, timestamp);
-    const nextDate = new Date(new Date(timestamp).getTime() + 7 * DAY);
+    const nextDate = nextConfiguredMeetingDateAfter(team, meeting.scheduledDate, timestamp);
     const carriedIssueIds = meeting.idsIssueIds.filter((issueId) => this.activeIssue(issueId)?.status !== 'solved');
-    const nextMeeting: MeetingRecord = { ...baseRecord(`meeting-${teamId}-${nextDate.toISOString().slice(0, 10)}-${Date.now()}`, 'meeting', teamId), kind: 'meeting', teamId, label: `${team.shortName} L10`, dateLabel: `${team.meetingDay} · ${nextDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`, weekStartDate: weekStartDateFor(nextDate), status: 'upcoming', facilitatorId: meeting.facilitatorId, attendeeIds: [...meeting.attendeeIds], lastRating: meeting.lastRating, agendaProgress: 0, agendaTotal: sections.length, idsSolved: 0, idsTotal: carriedIssueIds.length, recap: '', sectionNotes: {}, idsIssueIds: carriedIssueIds, createdTodoIds: [], idsNotes: [] };
+    const nextMeeting: MeetingRecord = { ...baseRecord(`meeting-${teamId}-${nextDate}-${Date.now()}`, 'meeting', teamId), kind: 'meeting', teamId, label: `${team.shortName} L10`, dateLabel: meetingDateLabel(nextDate), scheduledDate: nextDate, scheduledTime: team.meetingTime, weekStartDate: weekStartDateFor(nextDate), status: 'upcoming', facilitatorId: meeting.facilitatorId, attendeeIds: [...meeting.attendeeIds], lastRating: meeting.lastRating, agendaProgress: 0, agendaTotal: sections.length, idsSolved: 0, idsTotal: carriedIssueIds.length, recap: '', sectionNotes: {}, idsIssueIds: carriedIssueIds, createdTodoIds: [], idsNotes: [] };
     this.meetings.push(nextMeeting);
     this.recordAudit(actorId, 'Closed L10 meeting', meeting.id, recap || 'Meeting closed without a recap.', 'meeting');
     return clone(meeting);
@@ -1223,10 +1317,13 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     return { teams: clone(this.teams), users: clone(this.users), memberships: clone(this.memberships), settings: { ...clone(this.settings), version: this.settingsVersion }, audit: clone(this.audit), etag: etagFor([...this.teams, ...this.users, ...this.memberships, ...this.audit]) };
   }
 
-  async createTeam(input: Omit<TeamRecord, keyof WorkspaceRecord | 'teamId' | 'active'> & { teamId?: string }, actorId: string) {
+  async createTeam(input: CreateTeamInput, actorId: string) {
     this.requireAdmin(actorId);
     assertText(input.name, 'Team name');
     assertText(input.shortName, 'Team short name');
+    const meetingCadence = input.meetingCadence ?? 'weekly';
+    assertMeetingCadence(meetingCadence);
+    assertMeetingConfiguration(meetingCadence, input.meetingDay ?? 'Monday', input.meetingTime ?? '9:00 AM');
     if (!input.parentTeamId && this.teams.some((team) => team.active)) throw new RepositoryError('VALIDATION', 'New teams must be placed under the Leadership Team.');
     if (input.parentTeamId && !this.team(input.parentTeamId)) throw new RepositoryError('NOT_FOUND', 'Parent team not found.');
     let teamId = input.teamId || idFor('team', input.shortName);
@@ -1235,10 +1332,11 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     this.teams.push(team);
     if (team.nodeType === 'operational') {
       const sections = meetingSectionsFor(team);
+      const scheduledDate = meetingDateFor(team);
       this.meetings.push({
         ...baseRecord(`meeting-${team.teamId}-current`, 'meeting', team.teamId),
-        kind: 'meeting', teamId: team.teamId, label: `${team.shortName} L10`, dateLabel: `This week · ${team.meetingDay}`, status: 'upcoming',
-        weekStartDate: weekStartDateFor(new Date()),
+        kind: 'meeting', teamId: team.teamId, label: `${team.shortName} L10`, dateLabel: meetingDateLabel(scheduledDate), scheduledDate, scheduledTime: team.meetingTime, status: 'upcoming',
+        weekStartDate: weekStartDateFor(scheduledDate),
         facilitatorId: team.escalationUserIds[0] ?? actorId, attendeeIds: [], lastRating: 0, agendaProgress: 0,
         agendaTotal: sections.length, idsSolved: 0, idsTotal: 0, recap: '', sectionNotes: {}, idsIssueIds: [], createdTodoIds: [], idsNotes: [],
       });
@@ -1247,7 +1345,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     return clone(team);
   }
 
-  async updateTeam(teamId: string, input: Partial<Pick<TeamRecord, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds' | 'active'>>, actorId: string, expectedVersion?: number) {
+  async updateTeam(teamId: string, input: Partial<Pick<TeamRecord, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds' | 'active'>>, actorId: string, expectedVersion?: number) {
     this.requireAdmin(actorId);
     const team = this.teams.find((item) => item.teamId === teamId);
     if (!team) throw new RepositoryError('NOT_FOUND', 'Team not found.');
@@ -1256,6 +1354,9 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     if (teamId === 'leadership' && input.parentTeamId !== undefined && input.parentTeamId !== null) throw new RepositoryError('VALIDATION', 'Leadership Team must remain the hierarchy root.');
     if (teamId !== 'leadership' && input.parentTeamId === null) throw new RepositoryError('VALIDATION', 'Operational teams must remain under the Leadership Team hierarchy.');
     if (input.parentTeamId && !this.team(input.parentTeamId)) throw new RepositoryError('NOT_FOUND', 'Parent team not found.');
+    const meetingCadence = input.meetingCadence ?? team.meetingCadence ?? 'weekly';
+    assertMeetingCadence(meetingCadence);
+    assertMeetingConfiguration(meetingCadence, input.meetingDay ?? team.meetingDay ?? 'Monday', input.meetingTime ?? team.meetingTime ?? '9:00 AM');
     if (team.nodeType === 'operational' && input.nodeType === 'grouping' && (this.rocks.some((rock) => rock.teamId === teamId) || this.todos.some((todo) => todo.teamId === teamId) || this.issues.some((issue) => issue.teamId === teamId && issue.assignmentState !== 'redirected'))) {
       throw new RepositoryError('VALIDATION', 'Resolve active work before changing this node to grouping-only.');
     }
@@ -1486,7 +1587,8 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
       const failed = response.result?.find((item) => item.statusCode >= 400);
       if (failed) {
         if (failed.statusCode === 412) throw new RepositoryError('CONFLICT', 'One or more records changed elsewhere. Refresh and try again.');
-        throw new RepositoryError('UNAVAILABLE', 'Cosmos could not persist the transactional workspace update.');
+        if (failed.statusCode === 409) throw new RepositoryError('CONFLICT', 'One or more records already exist. Refresh and try again.');
+        throw new CosmosBatchError(failed.statusCode, 'Cosmos rejected the transactional workspace update.');
       }
       response.result?.forEach((item, index) => {
         if (item.eTag) records[index].cosmosEtag = item.eTag;
@@ -1494,6 +1596,8 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
     } catch (error) {
       if (error instanceof RepositoryError) throw error;
       if ((error as { code?: number }).code === 412) throw new RepositoryError('CONFLICT', 'One or more records changed elsewhere. Refresh and try again.');
+      const statusCode = (error as { statusCode?: number; code?: number }).statusCode ?? (typeof (error as { code?: unknown }).code === 'number' ? (error as { code: number }).code : undefined);
+      if (statusCode === 400 || statusCode === 405) throw new CosmosBatchError(statusCode, 'Cosmos rejected the transactional workspace update.');
       throw error;
     }
   }
@@ -1502,8 +1606,21 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
     const byPartition = new Map<string, WorkspaceRecord[]>();
     for (const record of records) byPartition.set(record.pk, [...(byPartition.get(record.pk) ?? []), record]);
     for (const partitionRecords of byPartition.values()) {
-      if (partitionRecords.length > 1 && partitionRecords.length <= 100) await this.writeBatch(partitionRecords);
-      else for (const record of partitionRecords) await this.writeSingle(record);
+      if (partitionRecords.length > 1 && partitionRecords.length <= 100) {
+        try {
+          await this.writeBatch(partitionRecords);
+        } catch (error) {
+          // Some existing Cosmos containers reject transactional batches even
+          // though ordinary item writes are supported. New records have no
+          // ETag yet, so retrying those rejected creates individually is safe;
+          // concurrency failures still surface to the caller.
+          if (error instanceof CosmosBatchError && (error.statusCode === 400 || error.statusCode === 405) && partitionRecords.every((record) => !record.cosmosEtag)) {
+            for (const record of partitionRecords) await this.writeSingle(record);
+          } else {
+            throw error;
+          }
+        }
+      } else for (const record of partitionRecords) await this.writeSingle(record);
     }
   }
 
@@ -1592,7 +1709,7 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
     const teamTransfers = transfers.filter((transfer) => transfer.sourceTeamId === teamId || transfer.destinationTeamId === teamId);
     const teamNotifications = notifications.filter((notification) => notification.recipientUserId === userId && (!notification.teamId || notification.teamId === teamId));
     const teamMessages = messages.filter((message) => message.fromTeamId === teamId || message.toTeamId === teamId);
-    const normalizedMeetings = meetings.map((meeting) => ({ ...meeting, weekStartDate: meeting.weekStartDate ?? weekStartDateFor(new Date()) }));
+    const normalizedMeetings = meetings.map((meeting) => normalizedMeeting(team, meeting));
     return this.publicValue({ environmentId: this.environmentId, team: clone(team), membership: membership ? { teamId, role: membership.role, active: membership.active } : null, dashboard: dashboardFor(teamId, rocks, todos, teamIssues), rocks: clone(rocks), tasks: clone(tasks), todos: clone(todos), issues: clone(teamIssues), transfers: clone(teamTransfers), notifications: clone(teamNotifications), messages: clone(teamMessages), meetings: clone(normalizedMeetings), metrics: clone(metrics), scorecardResults: clone(scorecardResults), etag: etagFor([...rocks, ...tasks, ...todos, ...teamIssues, ...teamTransfers, ...teamMessages, ...normalizedMeetings, ...metrics, ...scorecardResults]) });
   }
 
@@ -1684,6 +1801,7 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
   async createIssue(input: { teamId: string; title: string; detail?: string; category?: string; priority?: number; horizon?: IssueRecord['horizon']; raisedById: string; ownerId?: string; linkedRockId?: string; idsNote?: string }, actorId: string) { return this.withMutation(actorId, () => super.createIssue(input, actorId)); }
   async updateIssue(issueId: string, input: Partial<Pick<IssueRecord, 'title' | 'detail' | 'category' | 'priority' | 'horizon' | 'ownerId' | 'idsNote'>>, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateIssue(issueId, input, actorId, expectedVersion)); }
   async addMeetingIssueNote(issueId: string, meetingId: string, note: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.addMeetingIssueNote(issueId, meetingId, note, actorId, expectedVersion)); }
+  async updateMeetingSchedule(teamId: string, meetingId: string, input: { scheduledDate: string; scheduledTime: string }, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateMeetingSchedule(teamId, meetingId, input, actorId, expectedVersion)); }
   async startIssue(issueId: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.startIssue(issueId, actorId, expectedVersion)); }
   async solveIssue(issueId: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.solveIssue(issueId, actorId, expectedVersion)); }
   async createRock(input: { teamId: string; title: string; description?: string; notes?: string; ownerId: string; dueDate?: string; priority?: RockRecord['priority'] }, actorId: string) { return this.withMutation(actorId, () => super.createRock(input, actorId)); }
@@ -1718,8 +1836,8 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
     const settings = settingsRecord ? { agingDays: settingsRecord.agingDays, staleDays: settingsRecord.staleDays, criticalDays: settingsRecord.criticalDays, version: settingsRecord.version } : clone(DEFAULT_ISSUE_AGE_SETTINGS);
     return this.publicValue({ teams, users: clone(users.filter((user) => user.active)), memberships: clone(memberships.filter((membership) => membership.active)), settings, audit: clone(audit), etag: etagFor([...teams, ...users, ...memberships, ...audit, ...(settingsRecord ? [settingsRecord] : [])]) });
   }
-  async createTeam(input: Omit<TeamRecord, keyof WorkspaceRecord | 'teamId' | 'active' | 'memberCount'> & { teamId?: string }, actorId: string) { return this.withMutation(actorId, () => super.createTeam(input, actorId)); }
-  async updateTeam(teamId: string, input: Partial<Pick<TeamRecord, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds' | 'active'>>, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateTeam(teamId, input, actorId, expectedVersion)); }
+  async createTeam(input: CreateTeamInput, actorId: string) { return this.withMutation(actorId, () => super.createTeam(input, actorId)); }
+  async updateTeam(teamId: string, input: Partial<Pick<TeamRecord, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds' | 'active'>>, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateTeam(teamId, input, actorId, expectedVersion)); }
   async createUser(input: CreateUserInput, actorId: string) { return this.withMutation(actorId, () => super.createUser(input, actorId)); }
   async upsertMembership(input: { userId: string; teamId: string; role: TeamMembership['role'] }, actorId: string) { return this.withMutation(actorId, () => super.upsertMembership(input, actorId)); }
   async updateAgeSettings(settings: IssueAgeSettings, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateAgeSettings(settings, actorId, expectedVersion)); }

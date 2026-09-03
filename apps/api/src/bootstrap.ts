@@ -39,7 +39,7 @@ function adminUser(userId: string, name: string, email: string, environmentId: E
 }
 
 function bootstrapTeam(): TeamRecord {
-  return { ...recordBase('leadership', 'team'), kind: 'team', teamId: 'leadership', name: 'Leadership Team', shortName: 'Leadership', description: 'Company-level direction and visibility.', parentTeamId: null, nodeType: 'operational', active: true, meetingDay: 'Monday', meetingTime: '9:00 AM', accent: '#182b4b', initials: 'LT', meetingSections: structuredClone(DEFAULT_MEETING_SECTIONS), escalationUserIds: [] };
+  return { ...recordBase('leadership', 'team'), kind: 'team', teamId: 'leadership', name: 'Leadership Team', shortName: 'Leadership', description: 'Company-level direction and visibility.', parentTeamId: null, nodeType: 'operational', active: true, meetingCadence: 'weekly', meetingDay: 'Monday', meetingTime: '9:00 AM', accent: '#182b4b', initials: 'LT', meetingSections: structuredClone(DEFAULT_MEETING_SECTIONS), escalationUserIds: [] };
 }
 
 function bootstrapMembership(userId: string, environmentId: EnvironmentId = 'live'): TeamMembership {
@@ -52,10 +52,11 @@ function bootstrapSettings(): IssueAgeSettingsRecord {
 
 function bootstrapMeeting(team: TeamRecord, attendeeId: string, environmentId: EnvironmentId): MeetingRecord {
   const sections = (team.meetingSections?.length ? team.meetingSections : DEFAULT_MEETING_SECTIONS).filter((section) => section.enabled);
+  const scheduledDate = weekStartDateFor(new Date());
   return {
     ...recordBase(`meeting-${team.teamId}-current`, 'meeting', team.teamId, environmentId),
-    kind: 'meeting', teamId: team.teamId, label: `${team.shortName} L10`, dateLabel: `This week · ${team.meetingDay}`,
-    weekStartDate: weekStartDateFor(new Date()), status: 'upcoming', facilitatorId: attendeeId, attendeeIds: [attendeeId],
+    kind: 'meeting', teamId: team.teamId, label: `${team.shortName} L10`, dateLabel: new Date(`${scheduledDate}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' }).replace(', ', ' · '), scheduledDate, scheduledTime: team.meetingTime,
+    weekStartDate: scheduledDate, status: 'upcoming', facilitatorId: attendeeId, attendeeIds: [attendeeId],
     lastRating: 0, agendaProgress: 0, agendaTotal: sections.length, idsSolved: 0, idsTotal: 0, recap: '',
     sectionNotes: {}, idsIssueIds: [], createdTodoIds: [], idsNotes: [],
   };

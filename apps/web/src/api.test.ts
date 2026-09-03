@@ -74,6 +74,25 @@ describe('LocalWorkspaceApi', () => {
     });
   });
 
+  it('supports monthly team cadence and reschedules the current meeting occurrence', async () => {
+    const api = new LocalWorkspaceApi();
+    let workspace = await api.createTeam({ name: 'Monthly Operations', shortName: 'Monthly Ops', description: 'A monthly operating team.', parentTeamId: 'leadership', nodeType: 'operational', meetingCadence: 'monthly', meetingDay: '31', meetingTime: '10:00 AM', accent: '#4c8f86', initials: 'MO' });
+    const team = workspace.teams.find((candidate) => candidate.id === 'monthly-operations')!;
+    workspace = await api.upsertMembership({ userId: 'ava-khan', teamId: team.id, role: 'TeamLead' });
+    let meeting = workspace.meetings.find((candidate) => candidate.teamId === team.id)!;
+    expect(team.meetingCadence).toBe('monthly');
+    expect(meeting.scheduledTime).toBe('10:00 AM');
+
+    workspace = await api.updateMeetingSchedule(team.id, meeting.id, { scheduledDate: '2026-09-21', scheduledTime: '2:30 PM' }, meeting.version);
+    meeting = workspace.meetings.find((candidate) => candidate.id === meeting.id)!;
+    expect(meeting).toMatchObject({ scheduledDate: '2026-09-21', scheduledTime: '2:30 PM', dateLabel: 'Monday · Sep 21', weekStartDate: '2026-09-21' });
+    await expect(api.updateMeetingSchedule(team.id, meeting.id, { scheduledDate: '2026-09-22', scheduledTime: '2:30 PM' }, (meeting.version ?? 1) - 1)).rejects.toMatchObject({ code: 'CONFLICT' });
+
+    workspace = await api.closeMeeting(team.id, 'Monthly review complete.', 9);
+    expect(workspace.meetings.filter((candidate) => candidate.teamId === team.id && candidate.status === 'upcoming')).toHaveLength(1);
+    expect(workspace.meetings.find((candidate) => candidate.teamId === team.id && candidate.status === 'upcoming')?.scheduledTime).toBe('10:00 AM');
+  });
+
   it('uses the configured age bands and preserves age after rejection', async () => {
     expect(ageBandFor(6, { agingDays: 7, staleDays: 14, criticalDays: 30 })).toBe('fresh');
     expect(ageBandFor(7, { agingDays: 7, staleDays: 14, criticalDays: 30 })).toBe('aging');

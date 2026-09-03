@@ -16,6 +16,7 @@ export type PlatformCapability = 'PlatformAdmin';
 export type MessageStatus = 'unread' | 'read' | 'converted';
 export type EscalationState = 'not-scheduled' | 'scheduled' | 'due' | 'escalated';
 export type EnvironmentId = 'live' | 'test';
+export type MeetingCadence = 'weekly' | 'monthly';
 
 export interface EnvironmentSummary {
   id: EnvironmentId;
@@ -74,6 +75,7 @@ export interface Team {
   parentTeamId: string | null;
   nodeType: TeamNodeType;
   memberCount: number;
+  meetingCadence: MeetingCadence;
   meetingDay: string;
   meetingTime: string;
   accent: string;
@@ -283,6 +285,10 @@ export interface MeetingInstance {
   teamId: string;
   label: string;
   dateLabel: string;
+  /** Calendar date selected for this meeting occurrence. Legacy snapshots may omit it. */
+  scheduledDate?: string;
+  /** Display-ready time selected for this meeting occurrence. Legacy snapshots may omit it. */
+  scheduledTime?: string;
   weekStartDate?: string;
   status: MeetingStatus;
   facilitatorId: string;
@@ -346,6 +352,103 @@ export function weekStartDateFor(value: string | Date = new Date()) {
   const day = date.getUTCDay();
   date.setUTCDate(date.getUTCDate() + (day === 0 ? -6 : 1 - day));
   return date.toISOString().slice(0, 10);
+}
+
+const weekdayOffsets: Record<string, number> = { sunday: 6, monday: 0, tuesday: 1, wednesday: 2, thursday: 3, friday: 4, saturday: 5 };
+
+function dateOnlyFor(value: string | Date) {
+  const dateOnly = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : undefined;
+  const dateValue = dateOnly ? `${dateOnly}T12:00:00Z` : value;
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) throw new Error('Invalid date.');
+  if (dateOnly && date.toISOString().slice(0, 10) !== dateOnly) throw new Error('Invalid date.');
+  return date;
+}
+
+export function meetingDateFor(team: Pick<Team, 'meetingCadence' | 'meetingDay'>, value: string | Date = new Date()) {
+  const current = dateOnlyFor(value);
+  if (team.meetingCadence === 'monthly') {
+    const requestedDay = Number.parseInt(team.meetingDay.trim(), 10);
+    if (Number.isInteger(requestedDay) && requestedDay >= 1 && requestedDay <= 31) {
+      const lastDay = new Date(Date.UTC(current.getUTCFullYear(), current.getUTCMonth() + 1, 0)).getUTCDate();
+      current.setUTCDate(Math.min(requestedDay, lastDay));
+    }
+    return current.toISOString().slice(0, 10);
+  }
+  const weekStart = dateOnlyFor(weekStartDateFor(current));
+  weekStart.setUTCDate(weekStart.getUTCDate() + (weekdayOffsets[team.meetingDay.trim().toLowerCase()] ?? 0));
+  return weekStart.toISOString().slice(0, 10);
+}
+
+export function nextMeetingDateFor(value: string | Date, cadence: MeetingCadence = 'weekly') {
+  const date = dateOnlyFor(value);
+  if (cadence === 'weekly') {
+    date.setUTCDate(date.getUTCDate() + 7);
+    return date.toISOString().slice(0, 10);
+  }
+  const dayOfMonth = date.getUTCDate();
+  const nextMonth = date.getUTCMonth() + 1;
+  const lastDay = new Date(Date.UTC(date.getUTCFullYear(), nextMonth + 1, 0)).getUTCDate();
+  date.setUTCDate(1);
+  date.setUTCMonth(nextMonth);
+  date.setUTCDate(Math.min(dayOfMonth, lastDay));
+  return date.toISOString().slice(0, 10);
+}
+
+export function nextMeetingDateAfter(value: string | Date, cadence: MeetingCadence = 'weekly', after: string | Date = new Date()) {
+  const afterDate = dateOnlyFor(after).toISOString().slice(0, 10);
+  let next = nextMeetingDateFor(value, cadence);
+  let guard = 0;
+  while (next <= afterDate && guard < 120) {
+    next = nextMeetingDateFor(next, cadence);
+    guard += 1;
+  }
+  return next;
+}
+
+function monthlyMeetingDate(year: number, month: number, day: number) {
+  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(year, month, Math.min(day, lastDay), 12)).toISOString().slice(0, 10);
+}
+
+export function nextConfiguredMeetingDateAfter(team: Pick<Team, 'meetingCadence' | 'meetingDay'>, value: string | Date, after: string | Date = new Date()) {
+  const current = dateOnlyFor(value);
+  const currentDate = current.toISOString().slice(0, 10);
+  const afterDate = dateOnlyFor(after).toISOString().slice(0, 10);
+  let next: string;
+  const requestedDay = Number.parseInt(team.meetingDay.trim(), 10);
+  if (team.meetingCadence === 'monthly' && Number.isInteger(requestedDay) && requestedDay >= 1 && requestedDay <= 31) {
+    next = monthlyMeetingDate(current.getUTCFullYear(), current.getUTCMonth() + 1, requestedDay);
+    while (next <= afterDate) {
+      const nextMonth = dateOnlyFor(next);
+      next = monthlyMeetingDate(nextMonth.getUTCFullYear(), nextMonth.getUTCMonth() + 1, requestedDay);
+    }
+    return next;
+  }
+  if (team.meetingCadence === 'monthly') return nextMeetingDateAfter(current, 'monthly', after);
+  const weekStart = dateOnlyFor(weekStartDateFor(current));
+  weekStart.setUTCDate(weekStart.getUTCDate() + (weekdayOffsets[team.meetingDay.trim().toLowerCase()] ?? 0));
+  next = weekStart.toISOString().slice(0, 10);
+  if (next <= currentDate) next = nextMeetingDateFor(next, 'weekly');
+  while (next <= afterDate) next = nextMeetingDateFor(next, 'weekly');
+  return next;
+}
+
+export function meetingDateLabel(scheduledDate: string) {
+  return dateOnlyFor(scheduledDate).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' }).replace(', ', ' · ');
+}
+
+export function normalizeMeeting(meeting: MeetingInstance, team?: Pick<Team, 'meetingCadence' | 'meetingDay' | 'meetingTime'>): MeetingInstance {
+  const fallbackTeam = team ?? { meetingCadence: 'weekly' as const, meetingDay: 'Monday', meetingTime: '9:00 AM' };
+  let scheduledDate = meeting.scheduledDate;
+  try {
+    if (!scheduledDate) scheduledDate = meetingDateFor(fallbackTeam, meeting.weekStartDate ?? new Date());
+    dateOnlyFor(scheduledDate);
+  } catch {
+    scheduledDate = meetingDateFor(fallbackTeam, meeting.weekStartDate ?? new Date());
+  }
+  const scheduledTime = meeting.scheduledTime?.trim() || fallbackTeam.meetingTime || '9:00 AM';
+  return { ...meeting, scheduledDate, scheduledTime, dateLabel: meetingDateLabel(scheduledDate), weekStartDate: weekStartDateFor(scheduledDate), version: meeting.version ?? 1 };
 }
 
 export function scorecardTrendFor(actual: string, priorActual?: string): { trend: ScorecardTrend; trendLabel: string } {

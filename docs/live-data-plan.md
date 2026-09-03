@@ -100,7 +100,12 @@ operational work has been resolved or moved.
 - Meetings carry an ISO Monday-start `weekStartDate`. New meetings set it at
   creation; legacy records receive a non-destructive current-week fallback
   during normalization. L10 Scorecard content and meeting recaps use only the
-  result matching that week key.
+  result matching that week key. Teams also store a `meetingCadence` of
+  `weekly` or `monthly`; monthly recurrence preserves the configured day of
+  month and clamps to the last valid day when needed. Each occurrence stores
+  `scheduledDate` and `scheduledTime`. The current open occurrence can be
+  rescheduled as a versioned, audited mutation without changing the team’s
+  recurring cadence; closed occurrences cannot be rescheduled.
 - An Issue counted in IDS for three closed meetings is scheduled to escalate in
   seven days. At the due point it routes through the team’s configured hierarchy
   and notifies the current recipient; an unresolved next level can be routed
@@ -131,6 +136,8 @@ The Functions API exposes typed server contracts for:
 - Rock, Rock Task, To-Do, Issue, IDS, and Task-to-To-Do routes.
 - Team message send/read/convert-to-Issue routes and meeting IDS-note/close
   routes.
+- `PATCH /api/teams/{teamId}/meetings/{meetingId}` — reschedule the current
+  open meeting occurrence with `If-Match` concurrency protection.
 - Weekly Scorecard routes:
   - `POST /api/teams/{teamId}/scorecard/metrics` creates a team measurable.
   - `PATCH /api/scorecard/metrics/{metricId}` edits its definition.
