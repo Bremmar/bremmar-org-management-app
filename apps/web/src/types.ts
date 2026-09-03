@@ -65,6 +65,7 @@ export interface User {
   avatarDataUrl?: string;
   createdAt: string;
   updatedAt: string;
+  version?: number;
 }
 
 export interface Team {
@@ -178,6 +179,8 @@ export interface Issue {
   ageInDays: number;
   ageBand: IssueAgeBand;
   linkedRockId?: string;
+  linkedScorecardMetricId?: string;
+  linkedScorecardWeekStartDate?: string;
   idsNote?: string;
   version: number;
   meetingsPassed: number;
@@ -243,6 +246,13 @@ export interface MeetingIssueNote {
   createdAt: string;
 }
 
+export interface MeetingActionSummary {
+  todosCreated: number;
+  issuesReviewedInIds: number;
+  issuesAddedToIds: number;
+  issuesSolved: number;
+}
+
 export interface ScorecardMetric {
   id: string;
   teamId: string;
@@ -301,10 +311,13 @@ export interface MeetingInstance {
   recap: string;
   startedAt?: string;
   closedAt?: string;
+  updatedAt?: string;
   sectionNotes: Partial<Record<MeetingSection, string>>;
   idsIssueIds: string[];
+  idsAddedIssueIds: string[];
   createdTodoIds: string[];
   idsNotes: MeetingIssueNote[];
+  actionSummary?: MeetingActionSummary;
   version?: number;
 }
 
@@ -322,6 +335,7 @@ export interface IssueAgeSettings {
   agingDays: number;
   staleDays: number;
   criticalDays: number;
+  version?: number;
 }
 
 export interface Workspace {
@@ -448,7 +462,7 @@ export function normalizeMeeting(meeting: MeetingInstance, team?: Pick<Team, 'me
     scheduledDate = meetingDateFor(fallbackTeam, meeting.weekStartDate ?? new Date());
   }
   const scheduledTime = meeting.scheduledTime?.trim() || fallbackTeam.meetingTime || '9:00 AM';
-  return { ...meeting, scheduledDate, scheduledTime, dateLabel: meetingDateLabel(scheduledDate), weekStartDate: weekStartDateFor(scheduledDate), version: meeting.version ?? 1 };
+  return { ...meeting, scheduledDate, scheduledTime, dateLabel: meetingDateLabel(scheduledDate), weekStartDate: weekStartDateFor(scheduledDate), sectionNotes: meeting.sectionNotes ?? {}, idsIssueIds: meeting.idsIssueIds ?? [], idsAddedIssueIds: meeting.idsAddedIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: meeting.idsNotes ?? [], version: meeting.version ?? 1 };
 }
 
 export function scorecardTrendFor(actual: string, priorActual?: string): { trend: ScorecardTrend; trendLabel: string } {

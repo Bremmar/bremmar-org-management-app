@@ -40,6 +40,30 @@ test('created directory users use the Entra object ID as their stable applicatio
   assert.equal((await repository.getUser(user.id))?.email, 'directory-user@bremmar.com');
 });
 
+test('administrators can edit another user without changing the stable user ID', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const before = await repository.getUser('marcus-lee');
+  assert.ok(before);
+
+  const updated = await repository.updateUser('marcus-lee', { name: 'Marcus Lee-Smith', email: 'marcus.smith@bremmar.com', platformAdmin: true }, 'ava-khan', before.version);
+  assert.deepEqual({ id: updated.id, name: updated.name, email: updated.email, initials: updated.initials, platformCapabilities: updated.platformCapabilities, version: updated.version }, {
+    id: 'marcus-lee', name: 'Marcus Lee-Smith', email: 'marcus.smith@bremmar.com', initials: 'ML', platformCapabilities: ['PlatformAdmin'], version: before.version + 1,
+  });
+  assert.equal((await repository.getAdminSnapshot('ava-khan')).users.find((user) => user.id === updated.id)?.email, updated.email);
+
+  await rejectsWithCode(repository.updateUser('marcus-lee', { name: 'Stale edit' }, 'ava-khan', before.version), 'CONFLICT');
+  await rejectsWithCode(repository.updateUser('marcus-lee', { email: 'ava@bremmar.com' }, 'ava-khan', updated.version), 'CONFLICT');
+  await rejectsWithCode(repository.updateUser('marcus-lee', { name: 'Unauthorized edit' }, 'maya-green', updated.version), 'FORBIDDEN');
+});
+
+test('directory user edits cannot move an Entra profile to another identity', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const user = await repository.createUser({ name: 'Directory User', email: 'directory-user@bremmar.com', accent: '#123456', identityId: 'CA795A1D-6402-4335-9141-D40E7F078812' }, 'ava-khan');
+  await rejectsWithCode(repository.updateUser(user.id, { email: 'renamed-user@bremmar.com', identityId: '7D9C5B48-7F6C-4CC5-A3D2-6D9E3E2C12C4' }, 'ava-khan', user.version), 'CONFLICT');
+  const unchanged = await repository.getUser(user.id);
+  assert.equal(unchanged?.email, 'directory-user@bremmar.com');
+});
+
 test('Issue transfers preserve identity, original age, and first-decision semantics', async () => {
   const repository = new MemoryWorkspaceRepository();
   const before = await repository.getIssue('issue-project-scope', 'marcus-lee');
@@ -295,4 +319,80 @@ test('an unresolved Issue is scheduled for escalation after three meetings', asy
   assert.equal(storedIssue.meetingsPassed, 3);
   assert.equal(storedIssue.escalationState, 'scheduled');
   assert.ok(storedIssue.escalationDueAt);
+});
+
+test('off-track Scorecard results convert to one provenance-linked Issue', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const workspace = await repository.getTeamWorkspace('projects', 'marcus-lee');
+  const metric = workspace.metrics.find((candidate) => candidate.id === 'metric-project-kickoffs')!;
+  const result = workspace.scorecardResults.find((candidate) => candidate.metricId === metric.id && candidate.weekStartDate === workspace.meetings[0].weekStartDate)!;
+  const offTrack = await repository.upsertScorecardResult(metric.id, result.weekStartDate, { actual: '70%', status: 'off-track' }, 'marcus-lee', result.version);
+
+  const first = await repository.createIssueFromScorecard(metric.id, offTrack.weekStartDate, 'marcus-lee', offTrack.version);
+  const repeated = await repository.createIssueFromScorecard(metric.id, offTrack.weekStartDate, 'marcus-lee', offTrack.version);
+
+  assert.equal(first.id, repeated.id);
+  assert.equal(first.id, `issue-scorecard-${metric.id}-${offTrack.weekStartDate}`);
+  assert.deepEqual({ teamId: first.teamId, ownerId: first.ownerId, linkedScorecardMetricId: first.linkedScorecardMetricId, linkedScorecardWeekStartDate: first.linkedScorecardWeekStartDate }, { teamId: 'projects', ownerId: metric.ownerId, linkedScorecardMetricId: metric.id, linkedScorecardWeekStartDate: offTrack.weekStartDate });
+  assert.match(first.detail, new RegExp(offTrack.weekStartDate));
+  assert.equal((await repository.getTeamWorkspace('projects', 'marcus-lee')).issues.filter((issue) => issue.linkedScorecardMetricId === metric.id && issue.linkedScorecardWeekStartDate === offTrack.weekStartDate).length, 1);
+  await rejectsWithCode(repository.createIssueFromScorecard(metric.id, '2026-08-17', 'marcus-lee'), 'VALIDATION');
+});
+
+test('off-track Rocks convert to one owner- and priority-preserving Issue', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const first = await repository.createIssueFromRock('rock-cyber-readiness', 'priya-shah', 1);
+  const repeated = await repository.createIssueFromRock('rock-cyber-readiness', 'priya-shah', 1);
+
+  assert.equal(first.id, repeated.id);
+  assert.equal(first.id, 'issue-rock-rock-cyber-readiness');
+  assert.deepEqual({ teamId: first.teamId, ownerId: first.ownerId, priority: first.priority, linkedRockId: first.linkedRockId }, { teamId: 'cybersecurity', ownerId: 'priya-shah', priority: 1, linkedRockId: 'rock-cyber-readiness' });
+  assert.equal((await repository.getTeamWorkspace('cybersecurity', 'priya-shah')).issues.filter((issue) => issue.linkedRockId === 'rock-cyber-readiness').length, 1);
+  await rejectsWithCode(repository.createIssueFromRock('rock-project-kickoff', 'marcus-lee', 1), 'VALIDATION');
+});
+
+test('meeting section notes and IDS ordering are versioned, auditable, and closed meetings are immutable', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const firstIssue = await repository.createIssue({ teamId: 'leadership', title: 'First decision', raisedById: 'ava-khan', ownerId: 'ava-khan', priority: 2 }, 'ava-khan');
+  const secondIssue = await repository.createIssue({ teamId: 'leadership', title: 'Second decision', raisedById: 'ava-khan', ownerId: 'ava-khan', priority: 5 }, 'ava-khan');
+  await repository.startIssue(firstIssue.id, 'ava-khan', firstIssue.version);
+  await repository.startIssue(secondIssue.id, 'ava-khan', secondIssue.version);
+  let workspace = await repository.getTeamWorkspace('leadership', 'ava-khan');
+  let meeting = workspace.meetings[0];
+
+  meeting = await repository.updateMeetingSectionNote('leadership', meeting.id, 'scorecard', 'The facilitator captured the weekly variance.', 'ava-khan', meeting.version);
+  meeting = await repository.updateMeetingSectionNote('leadership', meeting.id, 'headlines', 'A customer renewal needs an owner before Friday.', 'ava-khan', meeting.version);
+  assert.deepEqual(meeting.sectionNotes, { scorecard: 'The facilitator captured the weekly variance.', headlines: 'A customer renewal needs an owner before Friday.' });
+  await rejectsWithCode(repository.updateMeetingSectionNote('leadership', meeting.id, 'scorecard', 'Stale note', 'ava-khan', meeting.version - 1), 'CONFLICT');
+
+  const reordered = await repository.reorderMeetingIssues('leadership', meeting.id, [secondIssue.id, firstIssue.id], 'ava-khan', meeting.version);
+  assert.deepEqual(reordered.idsIssueIds, [secondIssue.id, firstIssue.id]);
+  assert.deepEqual({ firstPriority: (await repository.getIssue(firstIssue.id, 'ava-khan')).priority, secondPriority: (await repository.getIssue(secondIssue.id, 'ava-khan')).priority }, { firstPriority: 2, secondPriority: 5 });
+  await rejectsWithCode(repository.reorderMeetingIssues('leadership', meeting.id, [firstIssue.id, secondIssue.id], 'ava-khan', meeting.version), 'CONFLICT');
+
+  const closed = await repository.closeMeeting('leadership', meeting.id, 'Two decisions recorded.', 9, 'ava-khan', reordered.version);
+  assert.deepEqual(closed.actionSummary, { todosCreated: 0, issuesReviewedInIds: 2, issuesAddedToIds: 2, issuesSolved: 0 });
+  assert.match(closed.recap, /Actions: 0 To-Dos created · 2 Issues reviewed in IDS · 2 Issues added to IDS · 0 Issues solved\./);
+  const nextMeeting = (await repository.getTeamWorkspace('leadership', 'ava-khan')).meetings.find((candidate) => candidate.status === 'upcoming')!;
+  assert.deepEqual(nextMeeting.idsIssueIds, [secondIssue.id, firstIssue.id]);
+  assert.deepEqual(nextMeeting.idsAddedIssueIds, []);
+  await rejectsWithCode(repository.updateMeetingSectionNote('leadership', closed.id, 'scorecard', 'Too late', 'ava-khan', closed.version), 'CONFLICT');
+});
+
+test('meeting action summary counts solved Issues and their follow-up To-Do', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const issue = await repository.createIssue({ teamId: 'leadership', title: 'Decision to solve', raisedById: 'ava-khan', ownerId: 'ava-khan' }, 'ava-khan');
+  await repository.startIssue(issue.id, 'ava-khan', issue.version);
+  const workspace = await repository.getTeamWorkspace('leadership', 'ava-khan');
+  const closed = await repository.closeMeeting('leadership', workspace.meetings[0].id, 'Solved during IDS.', 10, 'ava-khan', workspace.meetings[0].version);
+  assert.deepEqual(closed.actionSummary, { todosCreated: 0, issuesReviewedInIds: 1, issuesAddedToIds: 1, issuesSolved: 0 });
+
+  const repositoryWithSolve = new MemoryWorkspaceRepository();
+  const solveIssue = await repositoryWithSolve.createIssue({ teamId: 'leadership', title: 'Solved decision', raisedById: 'ava-khan', ownerId: 'ava-khan' }, 'ava-khan');
+  await repositoryWithSolve.startIssue(solveIssue.id, 'ava-khan', solveIssue.version);
+  await repositoryWithSolve.solveIssue(solveIssue.id, 'ava-khan', solveIssue.version + 1);
+  const beforeClose = await repositoryWithSolve.getTeamWorkspace('leadership', 'ava-khan');
+  const solvedMeeting = await repositoryWithSolve.closeMeeting('leadership', beforeClose.meetings[0].id, 'Solved and followed up.', 10, 'ava-khan', beforeClose.meetings[0].version);
+  assert.deepEqual(solvedMeeting.actionSummary, { todosCreated: 1, issuesReviewedInIds: 1, issuesAddedToIds: 1, issuesSolved: 1 });
+  assert.match(solvedMeeting.recap, /Created To-Dos: Follow up on the solution: Solved decision/);
 });

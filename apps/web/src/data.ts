@@ -318,7 +318,7 @@ const meetings: MeetingInstance[] = teams.map((team) => {
     id: `meeting-${team.id}-${currentWeekStartDate}`, teamId: team.id, label: `${team.shortName} L10`, dateLabel: meetingDateLabel(scheduledDate), scheduledDate, scheduledTime: team.meetingTime, weekStartDate: weekStartDateFor(scheduledDate), status: 'upcoming',
     facilitatorId: memberships.find((membership) => membership.teamId === team.id && membership.role === 'TeamLead')?.userId ?? 'ava-khan',
     attendeeIds: memberships.filter((membership) => membership.teamId === team.id && membership.active).map((membership) => membership.userId),
-    lastRating: 8.8, agendaProgress: 0, agendaTotal: team.meetingSections.filter((section) => section.enabled).length, idsSolved: 0, idsTotal: issues.filter((issue) => issue.teamId === team.id && issue.status !== 'solved').length, recap: '', sectionNotes: {}, idsIssueIds: [], createdTodoIds: [], idsNotes: [], version: 1,
+    lastRating: 8.8, agendaProgress: 0, agendaTotal: team.meetingSections.filter((section) => section.enabled).length, idsSolved: 0, idsTotal: issues.filter((issue) => issue.teamId === team.id && issue.status !== 'solved').length, recap: '', sectionNotes: {}, idsIssueIds: [], idsAddedIssueIds: [], createdTodoIds: [], idsNotes: [], version: 1,
   };
 });
 

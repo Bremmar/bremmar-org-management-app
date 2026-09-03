@@ -128,6 +128,11 @@ directory object ID as the new profile's stable key. The email must belong to
 an Entra user in the configured tenant; otherwise the API returns a clear
 directory-not-found response and does not create a local-only profile.
 
+Existing users can be edited from the Admin user directory. Name, email, and
+Platform Admin capability changes update the app profile in place; in Entra
+mode, a changed email is allowed only when the new address resolves to the
+same directory object ID.
+
 For the managed Static Web Apps API, add these settings to the Static Web App's
 Configuration page (never commit the secret):
 

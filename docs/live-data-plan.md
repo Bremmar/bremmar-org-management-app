@@ -133,11 +133,21 @@ The Functions API exposes typed server contracts for:
 - `GET /api/teams/{teamId}/workspace` and the legacy dashboard route.
 - `GET /api/company/overview` — Leadership-only read-only rollups.
 - `GET/PATCH /api/notifications...` and `GET/PATCH /api/profile`.
+- `POST /api/platform-admin/users` creates a user profile and
+  `PATCH /api/platform-admin/users/{userId}` edits its name, email, or Platform
+  Admin capability with `If-Match` concurrency protection.
 - Rock, Rock Task, To-Do, Issue, IDS, and Task-to-To-Do routes.
 - Team message send/read/convert-to-Issue routes and meeting IDS-note/close
   routes.
 - `PATCH /api/teams/{teamId}/meetings/{meetingId}` — reschedule the current
   open meeting occurrence with `If-Match` concurrency protection.
+- `PATCH /api/teams/{teamId}/meetings/{meetingId}/notes` — save a section note
+  for the open meeting with `If-Match`; closed meetings are read-only.
+- `PATCH /api/teams/{teamId}/meetings/{meetingId}/ids/order` — persist the
+  ordered IDS Issue IDs without changing their independent P1–P5 priorities.
+- `POST /api/scorecard/metrics/{metricId}/weeks/{weekStartDate}/issue` and
+  `POST /api/rocks/{rockId}/issue` — idempotently create provenance-linked
+  Issues from off-track Scorecard results and Rocks.
 - Weekly Scorecard routes:
   - `POST /api/teams/{teamId}/scorecard/metrics` creates a team measurable.
   - `PATCH /api/scorecard/metrics/{metricId}` edits its definition.
@@ -149,6 +159,13 @@ The Functions API exposes typed server contracts for:
 - Issue transfer request, accept, reject, and cancel routes.
 - Platform administration routes for teams, users, memberships, aging settings,
   L10 section configuration, and escalation hierarchies.
+
+Mutation endpoints return the changed typed record (or the small set of records
+affected by a multi-record operation). The web adapter merges those deltas into
+its cached workspace for ordinary writes and requests a fresh snapshot only for
+operations with broader side effects, such as transfers, Issue solving, and
+meeting closure. Conflicts and uncertain network outcomes trigger a best-effort
+snapshot refresh before the original error is shown.
 
 The API returns `401`, `403`, `404`, `409`, and `422` for the corresponding
 authentication, authorization, not-found, concurrency, and validation cases.

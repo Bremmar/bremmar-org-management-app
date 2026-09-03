@@ -52,6 +52,22 @@ async function upsertResultHandler(request: HttpRequest, _context: InvocationCon
   }
 }
 
+async function createIssueFromScorecardHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
+  const scope = await requestScope(request);
+  if (isResponse(scope)) return scope;
+  const { principal, repository } = scope;
+  const metricId = request.params.metricId;
+  const weekStartDate = request.params.weekStartDate;
+  if (!metricId || !weekStartDate) return { status: 422, jsonBody: { error: 'metricId and weekStartDate are required', code: 'VALIDATION' } };
+  try {
+    const issue = await repository.createIssueFromScorecard(metricId, weekStartDate, principal.userId, expectedVersion(request));
+    return responseWithEtag(issue, `W/\"${issue.version}\"`);
+  } catch (error) {
+    return repositoryErrorResponse(error);
+  }
+}
+
 app.http('createScorecardMetric', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/scorecard/metrics', handler: createMetricHandler });
 app.http('updateScorecardMetric', { methods: ['PATCH'], authLevel: 'anonymous', route: 'scorecard/metrics/{metricId}', handler: updateMetricHandler });
 app.http('upsertScorecardResult', { methods: ['PUT'], authLevel: 'anonymous', route: 'scorecard/metrics/{metricId}/weeks/{weekStartDate}', handler: upsertResultHandler });
+app.http('createIssueFromScorecard', { methods: ['POST'], authLevel: 'anonymous', route: 'scorecard/metrics/{metricId}/weeks/{weekStartDate}/issue', handler: createIssueFromScorecardHandler });

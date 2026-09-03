@@ -167,6 +167,8 @@ export interface IssueRecord extends WorkspaceRecord {
   ownerId?: string;
   solvedAt?: string;
   linkedRockId?: string;
+  linkedScorecardMetricId?: string;
+  linkedScorecardWeekStartDate?: string;
   idsNote?: string;
   ageInDays: number;
   ageBand: IssueAgeBand;
@@ -227,6 +229,13 @@ export interface MeetingIssueNoteRecord {
   createdAt: string;
 }
 
+export interface MeetingActionSummary {
+  todosCreated: number;
+  issuesReviewedInIds: number;
+  issuesAddedToIds: number;
+  issuesSolved: number;
+}
+
 export interface MeetingRecord extends WorkspaceRecord {
   kind: 'meeting';
   teamId: string;
@@ -251,8 +260,10 @@ export interface MeetingRecord extends WorkspaceRecord {
   closedAt?: string;
   sectionNotes: Partial<Record<MeetingSection, string>>;
   idsIssueIds: string[];
+  idsAddedIssueIds: string[];
   createdTodoIds: string[];
   idsNotes: MeetingIssueNoteRecord[];
+  actionSummary?: MeetingActionSummary;
 }
 
 export interface ScorecardMetricRecord extends WorkspaceRecord {

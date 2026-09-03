@@ -58,7 +58,7 @@ function bootstrapMeeting(team: TeamRecord, attendeeId: string, environmentId: E
     kind: 'meeting', teamId: team.teamId, label: `${team.shortName} L10`, dateLabel: new Date(`${scheduledDate}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' }).replace(', ', ' · '), scheduledDate, scheduledTime: team.meetingTime,
     weekStartDate: scheduledDate, status: 'upcoming', facilitatorId: attendeeId, attendeeIds: [attendeeId],
     lastRating: 0, agendaProgress: 0, agendaTotal: sections.length, idsSolved: 0, idsTotal: 0, recap: '',
-    sectionNotes: {}, idsIssueIds: [], createdTodoIds: [], idsNotes: [],
+    sectionNotes: {}, idsIssueIds: [], idsAddedIssueIds: [], createdTodoIds: [], idsNotes: [],
   };
 }
 

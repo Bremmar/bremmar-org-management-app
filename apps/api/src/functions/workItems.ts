@@ -48,6 +48,20 @@ async function updateRockHandler(request: HttpRequest, _context: InvocationConte
   }
 }
 
+async function createIssueFromRockHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
+  const scope = await requestScope(request);
+  if (isResponse(scope)) return scope;
+  const { principal, repository } = scope;
+  const rockId = request.params.rockId;
+  if (!rockId) return { status: 422, jsonBody: { error: 'rockId is required', code: 'VALIDATION' } };
+  try {
+    const issue = await repository.createIssueFromRock(rockId, principal.userId, expectedVersion(request));
+    return responseWithEtag(issue, `W/\"${issue.version}\"`);
+  } catch (error) {
+    return repositoryErrorResponse(error);
+  }
+}
+
 async function createTodoHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
   const scope = await requestScope(request);
   if (isResponse(scope)) return scope;
@@ -101,8 +115,8 @@ async function createIssueHandler(request: HttpRequest, _context: InvocationCont
   const teamId = request.params.teamId;
   if (!teamId) return { status: 422, jsonBody: { error: 'teamId is required', code: 'VALIDATION' } };
   try {
-    const body = await requestJson<{ title?: string; detail?: string; category?: string; priority?: number; horizon?: 'short-term' | 'long-term'; ownerId?: string; linkedRockId?: string; idsNote?: string }>(request);
-    const issue = await repository.createIssue({ teamId, title: body.title ?? '', detail: body.detail, category: body.category, priority: body.priority, horizon: body.horizon, ownerId: body.ownerId, linkedRockId: body.linkedRockId, idsNote: body.idsNote, raisedById: principal.userId }, principal.userId);
+    const body = await requestJson<{ title?: string; detail?: string; category?: string; priority?: number; horizon?: 'short-term' | 'long-term'; ownerId?: string; linkedRockId?: string; linkedScorecardMetricId?: string; linkedScorecardWeekStartDate?: string; idsNote?: string }>(request);
+    const issue = await repository.createIssue({ teamId, title: body.title ?? '', detail: body.detail, category: body.category, priority: body.priority, horizon: body.horizon, ownerId: body.ownerId, linkedRockId: body.linkedRockId, linkedScorecardMetricId: body.linkedScorecardMetricId, linkedScorecardWeekStartDate: body.linkedScorecardWeekStartDate, idsNote: body.idsNote, raisedById: principal.userId }, principal.userId);
     return responseWithEtag(issue, `W/\"${issue.version}\"`, 201);
   } catch (error) {
     return repositoryErrorResponse(error);
@@ -186,6 +200,7 @@ async function convertTaskHandler(request: HttpRequest, _context: InvocationCont
 app.http('createRock', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/rocks', handler: createRockHandler });
 app.http('updateRock', { methods: ['PATCH'], authLevel: 'anonymous', route: 'rocks/{rockId}', handler: updateRockHandler });
 app.http('updateRockStatus', { methods: ['PATCH'], authLevel: 'anonymous', route: 'rocks/{rockId}/status', handler: updateRockStatusHandler });
+app.http('createIssueFromRock', { methods: ['POST'], authLevel: 'anonymous', route: 'rocks/{rockId}/issue', handler: createIssueFromRockHandler });
 app.http('createTodo', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/todos', handler: createTodoHandler });
 app.http('updateTodo', { methods: ['PATCH'], authLevel: 'anonymous', route: 'todos/{todoId}', handler: updateTodoHandler });
 app.http('updateTodoStatus', { methods: ['PATCH'], authLevel: 'anonymous', route: 'todos/{todoId}/status', handler: updateTodoStatusHandler });

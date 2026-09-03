@@ -98,6 +98,36 @@ async function createUserHandler(request: HttpRequest, _context: InvocationConte
   }
 }
 
+async function updateUserHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
+  const scope = await requestScope(request);
+  if (isResponse(scope)) return scope;
+  const { principal, repository } = scope;
+  const userId = request.params.userId;
+  if (!userId) return { status: 422, jsonBody: { error: 'userId is required', code: 'VALIDATION' } };
+  try {
+    const body = await requestJson<{ name?: unknown; email?: unknown; platformAdmin?: unknown }>(request);
+    if (body.name !== undefined && typeof body.name !== 'string') throw new RepositoryError('VALIDATION', 'Name must be a string.');
+    if (body.email !== undefined && typeof body.email !== 'string') throw new RepositoryError('VALIDATION', 'Email must be a string.');
+    if (body.platformAdmin !== undefined && typeof body.platformAdmin !== 'boolean') throw new RepositoryError('VALIDATION', 'platformAdmin must be a boolean.');
+    const name = body.name === undefined ? undefined : body.name.trim();
+    const email = body.email === undefined ? undefined : body.email.trim();
+    if (name === undefined && email === undefined && body.platformAdmin === undefined) throw new RepositoryError('VALIDATION', 'At least one user field is required.');
+    const adminSnapshot = await repository.getAdminSnapshot(principal.userId);
+    const existing = adminSnapshot.users.find((candidate) => candidate.id === userId);
+    if (!existing) throw new RepositoryError('NOT_FOUND', 'User not found.');
+    const localPoc = process.env.LOCAL_POC_MODE === 'true' && process.env.COSMOS_ENABLED !== 'true';
+    let identityId: string | undefined;
+    if (!localPoc && email !== undefined && email.toLowerCase() !== existing.email.toLowerCase()) {
+      identityId = await lookupEntraObjectId(email);
+      if (!identityId) throw new RepositoryError('NOT_FOUND', 'No Entra user was found for that email address.');
+    }
+    const user = await repository.updateUser(userId, { name, email, platformAdmin: body.platformAdmin as boolean | undefined, identityId }, principal.userId, expectedVersion(request));
+    return responseWithEtag(user, `W/\"${user.version}\"`);
+  } catch (error) {
+    return repositoryErrorResponse(error);
+  }
+}
+
 async function upsertMembershipHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
   const scope = await requestScope(request);
   if (isResponse(scope)) return scope;
@@ -163,6 +193,7 @@ app.http('adminSnapshot', { methods: ['GET'], authLevel: 'anonymous', route: 'pl
 app.http('adminCreateTeam', { methods: ['POST'], authLevel: 'anonymous', route: 'platform-admin/teams', handler: createTeamHandler });
 app.http('adminUpdateTeam', { methods: ['PATCH'], authLevel: 'anonymous', route: 'platform-admin/teams/{teamId}', handler: updateTeamHandler });
 app.http('adminCreateUser', { methods: ['POST'], authLevel: 'anonymous', route: 'platform-admin/users', handler: createUserHandler });
+app.http('adminUpdateUser', { methods: ['PATCH'], authLevel: 'anonymous', route: 'platform-admin/users/{userId}', handler: updateUserHandler });
 app.http('adminMembership', { methods: ['PUT'], authLevel: 'anonymous', route: 'platform-admin/memberships', handler: upsertMembershipHandler });
 app.http('adminAgingSettings', { methods: ['PUT'], authLevel: 'anonymous', route: 'platform-admin/settings/aging', handler: updateAgeSettingsHandler });
 app.http('adminEnvironmentAccess', { methods: ['GET'], authLevel: 'anonymous', route: 'platform-admin/environment-access', handler: environmentAccessHandler });

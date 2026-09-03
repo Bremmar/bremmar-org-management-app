@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest';
-import { ageBandFor, LocalWorkspaceApi } from './api';
+import { describe, expect, it, vi } from 'vitest';
+import { ageBandFor, HttpWorkspaceApi, LocalWorkspaceApi } from './api';
 import { initialWorkspace } from './data';
 import { defaultMeetingSections } from './types';
-import type { TeamMembership } from './types';
+import type { TeamMembership, Workspace } from './types';
 
 describe('LocalWorkspaceApi', () => {
   it('starts in Live, hides Test without a grant, and isolates granted Test changes', async () => {
@@ -131,6 +131,17 @@ describe('LocalWorkspaceApi', () => {
     await expect(api.getCompanyOverview()).rejects.toMatchObject({ code: 'FORBIDDEN' });
     await expect(api.updateAgeSettings({ agingDays: 6, staleDays: 12, criticalDays: 28 })).rejects.toMatchObject({ code: 'FORBIDDEN' });
     await expect(api.updateRockStatus('rock-service-development', 'off-track')).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  it('lets administrators edit another local user with version and duplicate-email checks', async () => {
+    const api = new LocalWorkspaceApi();
+    const before = (await api.getWorkspace()).users.find((user) => user.id === 'marcus-lee')!;
+    const updated = await api.updateUser(before.id, { name: 'Marcus Lee-Smith', email: 'marcus.smith@bremmar.example', platformAdmin: true }, before.version);
+    const user = updated.users.find((candidate) => candidate.id === before.id)!;
+
+    expect(user).toMatchObject({ id: before.id, name: 'Marcus Lee-Smith', email: 'marcus.smith@bremmar.example', initials: 'ML', platformCapabilities: ['PlatformAdmin'], version: (before.version ?? 1) + 1 });
+    await expect(api.updateUser(before.id, { name: 'Stale edit' }, before.version)).rejects.toMatchObject({ code: 'CONFLICT' });
+    await expect(api.updateUser(before.id, { email: updated.users.find((candidate) => candidate.id === 'ava-khan')!.email }, user.version)).rejects.toMatchObject({ code: 'CONFLICT' });
   });
 
   it('converts a Rock Task once and keeps status, owner, and due date synchronized', async () => {
@@ -322,5 +333,51 @@ describe('LocalWorkspaceApi', () => {
     expect(issue.escalationState).toBe('scheduled');
     expect(workspace.meetings.filter((meeting) => meeting.teamId === 'leadership')).toHaveLength(4);
     expect(workspace.meetings.filter((meeting) => meeting.teamId === 'leadership' && meeting.status !== 'closed')[0]?.idsIssueIds).toContain(issue.id);
+  });
+
+  it('saves meeting notes, converts off-track work once, and keeps IDS order separate from priority', async () => {
+    const seed = structuredClone(initialWorkspace);
+    seed.currentUser = seed.users.find((user) => user.id === 'priya-shah')!;
+    const api = new LocalWorkspaceApi(seed);
+    let workspace = await api.getWorkspace();
+    const meeting = workspace.meetings.find((candidate) => candidate.teamId === 'cybersecurity')!;
+    const metric = workspace.metrics.find((candidate) => candidate.id === 'metric-evidence')!;
+    const result = workspace.scorecardResults.find((candidate) => candidate.metricId === metric.id && candidate.weekStartDate === meeting.weekStartDate)!;
+
+    workspace = await api.updateMeetingSectionNote('cybersecurity', meeting.id, 'scorecard', 'Capture the assignment gap and owner.', meeting.version);
+    const savedMeeting = workspace.meetings.find((candidate) => candidate.id === meeting.id)!;
+    expect(savedMeeting.sectionNotes.scorecard).toBe('Capture the assignment gap and owner.');
+    expect(savedMeeting.version).toBe((meeting.version ?? 1) + 1);
+
+    workspace = await api.createIssueFromScorecard(metric.id, result.weekStartDate, result.version);
+    const scorecardIssue = workspace.issues.find((issue) => issue.linkedScorecardMetricId === metric.id && issue.linkedScorecardWeekStartDate === result.weekStartDate)!;
+    workspace = await api.createIssueFromScorecard(metric.id, result.weekStartDate, result.version);
+    expect(workspace.issues.filter((issue) => issue.linkedScorecardMetricId === metric.id && issue.linkedScorecardWeekStartDate === result.weekStartDate)).toHaveLength(1);
+    expect(scorecardIssue).toMatchObject({ teamId: 'cybersecurity', ownerId: metric.ownerId, priority: 1 });
+
+    const first = workspace.issues.find((issue) => issue.id === 'issue-cyber-owners')!;
+    const second = workspace.issues.find((issue) => issue.id === scorecardIssue.id)!;
+    workspace = await api.startIssue(first.id);
+    workspace = await api.startIssue(second.id);
+    const current = workspace.meetings.find((candidate) => candidate.id === meeting.id)!;
+    workspace = await api.reorderMeetingIssues('cybersecurity', meeting.id, [second.id, first.id], current.version);
+    const ordered = workspace.meetings.find((candidate) => candidate.id === meeting.id)!;
+    expect(ordered.idsIssueIds.slice(0, 2)).toEqual([second.id, first.id]);
+    expect(workspace.issues.find((issue) => issue.id === second.id)?.priority).toBe(1);
+  });
+
+  it('merges a simple HTTP mutation response without requesting the full workspace again', async () => {
+    const api = new HttpWorkspaceApi();
+    const cached = structuredClone(initialWorkspace) as Workspace;
+    (api as unknown as { cachedWorkspace: Workspace }).cachedWorkspace = cached;
+    const responseIssue = { ...cached.issues[0], id: 'http-created-issue', title: 'Created without a reload', kind: 'issue' };
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify(responseIssue), { status: 201, headers: { 'Content-Type': 'application/json', ETag: 'W/"1"' } }));
+
+    const workspace = await api.addIssue({ title: responseIssue.title, detail: responseIssue.detail, category: responseIssue.category, teamId: responseIssue.teamId, raisedById: cached.currentUser.id });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/teams/leadership/issues');
+    expect(workspace.issues.some((issue) => issue.id === responseIssue.id && issue.title === responseIssue.title)).toBe(true);
+    fetchMock.mockRestore();
   });
 });
