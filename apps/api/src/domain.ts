@@ -51,7 +51,7 @@ export type MeetingStatus = 'upcoming' | 'in-progress' | 'closed' | 'skipped';
 export type MeetingReviewStatus = MeetingStatus | 'missed' | 'overdue';
 export type MeetingReviewFilter = 'attention' | 'completed' | 'skipped' | 'all';
 export type MeetingSkipReason = 'public-holiday' | 'annual-leave' | 'other';
-export type MeetingAiSummaryStatus = 'not-generated' | 'queued' | 'generating' | 'ready' | 'failed';
+export type MeetingAiSummaryStatus = 'not-generated' | 'queued' | 'generating' | 'ready' | 'failed' | 'cancelled';
 
 export function issueMeetingBand(meetingsPassed: number, status: IssueStatus): IssueMeetingBand {
   if (status === 'solved' || meetingsPassed <= 0) return 'neutral';

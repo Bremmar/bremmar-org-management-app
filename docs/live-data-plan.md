@@ -132,7 +132,7 @@ operational work has been resolved or moved.
   `MeetingSummaryContext` in the meeting's `team:{teamId}` partition and queues
   a `meetingSummaryJob`. The existing AI Function receives the snapshot over
   signed HTTP and returns a signed, timestamped result. Jobs move through
-  `queued`, `generating`, `ready`, or `failed`; attempt matching and terminal
+  `queued`, `generating`, `ready`, `failed`, or `cancelled`; attempt matching and terminal
   state checks reject replayed callbacks. Structured summaries store an
   executive summary, decisions, commitments, risks, and next focus. Retrying
   is limited to direct team editors after failure, while legacy closed meetings
@@ -229,6 +229,9 @@ The Functions API exposes typed server contracts for:
 - `POST /api/teams/{teamId}/meetings/{meetingId}/ai-summary/retry` queues a new
   attempt for a failed, ready, or legacy AI summary for an authorized direct
   team editor; a ready recap is exposed in the UI as Regenerate recap.
+- `POST /api/teams/{teamId}/meetings/{meetingId}/ai-summary/cancel` cancels a
+  queued or generating attempt so it can be resubmitted; cancelled worker
+  callbacks are rejected by the attempt state.
 - `POST /api/internal/meeting-summary-callback` accepts ready/failed results
   only with a valid HMAC signature, current attempt, and non-terminal job.
 - The start route records the meeting boundary used by meeting-health

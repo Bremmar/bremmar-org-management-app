@@ -166,6 +166,21 @@ async function retryMeetingSummaryHandler(request: HttpRequest, _context: Invoca
   }
 }
 
+async function cancelMeetingSummaryHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
+  const scope = await requestScope(request);
+  if (isResponse(scope)) return scope;
+  const { principal, repository } = scope;
+  const teamId = request.params.teamId;
+  const meetingId = request.params.meetingId;
+  if (!teamId || !meetingId) return { status: 422, jsonBody: { error: 'teamId and meetingId are required', code: 'VALIDATION' } };
+  try {
+    const meeting = await repository.cancelMeetingSummary(teamId, meetingId, principal.userId, expectedVersion(request));
+    return responseWithEtag(meeting, `W/\"${meeting.version}\"`);
+  } catch (error) {
+    return repositoryErrorResponse(error);
+  }
+}
+
 async function meetingSummaryCallbackHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
   const rawBody = await request.text();
   const secret = process.env.AI_WORKER_SHARED_SECRET?.trim() ?? '';
@@ -265,4 +280,5 @@ app.http('startMeeting', { methods: ['POST'], authLevel: 'anonymous', route: 'te
 app.http('closeMeeting', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/close', handler: closeMeetingHandler });
 app.http('skipMeeting', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/skip', handler: skipMeetingHandler });
 app.http('retryMeetingSummary', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/ai-summary/retry', handler: retryMeetingSummaryHandler });
+app.http('cancelMeetingSummary', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/ai-summary/cancel', handler: cancelMeetingSummaryHandler });
 app.http('meetingSummaryCallback', { methods: ['POST'], authLevel: 'anonymous', route: 'internal/meeting-summary-callback', handler: meetingSummaryCallbackHandler });

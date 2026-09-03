@@ -477,6 +477,22 @@ describe('LocalWorkspaceApi', () => {
     expect(workspace.meetings.find((candidate) => candidate.id === meeting.id)?.aiSummaryStatus).toBe('ready');
   });
 
+  it('cancels a stuck local AI recap and allows it to be resubmitted', async () => {
+    const seed = structuredClone(initialWorkspace);
+    const meeting = seed.meetings.find((candidate) => candidate.teamId === 'leadership' && candidate.status === 'upcoming')!;
+    const timestamp = new Date().toISOString();
+    Object.assign(meeting, { status: 'closed' as const, startedAt: timestamp, closedAt: timestamp, aiSummaryStatus: 'generating' as const, aiSummaryRequestedAt: timestamp, aiSummaryJobId: `summary-${meeting.id}` });
+    const api = new LocalWorkspaceApi(seed);
+    let workspace = await api.getWorkspace();
+    const generating = workspace.meetings.find((candidate) => candidate.id === meeting.id)!;
+
+    workspace = await api.cancelMeetingSummary('leadership', meeting.id, generating.version);
+    const cancelled = workspace.meetings.find((candidate) => candidate.id === meeting.id)!;
+    expect(cancelled).toMatchObject({ status: 'closed', aiSummaryStatus: 'cancelled' });
+    workspace = await api.requestMeetingSummary('leadership', meeting.id, cancelled.version);
+    expect(workspace.meetings.find((candidate) => candidate.id === meeting.id)).toMatchObject({ status: 'closed', aiSummaryStatus: 'queued' });
+  });
+
   it('saves meeting notes, converts off-track work once, and keeps IDS order separate from priority', async () => {
     const seed = structuredClone(initialWorkspace);
     seed.currentUser = seed.users.find((user) => user.id === 'priya-shah')!;

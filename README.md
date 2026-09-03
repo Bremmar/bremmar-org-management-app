@@ -92,11 +92,11 @@ record for detail review.
 
 Closing stores the manual recap, action summary, and a same-team immutable
 context snapshot in a `meetingSummaryJob`, then queues the existing AI Function.
-The post-Conclude recap shows queued/generating/ready/failed states and stores
+The post-Conclude recap shows queued/generating/ready/failed/cancelled states and stores
 structured Executive summary, Decisions, Commitments, Risks, and Next focus
 output on the meeting. A direct team editor can regenerate a ready recap or
-retry a failed job; legacy closed meetings show Not generated and can be
-requested once. Core API
+retry a failed job, or cancel a stuck generation and resubmit it; legacy closed
+meetings show Not generated and can be requested once. Core API
 worker requests and callbacks use HMAC signatures with timestamp and attempt
 checks to prevent replayed results.
 

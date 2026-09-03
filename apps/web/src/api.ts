@@ -116,6 +116,7 @@ export interface WorkspaceApi {
   getMeeting(teamId: string, meetingId: string): Promise<Workspace['meetings'][number]>;
   skipMeeting(teamId: string, meetingId: string, reason: MeetingSkipReason, note?: string, expectedVersion?: number): Promise<Workspace>;
   requestMeetingSummary(teamId: string, meetingId: string, expectedVersion?: number): Promise<Workspace>;
+  cancelMeetingSummary(teamId: string, meetingId: string, expectedVersion?: number): Promise<Workspace>;
 }
 
 const cloneWorkspace = (workspace: Workspace): Workspace => structuredClone(workspace);
@@ -1633,6 +1634,25 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     return this.result();
   }
 
+  async cancelMeetingSummary(teamId: string, meetingId: string, expectedVersion?: number) {
+    if (!this.canManageMeetingSummary(teamId)) throw new WorkspaceApiError('FORBIDDEN', 'You do not have permission to cancel this meeting summary.');
+    const meeting = this.workspace.meetings.find((item) => item.id === meetingId && item.teamId === teamId);
+    const team = this.workspace.teams.find((candidate) => candidate.id === teamId);
+    if (!meeting || !team) throw new WorkspaceApiError('NOT_FOUND', 'Meeting not found.');
+    this.requireVersion(meeting.version ?? 1, expectedVersion);
+    if (meeting.status !== 'closed') throw new WorkspaceApiError('CONFLICT', 'AI summaries are available after a meeting is closed.');
+    if (meeting.aiSummaryStatus === 'cancelled') return this.result();
+    if (meeting.aiSummaryStatus !== 'queued' && meeting.aiSummaryStatus !== 'generating') throw new WorkspaceApiError('CONFLICT', 'Only a queued or generating AI summary can be cancelled.');
+    const timestamp = nowIso();
+    const cancellationMessage = 'AI recap generation was cancelled by the meeting editor.';
+    meeting.aiSummaryStatus = 'cancelled';
+    meeting.aiSummaryError = cancellationMessage;
+    meeting.updatedAt = timestamp;
+    meeting.version = (meeting.version ?? 1) + 1;
+    this.audit('Cancelled meeting AI summary', meeting.id, `${team.name} summary generation was cancelled.`, 'meeting');
+    return this.result();
+  }
+
   async createUser(input: Pick<User, 'name' | 'email' | 'accent'> & { platformAdmin?: boolean }) {
     this.requireAdmin();
     const timestamp = nowIso();
@@ -2027,6 +2047,7 @@ export class HttpWorkspaceApi implements WorkspaceApi {
   async updateMeetingSchedule(teamId: string, meetingId: string, input: { scheduledDate: string; scheduledTime: string }, expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}`, 'PATCH', input, expectedVersion); }
   async skipMeeting(teamId: string, meetingId: string, reason: MeetingSkipReason, note = '', expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/skip`, 'POST', { reason, note }, expectedVersion, { refresh: true }); }
   async requestMeetingSummary(teamId: string, meetingId: string, expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/ai-summary/retry`, 'POST', undefined, expectedVersion, { refresh: true }); }
+  async cancelMeetingSummary(teamId: string, meetingId: string, expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/ai-summary/cancel`, 'POST', undefined, expectedVersion, { refresh: true }); }
   async requestIssueTransfer(issueId: string, destinationTeamId: string, note?: string) { return this.mutate(`/issues/${issueId}/transfers`, 'POST', { destinationTeamId, note }, undefined, { refresh: true }); }
   async acceptIssueTransfer(transferId: string, expectedVersion?: number) { return this.mutate(`/issue-transfers/${transferId}/accept`, 'POST', undefined, expectedVersion, { refresh: true }); }
   async rejectIssueTransfer(transferId: string, message: string, expectedVersion?: number) { return this.mutate(`/issue-transfers/${transferId}/reject`, 'POST', { message }, expectedVersion, { refresh: true }); }

@@ -681,3 +681,24 @@ test('summary retry and regeneration require a direct editor, while legacy meeti
   assert.equal(legacyJob?.source, 'legacy');
   assert.equal(legacyJob?.contextSnapshot.recap, legacyClosed.recap);
 });
+
+test('stuck meeting summary attempts can be cancelled and resubmitted', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const workspace = await repository.getTeamWorkspace('projects', 'marcus-lee');
+  const started = await repository.startMeeting('projects', workspace.meetings[0].id, 'marcus-lee', workspace.meetings[0].version);
+  const closed = await repository.closeMeeting('projects', started.id, 'The AI worker needs another attempt.', 8, 'marcus-lee', started.version);
+  const initialJob = await repository.getMeetingSummaryJob('projects', closed.id, 'marcus-lee');
+  await repository.updateMeetingSummaryDispatch(initialJob!.id, 'generating', undefined, 'ai-worker');
+  const generating = await repository.getMeeting('projects', closed.id, 'marcus-lee');
+  const cancelled = await repository.cancelMeetingSummary('projects', closed.id, 'marcus-lee', generating.version);
+  const cancelledJob = await repository.getMeetingSummaryJob('projects', closed.id, 'marcus-lee');
+  assert.equal(cancelled.aiSummaryStatus, 'cancelled');
+  assert.equal(cancelled.aiSummaryError, 'AI recap generation was cancelled by the meeting editor.');
+  assert.deepEqual({ status: cancelledJob?.status, lastError: cancelledJob?.lastError }, { status: 'cancelled', lastError: cancelled.aiSummaryError });
+  await rejectsWithCode(repository.completeMeetingSummary(initialJob!.id, 'failed', undefined, 'Late worker callback.', 1), 'CONFLICT');
+
+  const resubmitted = await repository.requestMeetingSummary('projects', closed.id, 'marcus-lee', cancelled.version);
+  const resubmittedJob = await repository.getMeetingSummaryJob('projects', closed.id, 'marcus-lee');
+  assert.equal(resubmitted.aiSummaryStatus, 'queued');
+  assert.deepEqual({ status: resubmittedJob?.status, attempt: resubmittedJob?.attempt }, { status: 'queued', attempt: 2 });
+});

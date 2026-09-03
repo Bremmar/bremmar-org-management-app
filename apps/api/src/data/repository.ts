@@ -196,6 +196,7 @@ export interface WorkspaceRepository {
   closeMeeting(teamId: string, meetingId: string, recap: string, rating: number, actorId: string, expectedVersion?: number, attendeeRatings?: MeetingAttendeeRating[]): Promise<MeetingRecord>;
   getMeetingSummaryJob(teamId: string, meetingId: string, userId: string): Promise<MeetingSummaryJobRecord | null>;
   requestMeetingSummary(teamId: string, meetingId: string, actorId: string, expectedVersion?: number): Promise<MeetingRecord>;
+  cancelMeetingSummary(teamId: string, meetingId: string, actorId: string, expectedVersion?: number): Promise<MeetingRecord>;
   updateMeetingSummaryDispatch(jobId: string, status: 'generating' | 'failed', error: string | undefined, actorId: string): Promise<MeetingSummaryJobRecord>;
   completeMeetingSummary(jobId: string, status: 'ready' | 'failed', summary: MeetingAiSummary | undefined, error: string | undefined, attempt?: number): Promise<MeetingRecord>;
   getAdminSnapshot(actorId: string): Promise<AdminSnapshot>;
@@ -2081,10 +2082,30 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     return clone(meeting);
   }
 
+  async cancelMeetingSummary(teamId: string, meetingId: string, actorId: string, expectedVersion?: number) {
+    if (!this.canManageMeetingSummary(teamId, actorId)) throw new RepositoryError('FORBIDDEN', 'You do not have permission to cancel this meeting summary.');
+    const team = this.team(teamId);
+    const meeting = this.meetings.find((item) => item.id === meetingId && item.teamId === teamId);
+    if (!team || !meeting) throw new RepositoryError('NOT_FOUND', 'Meeting not found.');
+    assertExpectedVersion(meeting.version, expectedVersion);
+    if (meeting.status !== 'closed') throw new RepositoryError('CONFLICT', 'AI summaries are available after a meeting is closed.');
+    if (meeting.aiSummaryStatus === 'cancelled') return clone(meeting);
+    if (meeting.aiSummaryStatus !== 'queued' && meeting.aiSummaryStatus !== 'generating') throw new RepositoryError('CONFLICT', 'Only a queued or generating AI summary can be cancelled.');
+
+    const job = this.summaryJobs.find((candidate) => candidate.id === meeting.aiSummaryJobId);
+    if (job && job.status !== 'queued' && job.status !== 'generating') throw new RepositoryError('CONFLICT', 'The AI summary job is no longer active. Refresh and try again.');
+    const timestamp = nowIso();
+    const cancellationMessage = 'AI recap generation was cancelled by the meeting editor.';
+    if (job) Object.assign(job, { status: 'cancelled' as const, completedAt: timestamp, lastError: cancellationMessage, updatedAt: timestamp, updatedBy: actorId, version: job.version + 1 });
+    Object.assign(meeting, { aiSummaryStatus: 'cancelled' as const, aiSummaryError: cancellationMessage, updatedAt: timestamp, updatedBy: actorId, version: meeting.version + 1 });
+    this.recordAudit(actorId, 'Cancelled meeting AI summary', meeting.id, `${team.name} summary generation was cancelled.`, 'meeting');
+    return clone(meeting);
+  }
+
   async updateMeetingSummaryDispatch(jobId: string, status: 'generating' | 'failed', error: string | undefined, actorId: string) {
     const job = this.summaryJobs.find((candidate) => candidate.id === jobId);
     if (!job) throw new RepositoryError('NOT_FOUND', 'Meeting summary job not found.');
-    if (job.status === 'ready') return clone(job);
+    if (job.status === 'ready' || job.status === 'cancelled') return clone(job);
     const timestamp = nowIso();
     Object.assign(job, { status, startedAt: status === 'generating' ? (job.startedAt ?? timestamp) : job.startedAt, completedAt: status === 'failed' ? timestamp : undefined, lastError: error?.trim() || undefined, updatedAt: timestamp, updatedBy: actorId, version: job.version + 1 });
     const meeting = this.meetings.find((candidate) => candidate.id === job.meetingId && candidate.teamId === job.teamId);
@@ -2101,7 +2122,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     if (attempt !== undefined && job.attempt !== attempt) throw new RepositoryError('CONFLICT', 'This AI summary callback belongs to an older attempt.');
     const meeting = this.meetings.find((candidate) => candidate.id === job.meetingId && candidate.teamId === job.teamId);
     if (!meeting) throw new RepositoryError('NOT_FOUND', 'Meeting not found.');
-    if (job.status === 'ready' || job.status === 'failed') throw new RepositoryError('CONFLICT', 'This AI summary job has already completed.');
+    if (job.status === 'ready' || job.status === 'failed' || job.status === 'cancelled') throw new RepositoryError('CONFLICT', 'This AI summary job has already completed.');
     if (status === 'ready' && (!summary || typeof summary.executiveSummary !== 'string' || !summary.executiveSummary.trim() || !Array.isArray(summary.decisions) || !Array.isArray(summary.commitments) || !Array.isArray(summary.risks) || !Array.isArray(summary.nextFocus))) throw new RepositoryError('VALIDATION', 'A ready AI summary must include all structured sections.');
     const timestamp = nowIso();
     const normalizedSummary = status === 'ready' && summary ? { ...clone(summary), executiveSummary: summary.executiveSummary.trim(), decisions: summary.decisions.map((item) => String(item).trim()).filter(Boolean), commitments: summary.commitments.map((item) => String(item).trim()).filter(Boolean), risks: summary.risks.map((item) => String(item).trim()).filter(Boolean), nextFocus: summary.nextFocus.map((item) => String(item).trim()).filter(Boolean), generatedAt: summary.generatedAt || timestamp, source: job.source } : undefined;
@@ -2731,6 +2752,7 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
   async updateMeetingSchedule(teamId: string, meetingId: string, input: { scheduledDate: string; scheduledTime: string }, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateMeetingSchedule(teamId, meetingId, input, actorId, expectedVersion)); }
   async skipMeeting(teamId: string, meetingId: string, reason: MeetingSkipReason, note: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.skipMeeting(teamId, meetingId, reason, note, actorId, expectedVersion)); }
   async requestMeetingSummary(teamId: string, meetingId: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.requestMeetingSummary(teamId, meetingId, actorId, expectedVersion)); }
+  async cancelMeetingSummary(teamId: string, meetingId: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.cancelMeetingSummary(teamId, meetingId, actorId, expectedVersion)); }
   async updateMeetingSummaryDispatch(jobId: string, status: 'generating' | 'failed', error: string | undefined, actorId: string) { return this.withMutation(actorId, () => super.updateMeetingSummaryDispatch(jobId, status, error, actorId)); }
   async completeMeetingSummary(jobId: string, status: 'ready' | 'failed', summary: MeetingAiSummary | undefined, error: string | undefined, attempt?: number) { return this.withMutation('ai-worker', () => super.completeMeetingSummary(jobId, status, summary, error, attempt)); }
   async startIssue(issueId: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.startIssue(issueId, actorId, expectedVersion)); }
