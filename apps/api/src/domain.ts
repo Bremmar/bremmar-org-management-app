@@ -132,7 +132,6 @@ export interface RockRecord extends WorkspaceRecord {
   notes: string;
   ownerId: string;
   status: RockStatus;
-  progress: number;
   dueDate: string;
   priority: 'high' | 'medium' | 'low';
 }
@@ -149,6 +148,12 @@ export interface RockTaskRecord extends WorkspaceRecord {
   dueDate: string;
   status: RockTaskStatus;
   linkedTodoId?: string;
+}
+
+export interface DeleteRockTaskResult {
+  deletedTaskId: string;
+  rockId: string;
+  rockVersion: number;
 }
 
 export interface TodoChecklistItem {
@@ -328,7 +333,7 @@ export interface MeetingSummaryContext {
   sectionNotes: Partial<Record<MeetingSection, string>>;
   idsNotes: MeetingIssueNoteRecord[];
   actionSummary?: MeetingActionSummary;
-  rocks: Array<{ id: string; title: string; status: RockStatus; progress: number; dueDate: string }>;
+  rocks: Array<{ id: string; title: string; status: RockStatus; completedMilestones: number; remainingMilestones: number; dueDate: string }>;
   todos: Array<{ id: string; title: string; status: TodoStatus; ownerId: string; dueDate: string }>;
   issues: Array<{ id: string; title: string; status: IssueStatus; idsNote?: string }>;
   headlines: Array<{ title: string; type: 'win' | 'concern'; detail: string }>;

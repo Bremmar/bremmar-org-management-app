@@ -123,7 +123,7 @@ const makeTask = (task: Omit<RockTask, 'createdAt' | 'updatedAt' | 'version'>): 
 const rocks: Rock[] = [
   {
     id: 'rock-playbook', teamId: 'leadership', quarterId: '2026-q3', title: 'Launch the client onboarding playbook',
-    description: 'One clear path from signed agreement to first value for every new client.', notes: 'Keep the first version simple enough for every team to use.', ownerId: 'ava-khan', status: 'on-track', progress: 72,
+    description: 'One clear path from signed agreement to first value for every new client.', notes: 'Keep the first version simple enough for every team to use.', ownerId: 'ava-khan', status: 'on-track',
     dueDate: '2026-09-30', priority: 'high', createdAt: daysAgo(55), updatedAt: daysAgo(1), version: 3,
     tasks: [
       makeTask({ id: 'task-playbook-outline', rockId: 'rock-playbook', teamId: 'leadership', title: 'Approve the first-week checklist', notes: 'Review the handoff moments with Projects and Service Delivery.', assigneeId: 'marcus-lee', assignedAt: daysAgo(12), startDate: '2026-08-20', dueDate: '2026-09-05', status: 'in-progress', linkedTodoId: 'todo-brief' }),
@@ -132,31 +132,31 @@ const rocks: Rock[] = [
   },
   {
     id: 'rock-project-kickoff', teamId: 'projects', quarterId: '2026-q3', title: 'Standardise the implementation kickoff',
-    description: 'Give every project the same calm, prepared first week.', notes: 'The kickoff template should be usable without a live handover.', ownerId: 'marcus-lee', status: 'on-track', progress: 58,
+    description: 'Give every project the same calm, prepared first week.', notes: 'The kickoff template should be usable without a live handover.', ownerId: 'marcus-lee', status: 'on-track',
     dueDate: '2026-09-30', priority: 'high', createdAt: daysAgo(51), updatedAt: daysAgo(2), version: 2,
     tasks: [makeTask({ id: 'task-project-template', rockId: 'rock-project-kickoff', teamId: 'projects', title: 'Pilot the new kickoff checklist', notes: 'Use the next two projects as the test cohort.', assigneeId: 'maya-green', assignedAt: daysAgo(6), startDate: '2026-08-29', dueDate: '2026-09-10', status: 'open' })],
   },
   {
     id: 'rock-cyber-readiness', teamId: 'cybersecurity', quarterId: '2026-q3', title: 'Close the security evidence gaps',
-    description: 'Make the evidence path clear before the next customer assurance review.', notes: 'Prioritise evidence that is reusable across customers.', ownerId: 'priya-shah', status: 'off-track', progress: 41,
+    description: 'Make the evidence path clear before the next customer assurance review.', notes: 'Prioritise evidence that is reusable across customers.', ownerId: 'priya-shah', status: 'off-track',
     dueDate: '2026-09-20', priority: 'high', createdAt: daysAgo(62), updatedAt: daysAgo(4), version: 2,
     tasks: [makeTask({ id: 'task-cyber-evidence', rockId: 'rock-cyber-readiness', teamId: 'cybersecurity', title: 'Agree the evidence owner matrix', notes: 'Resolve the unclear handoffs between service teams.', assigneeId: 'priya-shah', assignedAt: daysAgo(14), startDate: '2026-08-22', dueDate: '2026-09-06', status: 'in-progress' })],
   },
   {
     id: 'rock-managed-catalogue', teamId: 'managed-services', quarterId: '2026-q3', title: 'Publish the managed services catalogue',
-    description: 'Give customers and delivery teams one clear view of the service offer.', notes: 'Use customer language, not internal service names.', ownerId: 'daniel-cho', status: 'on-track', progress: 67,
+    description: 'Give customers and delivery teams one clear view of the service offer.', notes: 'Use customer language, not internal service names.', ownerId: 'daniel-cho', status: 'on-track',
     dueDate: '2026-09-30', priority: 'medium', createdAt: daysAgo(50), updatedAt: daysAgo(2), version: 2,
     tasks: [makeTask({ id: 'task-catalogue-review', rockId: 'rock-managed-catalogue', teamId: 'managed-services', title: 'Review catalogue language with Service Delivery', notes: '', assigneeId: 'jon-bell', assignedAt: daysAgo(5), startDate: '2026-08-29', dueDate: '2026-09-08', status: 'open' })],
   },
   {
     id: 'rock-service-development', teamId: 'service-development', quarterId: '2026-q3', title: 'Release the service health playbook',
-    description: 'Create a repeatable weekly health review for every managed service.', notes: 'Include the signals that should create an Issue.', ownerId: 'maria-ortiz', status: 'on-track', progress: 54,
+    description: 'Create a repeatable weekly health review for every managed service.', notes: 'Include the signals that should create an Issue.', ownerId: 'maria-ortiz', status: 'on-track',
     dueDate: '2026-09-30', priority: 'medium', createdAt: daysAgo(46), updatedAt: daysAgo(3), version: 1,
     tasks: [makeTask({ id: 'task-health-playbook', rockId: 'rock-service-development', teamId: 'service-development', title: 'Draft the health review template', notes: '', assigneeId: 'maria-ortiz', assignedAt: daysAgo(9), startDate: '2026-08-26', dueDate: '2026-09-15', status: 'open' })],
   },
   {
     id: 'rock-service-delivery', teamId: 'service-delivery', quarterId: '2026-q3', title: 'Improve first-response consistency',
-    description: 'Make the first customer response predictable across the service desk.', notes: 'Measure the promise and the actual response separately.', ownerId: 'jon-bell', status: 'complete', progress: 100,
+    description: 'Make the first customer response predictable across the service desk.', notes: 'Measure the promise and the actual response separately.', ownerId: 'jon-bell', status: 'complete',
     dueDate: '2026-09-12', priority: 'high', createdAt: daysAgo(70), updatedAt: daysAgo(5), version: 4,
     tasks: [makeTask({ id: 'task-first-response', rockId: 'rock-service-delivery', teamId: 'service-delivery', title: 'Publish the response standard', notes: '', assigneeId: 'jon-bell', assignedAt: daysAgo(40), startDate: '2026-07-28', dueDate: '2026-08-29', status: 'done' })],
   },

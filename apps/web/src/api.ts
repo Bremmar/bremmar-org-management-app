@@ -1,5 +1,5 @@
 import { defaultAgeBand, initialWorkspace, testWorkspace } from './data';
-import { meetingDateFor, meetingDateLabel, meetingReviewStatus, meetingScheduledAt, meetingSectionsFor, nextConfiguredMeetingDateAfter, normalizeMeeting, issueMeetingBand, scorecardTrendFor, weekStartDateFor } from './types';
+import { meetingDateFor, meetingDateLabel, meetingReviewStatus, meetingScheduledAt, meetingSectionsFor, nextConfiguredMeetingDateAfter, normalizeMeeting, issueMeetingBand, rockMilestoneCounts, scorecardTrendFor, weekStartDateFor } from './types';
 import { sanitizeTodoNotes } from './richText';
 import type {
   CompanyOverview,
@@ -64,10 +64,11 @@ export interface WorkspaceApi {
   getWorkspace(): Promise<Workspace>;
   getCompanyOverview(): Promise<CompanyOverview>;
   updateRockStatus(rockId: string, status: RockStatus, expectedVersion?: number): Promise<Workspace>;
-  updateRock(rockId: string, input: Partial<Pick<Rock, 'title' | 'description' | 'notes' | 'ownerId' | 'progress' | 'dueDate' | 'priority'>>, expectedVersion?: number): Promise<Workspace>;
+  updateRock(rockId: string, input: Partial<Pick<Rock, 'title' | 'description' | 'notes' | 'ownerId' | 'dueDate' | 'priority'>>, expectedVersion?: number): Promise<Workspace>;
   addRock(input: Pick<Rock, 'title' | 'description' | 'ownerId' | 'dueDate' | 'priority' | 'teamId'> & { notes?: string }): Promise<Workspace>;
   addRockTask(rockId: string, input: Pick<RockTask, 'title' | 'notes' | 'assigneeId' | 'assignedAt' | 'startDate' | 'dueDate'>): Promise<Workspace>;
   updateRockTask(taskId: string, input: Partial<Pick<RockTask, 'title' | 'notes' | 'assigneeId' | 'assignedAt' | 'startDate' | 'dueDate' | 'status'>>, expectedVersion?: number): Promise<Workspace>;
+  deleteRockTask(taskId: string, expectedVersion?: number): Promise<Workspace>;
   convertRockTaskToTodo(taskId: string): Promise<Workspace>;
   updateTodoStatus(todoId: string, status: TodoStatus, expectedVersion?: number): Promise<Workspace>;
   updateTodo(todoId: string, input: Partial<Pick<Todo, 'title' | 'notes' | 'ownerId' | 'dueDate' | 'status'>>, expectedVersion?: number): Promise<Workspace>;
@@ -114,6 +115,12 @@ export interface WorkspaceApi {
 const cloneWorkspace = (workspace: Workspace): Workspace => structuredClone(workspace);
 const nowIso = () => new Date().toISOString();
 const slugify = (value: string) => value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || `team-${Date.now()}`;
+
+function stripLegacyRockProgress(rock: Rock): Rock {
+  const next = { ...rock } as Record<string, unknown>;
+  delete next.progress;
+  return next as unknown as Rock;
+}
 
 export function ageBandFor(ageInDays: number, settings: IssueAgeSettings): IssueAgeBand {
   if (ageInDays >= settings.criticalDays) return 'critical';
@@ -211,7 +218,7 @@ function meetingRecap(workspace: Workspace, team: Team, meeting: Workspace['meet
     const missing = results.filter(({ result }) => !result).map(({ metric }) => metric.label);
     lines.push(`Scorecard: ${offTrack.length ? `off-track — ${offTrack.join(', ')}` : missing.length ? `not entered — ${missing.join(', ')}` : 'all visible measurables on track.'}`);
   }
-  lines.push(`Rock Review: ${rocks.length ? rocks.map((rock) => `${rock.title} (${rock.progress}% · ${rock.status})`).join('; ') : 'no Rocks recorded.'}`);
+  lines.push(`Rock Review: ${rocks.length ? rocks.map((rock) => { const milestones = rockMilestoneCounts(rock); return `${rock.title} (${milestones.completed} completed · ${milestones.remaining} remaining · ${rock.status})`; }).join('; ') : 'no Rocks recorded.'}`);
   lines.push(`Headlines: ${workspace.headlines.filter((headline) => headline.teamId === team.id).map((headline) => headline.title).join('; ') || 'none recorded.'}`);
   lines.push(`To-Do Review: ${todos.length ? todos.map((todo) => `${todo.title} — ${todo.status === 'done' ? 'done' : 'open'} · ${workspace.users.find((user) => user.id === todo.ownerId)?.name ?? 'unassigned'} · due ${todo.dueDate}`).join('; ') : 'no To-Dos recorded.'}`);
   lines.push(`IDS: ${ids.length ? ids.map((issue) => `${issue.title} — ${issue.status === 'solved' ? 'solved' : 'carried forward'}${issue.idsNote ? ` · ${issue.idsNote.split('\n').at(-1)}` : ''}`).join('; ') : 'no Issues entered into IDS.'}`);
@@ -390,6 +397,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
   }
 
   private refreshDerivedState() {
+    this.workspace.rocks = this.workspace.rocks.map(stripLegacyRockProgress);
     this.workspace.teams = this.workspace.teams.map((team) => ({
       ...team,
       meetingCadence: team.meetingCadence ?? 'weekly',
@@ -604,26 +612,32 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     this.requireWrite(rock.teamId);
     this.requireVersion(rock.version, expectedVersion);
     rock.status = status;
-    if (status === 'complete') rock.progress = 100;
-    if (status === 'on-track' && rock.progress === 100) rock.progress = 95;
     rock.updatedAt = nowIso();
     rock.version += 1;
     this.audit('Updated Rock status', rock.id, `${rock.title} marked ${status}.`, 'rock');
     return this.result();
   }
 
-  async updateRock(rockId: string, input: Partial<Pick<Rock, 'title' | 'description' | 'notes' | 'ownerId' | 'progress' | 'dueDate' | 'priority'>>, expectedVersion?: number) {
+  async updateRock(rockId: string, input: Partial<Pick<Rock, 'title' | 'description' | 'notes' | 'ownerId' | 'dueDate' | 'priority'>>, expectedVersion?: number) {
     const rock = this.rock(rockId);
     this.requireWrite(rock.teamId);
     this.requireVersion(rock.version, expectedVersion);
-    Object.assign(rock, input, { updatedAt: nowIso(), version: rock.version + 1 });
+    const allowedInput: Partial<Pick<Rock, 'title' | 'description' | 'notes' | 'ownerId' | 'dueDate' | 'priority'>> = {
+      ...(input.title !== undefined ? { title: input.title.trim() } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      ...(input.notes !== undefined ? { notes: input.notes } : {}),
+      ...(input.ownerId !== undefined ? { ownerId: input.ownerId } : {}),
+      ...(input.dueDate !== undefined ? { dueDate: input.dueDate } : {}),
+      ...(input.priority !== undefined ? { priority: input.priority } : {}),
+    };
+    Object.assign(rock, allowedInput, { updatedAt: nowIso(), version: rock.version + 1 });
     return this.result();
   }
 
   async addRock(input: Pick<Rock, 'title' | 'description' | 'ownerId' | 'dueDate' | 'priority' | 'teamId'> & { notes?: string }) {
     this.requireWrite(input.teamId);
     const timestamp = nowIso();
-    this.workspace.rocks.unshift({ ...input, id: `rock-${Date.now()}`, quarterId: this.workspace.quarter.id, notes: input.notes ?? '', status: 'on-track', progress: 0, tasks: [], createdAt: timestamp, updatedAt: timestamp, version: 1 });
+    this.workspace.rocks.unshift({ ...input, id: `rock-${Date.now()}`, quarterId: this.workspace.quarter.id, notes: input.notes ?? '', status: 'on-track', tasks: [], createdAt: timestamp, updatedAt: timestamp, version: 1 });
     this.audit('Created Rock', this.workspace.rocks[0].id, input.title, 'rock');
     return this.result();
   }
@@ -643,7 +657,16 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const { rock, task } = this.task(taskId);
     this.requireWrite(rock.teamId);
     this.requireVersion(task.version, expectedVersion);
-    Object.assign(task, input, { updatedAt: nowIso(), version: task.version + 1 });
+    const allowedInput: Partial<Pick<RockTask, 'title' | 'notes' | 'assigneeId' | 'assignedAt' | 'startDate' | 'dueDate' | 'status'>> = {
+      ...(input.title !== undefined ? { title: input.title.trim() } : {}),
+      ...(input.notes !== undefined ? { notes: input.notes } : {}),
+      ...(input.assigneeId !== undefined ? { assigneeId: input.assigneeId } : {}),
+      ...(input.assignedAt !== undefined ? { assignedAt: input.assignedAt } : {}),
+      ...(input.startDate !== undefined ? { startDate: input.startDate } : {}),
+      ...(input.dueDate !== undefined ? { dueDate: input.dueDate } : {}),
+      ...(input.status !== undefined ? { status: input.status } : {}),
+    };
+    Object.assign(task, allowedInput, { updatedAt: nowIso(), version: task.version + 1 });
     if (task.linkedTodoId) {
       const todo = this.workspace.todos.find((item) => item.id === task.linkedTodoId);
       if (todo) {
@@ -656,6 +679,26 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     }
     rock.updatedAt = nowIso();
     rock.version += 1;
+    return this.result();
+  }
+
+  async deleteRockTask(taskId: string, expectedVersion?: number) {
+    const { rock, task } = this.task(taskId);
+    this.requireWrite(rock.teamId);
+    this.requireVersion(task.version, expectedVersion);
+    if (task.linkedTodoId) {
+      const todo = this.workspace.todos.find((item) => item.id === task.linkedTodoId);
+      if (todo) {
+        delete todo.linkedRockTaskId;
+        todo.origin = 'Team workspace · former Rock Task';
+        todo.updatedAt = nowIso();
+        todo.version += 1;
+      }
+    }
+    rock.tasks = rock.tasks.filter((item) => item.id !== taskId);
+    rock.updatedAt = nowIso();
+    rock.version += 1;
+    this.audit('Deleted Rock Task', task.id, `${task.title} removed from ${rock.title}.`, 'rock');
     return this.result();
   }
 
@@ -910,7 +953,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
       sourceTeamId: rock.teamId,
       currentTeamId: rock.teamId,
       title: `Off-track Rock: ${rock.title}`,
-      detail: rock.description || `The Rock is ${rock.progress}% complete and marked off-track.`,
+      detail: rock.description || (() => { const milestones = rockMilestoneCounts(rock); return `The Rock has ${milestones.remaining} milestone${milestones.remaining === 1 ? '' : 's'} remaining and is marked off-track.`; })(),
       priority: rock.priority === 'high' ? 1 : rock.priority === 'medium' ? 3 : 5,
       status: 'open',
       horizon: 'short-term',
@@ -1602,7 +1645,7 @@ function mapSnapshot(snapshot: ApiSnapshot): Workspace {
     teams,
     users: snapshot.users,
     memberships: snapshot.memberships.map(serverMembership),
-    rocks: snapshot.rocks.map((rock) => ({ ...rock, id: rock.id, tasks: tasksByRock.get(rock.id) ?? [] })),
+    rocks: snapshot.rocks.map((rock) => ({ ...stripLegacyRockProgress(rock), id: rock.id, tasks: tasksByRock.get(rock.id) ?? [] })),
     todos: snapshot.todos.map((todo) => ({ ...todo, notes: sanitizeTodoNotes(todo.notes), checklist: normalizedChecklist(todo, snapshot.users, snapshot.memberships) })),
     issues: snapshot.issues.map((issue) => ({ ...issue, meetingsPassed: issue.meetingsPassed ?? 0, meetingBand: issueMeetingBand(issue.meetingsPassed ?? 0, issue.status), escalationState: issue.escalationState ?? 'not-scheduled', escalationLevel: issue.escalationLevel ?? 0 })),
     messages: snapshot.messages,
@@ -1635,7 +1678,7 @@ function mergeMutationRecord(workspace: Workspace, value: MutationObject): boole
     case 'rock': {
       const next = value as unknown as Rock & { teamId?: string };
       const existing = workspace.rocks.find((rock) => rock.id === next.id);
-      replaceRecord(workspace.rocks, { ...next, id: next.id, teamId: next.teamId ?? existing?.teamId ?? '', tasks: next.tasks ?? existing?.tasks ?? [] });
+      replaceRecord(workspace.rocks, { ...stripLegacyRockProgress(next), id: next.id, teamId: next.teamId ?? existing?.teamId ?? '', tasks: next.tasks ?? existing?.tasks ?? [] });
       return true;
     }
     case 'rockTask': {
@@ -1767,7 +1810,7 @@ export class HttpWorkspaceApi implements WorkspaceApi {
 
   async getCompanyOverview(): Promise<CompanyOverview> {
     const overview = await this.request<{ teams: CompanyOverview['teams']; issues: Issue[]; rocks: Rock[]; todos: Todo[] }>('/company/overview');
-    return { teams: overview.teams, issues: overview.issues, rocks: overview.rocks.map((rock) => ({ ...rock, tasks: rock.tasks ?? [] })), todos: overview.todos };
+    return { teams: overview.teams, issues: overview.issues, rocks: overview.rocks.map((rock) => ({ ...stripLegacyRockProgress(rock), tasks: rock.tasks ?? [] })), todos: overview.todos };
   }
 
   private async mutate<T = unknown>(path: string, method: string, body?: unknown, expectedVersion?: number, options: { refresh?: boolean } = {}) {
@@ -1792,13 +1835,14 @@ export class HttpWorkspaceApi implements WorkspaceApi {
   }
 
   async updateRockStatus(rockId: string, status: RockStatus, expectedVersion?: number) { return this.mutate(`/rocks/${rockId}/status`, 'PATCH', { status }, expectedVersion); }
-  async updateRock(rockId: string, input: Partial<Pick<Rock, 'title' | 'description' | 'notes' | 'ownerId' | 'progress' | 'dueDate' | 'priority'>>, expectedVersion?: number) { return this.mutate(`/rocks/${rockId}`, 'PATCH', input, expectedVersion); }
+  async updateRock(rockId: string, input: Partial<Pick<Rock, 'title' | 'description' | 'notes' | 'ownerId' | 'dueDate' | 'priority'>>, expectedVersion?: number) { return this.mutate(`/rocks/${rockId}`, 'PATCH', input, expectedVersion); }
   async addRock(input: Pick<Rock, 'title' | 'description' | 'ownerId' | 'dueDate' | 'priority' | 'teamId'> & { notes?: string }) { return this.mutate(`/teams/${input.teamId}/rocks`, 'POST', input); }
   async addRockTask(rockId: string, input: Pick<RockTask, 'title' | 'notes' | 'assigneeId' | 'assignedAt' | 'startDate' | 'dueDate'>) { return this.mutate(`/rocks/${rockId}/tasks`, 'POST', input); }
   async updateRockTask(taskId: string, input: Partial<Pick<RockTask, 'title' | 'notes' | 'assigneeId' | 'assignedAt' | 'startDate' | 'dueDate' | 'status'>>, expectedVersion?: number) {
     const task = this.cachedWorkspace?.rocks.flatMap((rock) => rock.tasks).find((candidate) => candidate.id === taskId);
     return this.mutate(`/rock-tasks/${taskId}`, 'PATCH', input, expectedVersion, { refresh: Boolean(task?.linkedTodoId) });
   }
+  async deleteRockTask(taskId: string, expectedVersion?: number) { return this.mutate(`/rock-tasks/${taskId}`, 'DELETE', undefined, expectedVersion, { refresh: true }); }
   async convertRockTaskToTodo(taskId: string) { return this.mutate(`/rock-tasks/${taskId}/todo`, 'POST'); }
   async updateTodoStatus(todoId: string, status: TodoStatus, expectedVersion?: number) { return this.mutate(`/todos/${todoId}/status`, 'PATCH', { status }, expectedVersion); }
   async updateTodo(todoId: string, input: Partial<Pick<Todo, 'title' | 'notes' | 'ownerId' | 'dueDate' | 'status'>>, expectedVersion?: number) {

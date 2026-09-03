@@ -79,7 +79,9 @@ operational work has been resolved or moved.
   never treated as proof of access.
 - Important mutations produce immutable audit events and use version/ETag
   checks for optimistic concurrency.
-- Rock, Issue, and To-Do detail edits are versioned. IDS notes and resolution
+- Rock, Rock Task, Issue, and To-Do detail edits are versioned. Rock progress is
+  derived from completed versus remaining milestones, and deleting a Rock Task
+  preserves any linked To-Do as standalone work. IDS notes and resolution
   decisions are stored both on the meeting note record and as append-only
   labeled entries with a canonical UTC datestamp on the Issue. The editable
   Historical Context field tolerates legacy values, while automatic additions
@@ -145,10 +147,10 @@ operational work has been resolved or moved.
 - Issue-created To-Dos retain `sourceIssueId`. The solve operation records
   whether a follow-up To-Do was created and any resolution note in the Issue’s
   Historical Context atomically and is idempotent when repeated.
-- At Segue, the active L10 shows incoming team messages whose status is not
-  `converted`, including both read and unread messages. Reading or opening a
-  message does not mark it read automatically; the existing explicit message
-  actions remain available.
+- At Segue, the active L10 shows only incoming team messages with `unread`
+  status. Reading or opening a message does not mark it read automatically;
+  the explicit message actions remain available, while read messages stay in
+  the full Team messages view.
 
 The partitioning and transactional design follows the Cosmos DB guidance for
 [partition keys](https://learn.microsoft.com/en-us/azure/cosmos-db/partitioning)
@@ -175,7 +177,10 @@ The Functions API exposes typed server contracts for:
 - `POST /api/platform-admin/users` creates a user profile and
   `PATCH /api/platform-admin/users/{userId}` edits its name, email, or Platform
   Admin capability with `If-Match` concurrency protection.
-- Rock, Rock Task, To-Do, Issue, IDS, and Task-to-To-Do routes.
+- Rock, Rock Task, To-Do, Issue, IDS, and Task-to-To-Do routes. Rock Tasks
+  support versioned `PATCH /api/rock-tasks/{taskId}` edits and
+  `DELETE /api/rock-tasks/{taskId}` removal; deletion unlinks an existing
+  To-Do without deleting it.
 - Team message send/read/convert-to-Issue routes and meeting IDS-note/close
   routes.
 - `GET /api/meetings/review` — hierarchy-authorized history with team, status,

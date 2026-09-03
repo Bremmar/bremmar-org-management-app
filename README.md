@@ -113,8 +113,11 @@ Issue health is based on total meetings passed, not age: neutral at 0, green at
 all unresolved Issues that predate the meeting start are counted, including
 Issues not placed on the IDS list. Issues solved during the meeting and Issues
 created during it are excluded. `ageInDays` remains visible as neutral reference
-text for compatibility. Incoming, unconverted team messages are shown at the
-start of Segue, with explicit Open, Mark read, and Create Issue actions.
+text for compatibility. Rock progress is derived from completed versus
+remaining Tasks/Milestones; there is no manually entered percentage. Rock Tasks
+can be opened for editing and deletion. Deleting a Task unlinks, but preserves,
+an existing linked To-Do. Only unread, unconverted team messages are shown at
+the start of Segue, with explicit Open, Mark read, and Create Issue actions.
 
 ## Validation
 

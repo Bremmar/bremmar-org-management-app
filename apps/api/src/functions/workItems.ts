@@ -40,7 +40,7 @@ async function updateRockHandler(request: HttpRequest, _context: InvocationConte
   const rockId = request.params.rockId;
   if (!rockId) return { status: 422, jsonBody: { error: 'rockId is required', code: 'VALIDATION' } };
   try {
-    const body = await requestJson<Partial<Pick<RockRecord, 'title' | 'description' | 'notes' | 'ownerId' | 'progress' | 'dueDate' | 'priority'>>>(request);
+    const body = await requestJson<Partial<Pick<RockRecord, 'title' | 'description' | 'notes' | 'ownerId' | 'dueDate' | 'priority'>>>(request);
     const rock = await repository.updateRock(rockId, body, principal.userId, expectedVersion(request));
     return responseWithEtag(rock, `W/\"${rock.version}\"`);
   } catch (error) {
@@ -243,6 +243,20 @@ async function updateTaskHandler(request: HttpRequest, _context: InvocationConte
   }
 }
 
+async function deleteTaskHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
+  const scope = await requestScope(request);
+  if (isResponse(scope)) return scope;
+  const { principal, repository } = scope;
+  const taskId = request.params.taskId;
+  if (!taskId) return { status: 422, jsonBody: { error: 'taskId is required', code: 'VALIDATION' } };
+  try {
+    const result = await repository.deleteRockTask(taskId, principal.userId, expectedVersion(request));
+    return responseWithEtag(result, `W/\"${result.rockVersion}\"`);
+  } catch (error) {
+    return repositoryErrorResponse(error);
+  }
+}
+
 async function convertTaskHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
   const scope = await requestScope(request);
   if (isResponse(scope)) return scope;
@@ -273,4 +287,5 @@ app.http('startIssue', { methods: ['POST'], authLevel: 'anonymous', route: 'issu
 app.http('solveIssue', { methods: ['POST'], authLevel: 'anonymous', route: 'issues/{issueId}/solve', handler: (request, context) => issueActionHandler(request, context, 'solve') });
 app.http('createRockTask', { methods: ['POST'], authLevel: 'anonymous', route: 'rocks/{rockId}/tasks', handler: createTaskHandler });
 app.http('updateRockTask', { methods: ['PATCH'], authLevel: 'anonymous', route: 'rock-tasks/{taskId}', handler: updateTaskHandler });
+app.http('deleteRockTask', { methods: ['DELETE'], authLevel: 'anonymous', route: 'rock-tasks/{taskId}', handler: deleteTaskHandler });
 app.http('convertRockTask', { methods: ['POST'], authLevel: 'anonymous', route: 'rock-tasks/{taskId}/todo', handler: convertTaskHandler });

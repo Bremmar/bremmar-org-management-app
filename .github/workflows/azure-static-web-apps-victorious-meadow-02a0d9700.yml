@@ -47,6 +47,11 @@ jobs:
           test -f apps/api/dist/host.json
           test "$(node -p "require('./apps/api/dist/package.json').main")" = "index.js"
           grep -q "route: 'platform-admin/users'" apps/api/dist/functions/admin.js
+          grep -q "import './functions/meetings.js'" apps/api/dist/index.js
+          grep -q "import './functions/workItems.js'" apps/api/dist/index.js
+          grep -q "teams/{teamId}/meetings/{meetingId}/start" apps/api/dist/functions/meetings.js
+          grep -q "teams/{teamId}/meetings/{meetingId}/notes" apps/api/dist/functions/meetings.js
+          grep -q "route: 'rock-tasks/{taskId}'" apps/api/dist/functions/workItems.js
 
       - name: Get ID token
         uses: actions/github-script@v9

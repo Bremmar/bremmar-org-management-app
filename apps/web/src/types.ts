@@ -144,13 +144,24 @@ export interface Rock {
   notes: string;
   ownerId: string;
   status: RockStatus;
-  progress: number;
   dueDate: string;
   priority: 'high' | 'medium' | 'low';
   tasks: RockTask[];
   createdAt: string;
   updatedAt: string;
   version: number;
+}
+
+export interface RockMilestoneCounts {
+  total: number;
+  completed: number;
+  remaining: number;
+}
+
+export function rockMilestoneCounts(rock: Pick<Rock, 'tasks'>): RockMilestoneCounts {
+  const total = rock.tasks.length;
+  const completed = rock.tasks.filter((task) => task.status === 'done').length;
+  return { total, completed, remaining: total - completed };
 }
 
 export interface Todo {

@@ -115,6 +115,22 @@ test('Rock Task conversion is idempotent and keeps linked To-Do fields synchroni
   assert.deepEqual({ status: synchronizedTask?.status, assigneeId: synchronizedTask?.assigneeId, dueDate: synchronizedTask?.dueDate }, { status: 'open', assigneeId: 'marcus-lee', dueDate: '2026-09-13' });
 });
 
+test('Rock Tasks can be edited and deleted while a linked To-Do remains as standalone work', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const task = await repository.createRockTask({ rockId: 'rock-project-kickoff', title: 'Run the pilot', assigneeId: 'marcus-lee', assignedAt: '2026-09-02', startDate: '2026-09-03', dueDate: '2026-09-10' }, 'marcus-lee');
+  const edited = await repository.updateRockTask(task.id, { title: 'Run the revised pilot', notes: 'Capture the handoff feedback.', dueDate: '2026-09-12', status: 'in-progress' }, 'marcus-lee', task.version);
+  const converted = await repository.convertRockTaskToTodo(edited.id, 'marcus-lee');
+  const deleted = await repository.deleteRockTask(edited.id, 'marcus-lee', converted.task.version);
+  const workspace = await repository.getTeamWorkspace('projects', 'marcus-lee');
+
+  assert.deepEqual(deleted, { deletedTaskId: task.id, rockId: 'rock-project-kickoff', rockVersion: 2 });
+  assert.equal(workspace.tasks.some((candidate) => candidate.id === task.id), false);
+  const keptTodo = workspace.todos.find((todo) => todo.id === converted.todo.id);
+  assert.equal(keptTodo?.linkedRockTaskId, undefined);
+  assert.equal(keptTodo?.origin, 'Team workspace · former Rock Task');
+  assert.equal(keptTodo?.version, converted.todo.version + 1);
+});
+
 test('solving an Issue creates an idempotent follow-up To-Do in the same team workspace', async () => {
   const repository = new MemoryWorkspaceRepository();
   await repository.solveIssue('issue-project-scope', { createFollowUpTodo: true }, 'marcus-lee');

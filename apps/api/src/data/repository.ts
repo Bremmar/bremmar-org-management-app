@@ -17,6 +17,7 @@ import {
   weekStartDateFor,
   type AuditEventRecord,
   type CompanyOverview,
+  type DeleteRockTaskResult,
   type DashboardSummary,
   type EnvironmentId,
   type IssueAgeSettings,
@@ -153,7 +154,7 @@ export interface WorkspaceRepository {
   markNotificationRead(notificationId: string, userId: string, expectedVersion?: number): Promise<NotificationRecord>;
   getIssue(issueId: string, userId: string): Promise<IssueRecord>;
   updateRockStatus(rockId: string, status: RockRecord['status'], actorId: string, expectedVersion?: number): Promise<RockRecord>;
-  updateRock(rockId: string, input: Partial<Pick<RockRecord, 'title' | 'description' | 'notes' | 'ownerId' | 'progress' | 'dueDate' | 'priority'>>, actorId: string, expectedVersion?: number): Promise<RockRecord>;
+  updateRock(rockId: string, input: Partial<Pick<RockRecord, 'title' | 'description' | 'notes' | 'ownerId' | 'dueDate' | 'priority'>>, actorId: string, expectedVersion?: number): Promise<RockRecord>;
   updateTodoStatus(todoId: string, status: TodoRecord['status'], actorId: string, expectedVersion?: number): Promise<TodoRecord>;
   updateTodo(todoId: string, input: Partial<Pick<TodoRecord, 'title' | 'notes' | 'ownerId' | 'dueDate' | 'status'>>, actorId: string, expectedVersion?: number): Promise<TodoRecord>;
   addTodoChecklistItem(todoId: string, text: string, supporterId: string | undefined, actorId: string, expectedVersion?: number): Promise<TodoRecord>;
@@ -176,6 +177,7 @@ export interface WorkspaceRepository {
   createTodo(input: CreateTodoInput, actorId: string): Promise<TodoRecord>;
   createRockTask(input: { rockId: string; title: string; notes?: string; assigneeId: string; assignedAt: string; startDate: string; dueDate: string }, actorId: string): Promise<RockTaskRecord>;
   updateRockTask(taskId: string, input: Partial<Pick<RockTaskRecord, 'title' | 'notes' | 'assigneeId' | 'assignedAt' | 'startDate' | 'dueDate' | 'status'>>, actorId: string, expectedVersion?: number): Promise<RockTaskRecord>;
+  deleteRockTask(taskId: string, actorId: string, expectedVersion?: number): Promise<DeleteRockTaskResult>;
   convertRockTaskToTodo(taskId: string, actorId: string): Promise<{ task: RockTaskRecord; todo: TodoRecord }>;
   getIssueTransfer(transferId: string): Promise<IssueTransferRecord>;
   requestIssueTransfer(input: { issueId: string; destinationTeamId: string; requestedById: string; note?: string; idempotencyKey?: string }): Promise<IssueTransferRecord>;
@@ -359,7 +361,13 @@ function appendHistoricalNote(current: string | undefined, at: string, note: str
   return current?.trim() ? `${current.trim()}\n\n${entry}` : entry;
 }
 
-function meetingRecap(team: TeamRecord, meeting: MeetingRecord, rocks: RockRecord[], todos: TodoRecord[], issues: IssueRecord[], manualNotes: string, metrics: ScorecardMetricRecord[] = [], results: ScorecardResultRecord[] = []) {
+function milestoneCountsFor(rockId: string, tasks: RockTaskRecord[]) {
+  const milestones = tasks.filter((task) => task.rockId === rockId);
+  const completed = milestones.filter((task) => task.status === 'done').length;
+  return { completed, remaining: milestones.length - completed };
+}
+
+function meetingRecap(team: TeamRecord, meeting: MeetingRecord, rocks: RockRecord[], tasks: RockTaskRecord[], todos: TodoRecord[], issues: IssueRecord[], manualNotes: string, metrics: ScorecardMetricRecord[] = [], results: ScorecardResultRecord[] = []) {
   const ids = meeting.idsIssueIds.map((id) => issues.find((issue) => issue.id === id)).filter((issue): issue is IssueRecord => Boolean(issue));
   const lines = [`${team.name} L10 recap · ${meeting.dateLabel} · week of ${meeting.weekStartDate}`, ''];
   for (const [section, note] of Object.entries(meeting.sectionNotes)) {
@@ -371,7 +379,7 @@ function meetingRecap(team: TeamRecord, meeting: MeetingRecord, rocks: RockRecor
     const missing = weekly.filter(({ result }) => !result).map(({ metric }) => metric.label);
     lines.push(`Scorecard: ${offTrack.length ? `off-track — ${offTrack.join(', ')}` : missing.length ? `not entered — ${missing.join(', ')}` : 'all visible measurables on track.'}`);
   }
-  lines.push(`Rock Review: ${rocks.length ? rocks.map((rock) => `${rock.title} (${rock.progress}% · ${rock.status})`).join('; ') : 'no Rocks recorded.'}`);
+  lines.push(`Rock Review: ${rocks.length ? rocks.map((rock) => { const milestones = milestoneCountsFor(rock.id, tasks); return `${rock.title} (${milestones.completed} completed · ${milestones.remaining} remaining · ${rock.status})`; }).join('; ') : 'no Rocks recorded.'}`);
   lines.push(`To-Do Review: ${todos.length ? todos.map((todo) => `${todo.title} — ${todo.status} · due ${todo.dueDate}`).join('; ') : 'no To-Dos recorded.'}`);
   lines.push(`IDS: ${ids.length ? ids.map((issue) => `${issue.title} — ${issue.status}${issue.idsNote ? ` · ${issue.idsNote.split('\n').at(-1)}` : ''}`).join('; ') : 'no Issues entered into IDS.'}`);
   const actions = meeting.actionSummary ?? meetingActionSummary(meeting, issues);
@@ -382,7 +390,7 @@ function meetingRecap(team: TeamRecord, meeting: MeetingRecord, rocks: RockRecor
   return lines.join('\n');
 }
 
-function meetingSummaryContext(team: TeamRecord, meeting: MeetingRecord, rocks: RockRecord[], todos: TodoRecord[], issues: IssueRecord[], metrics: ScorecardMetricRecord[], results: ScorecardResultRecord[], headlines: Array<{ title: string; type: 'win' | 'concern'; detail: string }> = []): MeetingSummaryContext {
+function meetingSummaryContext(team: TeamRecord, meeting: MeetingRecord, rocks: RockRecord[], tasks: RockTaskRecord[], todos: TodoRecord[], issues: IssueRecord[], metrics: ScorecardMetricRecord[], results: ScorecardResultRecord[], headlines: Array<{ title: string; type: 'win' | 'concern'; detail: string }> = []): MeetingSummaryContext {
   return {
     meetingId: meeting.id,
     teamId: team.teamId,
@@ -396,7 +404,7 @@ function meetingSummaryContext(team: TeamRecord, meeting: MeetingRecord, rocks: 
     sectionNotes: clone(meeting.sectionNotes),
     idsNotes: clone(meeting.idsNotes),
     actionSummary: meeting.actionSummary ? clone(meeting.actionSummary) : undefined,
-    rocks: rocks.map(({ id, title, status, progress, dueDate }) => ({ id, title, status, progress, dueDate })),
+    rocks: rocks.map(({ id, title, status, dueDate }) => { const milestones = milestoneCountsFor(id, tasks); return { id, title, status, completedMilestones: milestones.completed, remainingMilestones: milestones.remaining, dueDate }; }),
     todos: todos.map(({ id, title, status, ownerId, dueDate }) => ({ id, title, status, ownerId, dueDate })),
     issues: issues.map(({ id, title, status, idsNote }) => ({ id, title, status, idsNote })),
     headlines: headlines.map(({ title, type, detail }) => ({ title, type, detail })),
@@ -447,8 +455,8 @@ function makeMembership(id: string, teamId: string, userId: string, role: TeamMe
   return { ...baseRecord(id, 'teamMembership'), kind: 'teamMembership', teamId, userId, role, active: true };
 }
 
-function makeRock(input: { id: string; teamId: string; title: string; ownerId: string; status?: RockRecord['status']; progress?: number; dueDate?: string; priority?: RockRecord['priority'] }): RockRecord {
-  return { ...baseRecord(input.id, 'rock', input.teamId), kind: 'rock', teamId: input.teamId, quarterId: '2026-q3', title: input.title, description: '', notes: '', ownerId: input.ownerId, status: input.status ?? 'on-track', progress: input.progress ?? 0, dueDate: input.dueDate ?? '2026-09-30', priority: input.priority ?? 'medium' };
+function makeRock(input: { id: string; teamId: string; title: string; ownerId: string; status?: RockRecord['status']; dueDate?: string; priority?: RockRecord['priority'] }): RockRecord {
+  return { ...baseRecord(input.id, 'rock', input.teamId), kind: 'rock', teamId: input.teamId, quarterId: '2026-q3', title: input.title, description: '', notes: '', ownerId: input.ownerId, status: input.status ?? 'on-track', dueDate: input.dueDate ?? '2026-09-30', priority: input.priority ?? 'medium' };
 }
 
 function makeTodo(input: { id: string; teamId: string; title: string; ownerId: string; status?: TodoRecord['status']; dueDate?: string; linkedRockTaskId?: string; sourceIssueId?: string }): TodoRecord {
@@ -530,9 +538,9 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       makeMembership('membership-ava-managed-services', 'managed-services', 'ava-khan', 'Viewer'),
     ];
     this.rocks = [
-      makeRock({ id: 'rock-project-kickoff', teamId: 'projects', title: 'Standardise the implementation kickoff', ownerId: 'marcus-lee', progress: 58, priority: 'high' }),
-      makeRock({ id: 'rock-cyber-readiness', teamId: 'cybersecurity', title: 'Close the security evidence gaps', ownerId: 'priya-shah', status: 'off-track', progress: 41, priority: 'high' }),
-      makeRock({ id: 'rock-service-health', teamId: 'service-development', title: 'Release the service health playbook', ownerId: 'maria-ortiz', progress: 54, priority: 'medium' }),
+      makeRock({ id: 'rock-project-kickoff', teamId: 'projects', title: 'Standardise the implementation kickoff', ownerId: 'marcus-lee', priority: 'high' }),
+      makeRock({ id: 'rock-cyber-readiness', teamId: 'cybersecurity', title: 'Close the security evidence gaps', ownerId: 'priya-shah', status: 'off-track', priority: 'high' }),
+      makeRock({ id: 'rock-service-health', teamId: 'service-development', title: 'Release the service health playbook', ownerId: 'maria-ortiz', priority: 'medium' }),
     ];
     this.tasks = [];
     this.todos = [
@@ -974,7 +982,6 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     assertExpectedVersion(rock.version, expectedVersion);
     if (!['on-track', 'off-track', 'complete'].includes(status)) throw new RepositoryError('VALIDATION', 'Invalid Rock status.');
     rock.status = status;
-    if (status === 'complete') rock.progress = 100;
     rock.updatedAt = nowIso();
     rock.updatedBy = actorId;
     rock.version += 1;
@@ -982,16 +989,23 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     return clone(rock);
   }
 
-  async updateRock(rockId: string, input: Partial<Pick<RockRecord, 'title' | 'description' | 'notes' | 'ownerId' | 'progress' | 'dueDate' | 'priority'>>, actorId: string, expectedVersion?: number) {
+  async updateRock(rockId: string, input: Partial<Pick<RockRecord, 'title' | 'description' | 'notes' | 'ownerId' | 'dueDate' | 'priority'>>, actorId: string, expectedVersion?: number) {
     const rock = this.rocks.find((item) => item.id === rockId);
     if (!rock) throw new RepositoryError('NOT_FOUND', 'Rock not found.');
     this.requireWrite(rock.teamId, actorId);
     assertExpectedVersion(rock.version, expectedVersion);
     if (input.title !== undefined) assertText(input.title, 'Rock title');
     if (input.ownerId !== undefined && !this.user(input.ownerId)) throw new RepositoryError('VALIDATION', 'Rock owner not found.');
-    if (input.progress !== undefined && (!Number.isFinite(input.progress) || input.progress < 0 || input.progress > 100)) throw new RepositoryError('VALIDATION', 'Rock progress must be between 0 and 100.');
     if (input.priority !== undefined && !['high', 'medium', 'low'].includes(input.priority)) throw new RepositoryError('VALIDATION', 'Invalid Rock priority.');
-    Object.assign(rock, input, { updatedAt: nowIso(), updatedBy: actorId, version: rock.version + 1 });
+    const allowedInput: Partial<Pick<RockRecord, 'title' | 'description' | 'notes' | 'ownerId' | 'dueDate' | 'priority'>> = {
+      ...(input.title !== undefined ? { title: input.title.trim() } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      ...(input.notes !== undefined ? { notes: input.notes } : {}),
+      ...(input.ownerId !== undefined ? { ownerId: input.ownerId } : {}),
+      ...(input.dueDate !== undefined ? { dueDate: input.dueDate } : {}),
+      ...(input.priority !== undefined ? { priority: input.priority } : {}),
+    };
+    Object.assign(rock, allowedInput, { updatedAt: nowIso(), updatedBy: actorId, version: rock.version + 1 });
     this.recordAudit(actorId, 'Updated Rock', rock.id, `Updated ${rock.title}.`, 'rock');
     return clone(rock);
   }
@@ -1241,7 +1255,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       id: `issue-rock-${rockId}`,
       teamId: rock.teamId,
       title: `Off-track Rock: ${rock.title}`,
-      detail: rock.description || `The Rock is ${rock.progress}% complete and marked off-track.`,
+      detail: rock.description || (() => { const milestones = milestoneCountsFor(rock.id, this.tasks); return `The Rock has ${milestones.remaining} milestone${milestones.remaining === 1 ? '' : 's'} remaining and is marked off-track.`; })(),
       priority,
       horizon: 'short-term',
       raisedById: actorId,
@@ -1502,10 +1516,40 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     if (input.title !== undefined) assertText(input.title, 'Task title');
     if (input.assigneeId !== undefined && !this.user(input.assigneeId)) throw new RepositoryError('VALIDATION', 'Task assignee not found.');
     if (input.status !== undefined && !['open', 'in-progress', 'done'].includes(input.status)) throw new RepositoryError('VALIDATION', 'Invalid Rock Task status.');
-    Object.assign(task, input, { updatedAt: nowIso(), updatedBy: actorId, version: task.version + 1 });
+    const allowedInput: Partial<Pick<RockTaskRecord, 'title' | 'notes' | 'assigneeId' | 'assignedAt' | 'startDate' | 'dueDate' | 'status'>> = {
+      ...(input.title !== undefined ? { title: input.title.trim() } : {}),
+      ...(input.notes !== undefined ? { notes: input.notes } : {}),
+      ...(input.assigneeId !== undefined ? { assigneeId: input.assigneeId } : {}),
+      ...(input.assignedAt !== undefined ? { assignedAt: input.assignedAt } : {}),
+      ...(input.startDate !== undefined ? { startDate: input.startDate } : {}),
+      ...(input.dueDate !== undefined ? { dueDate: input.dueDate } : {}),
+      ...(input.status !== undefined ? { status: input.status } : {}),
+    };
+    Object.assign(task, allowedInput, { updatedAt: nowIso(), updatedBy: actorId, version: task.version + 1 });
     this.syncTaskTodo(task, actorId);
     this.recordAudit(actorId, 'Updated Rock Task', task.id, task.title, 'rock');
     return clone(task);
+  }
+
+  async deleteRockTask(taskId: string, actorId: string, expectedVersion?: number): Promise<DeleteRockTaskResult> {
+    const task = this.taskFor(taskId, actorId);
+    assertExpectedVersion(task.version, expectedVersion);
+    const rock = this.rocks.find((candidate) => candidate.id === task.rockId);
+    if (!rock) throw new RepositoryError('NOT_FOUND', 'Rock not found.');
+    const linkedTodo = task.linkedTodoId ? this.todos.find((todo) => todo.id === task.linkedTodoId) : undefined;
+    if (linkedTodo) {
+      delete linkedTodo.linkedRockTaskId;
+      linkedTodo.origin = 'Team workspace · former Rock Task';
+      linkedTodo.updatedAt = nowIso();
+      linkedTodo.updatedBy = actorId;
+      linkedTodo.version += 1;
+    }
+    this.tasks = this.tasks.filter((candidate) => candidate.id !== taskId);
+    rock.updatedAt = nowIso();
+    rock.updatedBy = actorId;
+    rock.version += 1;
+    this.recordAudit(actorId, 'Deleted Rock Task', task.id, `${task.title} removed from ${rock.title}.`, 'rock');
+    return { deletedTaskId: task.id, rockId: rock.id, rockVersion: rock.version };
   }
 
   async convertRockTaskToTodo(taskId: string, actorId: string) {
@@ -1799,6 +1843,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     const timestamp = nowIso();
     const sections = meetingSectionsFor(team);
     const teamRocks = this.rocks.filter((rock) => rock.teamId === teamId);
+    const teamTasks = this.tasks.filter((task) => task.teamId === teamId);
     const teamTodos = this.todos.filter((todo) => todo.teamId === teamId);
     const teamIssues = this.issues.filter((issue) => issue.teamId === teamId && issue.assignmentState !== 'redirected');
     meeting.status = 'closed';
@@ -1809,7 +1854,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     meeting.idsSolved = meeting.idsIssueIds.filter((issueId) => teamIssues.find((issue) => issue.id === issueId)?.status === 'solved').length;
     meeting.lastRating = Math.min(10, Math.max(0, rating));
     meeting.actionSummary = meetingActionSummary(meeting, teamIssues);
-    meeting.recap = meetingRecap(team, meeting, teamRocks, teamTodos, teamIssues, recap, this.metrics, this.scorecardResults);
+    meeting.recap = meetingRecap(team, meeting, teamRocks, teamTasks, teamTodos, teamIssues, recap, this.metrics, this.scorecardResults);
     meeting.aiSummaryStatus = 'queued';
     meeting.aiSummaryRequestedAt = timestamp;
     meeting.aiSummarySource = 'close';
@@ -1820,7 +1865,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     meeting.version += 1;
     this.advanceIssueEscalations(team, meeting, timestamp);
     const carriedIssueIds = meeting.idsIssueIds.filter((issueId) => this.activeIssue(issueId)?.status !== 'solved');
-    const contextSnapshot = meetingSummaryContext(team, meeting, teamRocks, teamTodos, teamIssues, this.metrics, this.scorecardResults);
+    const contextSnapshot = meetingSummaryContext(team, meeting, teamRocks, teamTasks, teamTodos, teamIssues, this.metrics, this.scorecardResults);
     const existingJob = this.summaryJobs.find((job) => job.id === meeting.aiSummaryJobId);
     if (!existingJob) {
       this.summaryJobs.push({
@@ -1863,9 +1908,10 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     const existingJob = this.summaryJobs.find((job) => job.id === meeting.aiSummaryJobId);
     const source = existingJob?.source ?? meeting.aiSummarySource ?? (meeting.aiSummaryRequestedAt ? 'close' : 'legacy');
     const rocks = this.rocks.filter((rock) => rock.teamId === teamId);
+    const tasks = this.tasks.filter((task) => task.teamId === teamId);
     const todos = this.todos.filter((todo) => todo.teamId === teamId);
     const issues = this.issues.filter((issue) => issue.teamId === teamId && issue.assignmentState !== 'redirected');
-    const contextSnapshot = existingJob?.contextSnapshot ?? meetingSummaryContext(team, meeting, rocks, todos, issues, this.metrics, this.scorecardResults);
+    const contextSnapshot = existingJob?.contextSnapshot ?? meetingSummaryContext(team, meeting, rocks, tasks, todos, issues, this.metrics, this.scorecardResults);
     const jobId = meeting.aiSummaryJobId ?? `summary-${meeting.id}`;
     const currentJob = this.summaryJobs.find((job) => job.id === jobId);
     const attempt = (currentJob?.attempt ?? 0) + 1;
@@ -2141,7 +2187,11 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
       this.teams = ofKind<TeamRecord>('team');
       this.users = ofKind<UserProfile>('user');
       this.memberships = ofKind<TeamMembership>('teamMembership');
-      this.rocks = ofKind<RockRecord>('rock');
+      this.rocks = ofKind<RockRecord>('rock').map((rock) => {
+        const next = { ...rock } as RockRecord & { progress?: unknown };
+        delete next.progress;
+        return next;
+      });
       this.tasks = ofKind<RockTaskRecord>('rockTask');
       this.todos = ofKind<TodoRecord>('todo');
       this.issues = ofKind<IssueRecord>('issue');
@@ -2195,9 +2245,10 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
   }
 
   private payload(record: WorkspaceRecord) {
-    const payload = { ...record, environmentId: this.environmentId } as WorkspaceRecord & { _etag?: string };
+    const payload = { ...record, environmentId: this.environmentId } as WorkspaceRecord & { _etag?: string; progress?: unknown };
     delete payload.cosmosEtag;
     delete payload._etag;
+    if (record.kind === 'rock') delete payload.progress;
     return payload;
   }
 
@@ -2207,7 +2258,7 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
     if (value && typeof value === 'object') {
       const output: Record<string, unknown> = {};
       for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-        if (key !== 'cosmosEtag' && key !== 'category') output[key] = this.publicValue(item);
+        if (key !== 'cosmosEtag' && key !== 'category' && key !== 'progress') output[key] = this.publicValue(item);
       }
       return output as T;
     }
@@ -2227,6 +2278,16 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
       }
     } catch (error) {
       if ((error as { code?: number }).code === 412) throw new RepositoryError('CONFLICT', 'The record changed elsewhere. Refresh and try again.');
+      throw error;
+    }
+  }
+
+  private async deleteSingle(record: WorkspaceRecord) {
+    try {
+      await this.container.item(record.id, record.pk).delete(record.cosmosEtag ? { accessCondition: { type: 'IfMatch', condition: record.cosmosEtag } } : undefined);
+    } catch (error) {
+      const statusCode = (error as { statusCode?: number; code?: number }).statusCode ?? (error as { code?: number }).code;
+      if (statusCode === 404 || statusCode === 412) throw new RepositoryError('CONFLICT', 'The record changed or was deleted elsewhere. Refresh and try again.');
       throw error;
     }
   }
@@ -2284,13 +2345,18 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
 
   private async withMutation<T>(actorId: string, mutation: () => Promise<T>): Promise<T> {
     await this.maintainMeetingWindowsAndPersist();
-    const before = new Map(this.allRecords().map((record) => [this.recordKey(record), JSON.stringify(this.payload(record))]));
+    const beforeRecords = new Map(this.allRecords().map((record) => [this.recordKey(record), record]));
+    const before = new Map([...beforeRecords].map(([key, record]) => [key, JSON.stringify(this.payload(record))]));
     const settingsBefore = JSON.stringify(this.settings);
     try {
       const result = await mutation();
       if (settingsBefore !== JSON.stringify(this.settings)) this.syncSettingsRecord(actorId);
-      const changed = this.allRecords().filter((record) => before.get(this.recordKey(record)) !== JSON.stringify(this.payload(record)));
+      const afterRecords = this.allRecords();
+      const changed = afterRecords.filter((record) => before.get(this.recordKey(record)) !== JSON.stringify(this.payload(record)));
+      const afterKeys = new Set(afterRecords.map((record) => this.recordKey(record)));
+      const deleted = [...beforeRecords.values()].filter((record) => !afterKeys.has(this.recordKey(record)));
       await this.persistRecords(changed);
+      for (const record of deleted) await this.deleteSingle(record);
       return this.publicValue(result);
     } catch (error) {
       // Mutations run through the in-memory domain implementation first. If a
@@ -2459,7 +2525,7 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
 
   async markNotificationRead(notificationId: string, userId: string, expectedVersion?: number) { return this.withMutation(userId, () => super.markNotificationRead(notificationId, userId, expectedVersion)); }
   async updateRockStatus(rockId: string, status: RockRecord['status'], actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateRockStatus(rockId, status, actorId, expectedVersion)); }
-  async updateRock(rockId: string, input: Partial<Pick<RockRecord, 'title' | 'description' | 'notes' | 'ownerId' | 'progress' | 'dueDate' | 'priority'>>, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateRock(rockId, input, actorId, expectedVersion)); }
+  async updateRock(rockId: string, input: Partial<Pick<RockRecord, 'title' | 'description' | 'notes' | 'ownerId' | 'dueDate' | 'priority'>>, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateRock(rockId, input, actorId, expectedVersion)); }
   async updateTodoStatus(todoId: string, status: TodoRecord['status'], actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateTodoStatus(todoId, status, actorId, expectedVersion)); }
   async updateTodo(todoId: string, input: Partial<Pick<TodoRecord, 'title' | 'notes' | 'ownerId' | 'dueDate' | 'status'>>, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateTodo(todoId, input, actorId, expectedVersion)); }
   async addTodoChecklistItem(todoId: string, text: string, supporterId: string | undefined, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.addTodoChecklistItem(todoId, text, supporterId, actorId, expectedVersion)); }
@@ -2515,6 +2581,7 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
   async createTodo(input: CreateTodoInput, actorId: string) { return this.withMutation(actorId, () => super.createTodo(input, actorId)); }
   async createRockTask(input: { rockId: string; title: string; notes?: string; assigneeId: string; assignedAt: string; startDate: string; dueDate: string }, actorId: string) { return this.withMutation(actorId, () => super.createRockTask(input, actorId)); }
   async updateRockTask(taskId: string, input: Partial<Pick<RockTaskRecord, 'title' | 'notes' | 'assigneeId' | 'assignedAt' | 'startDate' | 'dueDate' | 'status'>>, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateRockTask(taskId, input, actorId, expectedVersion)); }
+  async deleteRockTask(taskId: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.deleteRockTask(taskId, actorId, expectedVersion)); }
   async convertRockTaskToTodo(taskId: string, actorId: string) { return this.withMutation(actorId, () => super.convertRockTaskToTodo(taskId, actorId)); }
   async getIssue(issueId: string, userId: string) {
     const context = await this.getSessionContext(userId);

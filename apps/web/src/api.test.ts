@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ageBandFor, HttpWorkspaceApi, LocalWorkspaceApi } from './api';
 import { initialWorkspace } from './data';
 import { defaultMeetingSections } from './types';
-import type { TeamMembership, Workspace } from './types';
+import type { TeamMessage, TeamMembership, Workspace } from './types';
 import { sanitizeTodoNotes } from './richText';
 import { pendingTeamMessagesFor } from './App';
 
@@ -161,6 +161,21 @@ describe('LocalWorkspaceApi', () => {
     expect(linked.dueDate).toBe('2026-09-20');
   });
 
+  it('edits Rock Tasks and deletes them without deleting their linked To-Do', async () => {
+    const api = new LocalWorkspaceApi();
+    let workspace = await api.getWorkspace();
+    const before = workspace.rocks.flatMap((rock) => rock.tasks).find((task) => task.id === 'task-playbook-outline')!;
+    workspace = await api.updateRockTask(before.id, { title: 'Approve the revised first-week checklist', notes: 'Keep the handoff owners visible.', dueDate: '2026-09-15', status: 'in-progress' }, before.version);
+    const updated = workspace.rocks.flatMap((rock) => rock.tasks).find((task) => task.id === before.id)!;
+    expect(updated).toMatchObject({ title: 'Approve the revised first-week checklist', notes: 'Keep the handoff owners visible.', dueDate: '2026-09-15', status: 'in-progress', version: before.version + 1 });
+
+    workspace = await api.deleteRockTask(updated.id, updated.version);
+    expect(workspace.rocks.flatMap((rock) => rock.tasks).some((task) => task.id === updated.id)).toBe(false);
+    const keptTodo = workspace.todos.find((todo) => todo.id === 'todo-brief');
+    expect(keptTodo?.linkedRockTaskId).toBeUndefined();
+    expect(keptTodo?.origin).toBe('Team workspace · former Rock Task');
+  });
+
   it('rejects invalid avatars at the profile boundary', async () => {
     const api = new LocalWorkspaceApi();
     await expect(api.updateProfile({ avatarDataUrl: 'not-an-image' })).rejects.toMatchObject({ code: 'VALIDATION' });
@@ -288,6 +303,15 @@ describe('LocalWorkspaceApi', () => {
     const created = workspace.issues.find((issue) => issue.id === convertedMessage.convertedIssueId);
     expect(created).toMatchObject({ title: 'Security review before kickoff', detail: 'Leadership will confirm the receiving team before Friday.', teamId: 'leadership' });
     expect(workspace.messages.find((item) => item.id === message.id)?.status).toBe('converted');
+  });
+
+  it('only includes unread incoming messages in the L10 starting context', () => {
+    const messages: TeamMessage[] = [
+      { ...initialWorkspace.messages[0], id: 'message-unread', status: 'unread' },
+      { ...initialWorkspace.messages[0], id: 'message-read', status: 'read' },
+      { ...initialWorkspace.messages[0], id: 'message-converted', status: 'converted' },
+    ];
+    expect(pendingTeamMessagesFor(messages, 'leadership').map((message) => message.id)).toEqual(['message-unread']);
   });
 
   it('adds meeting-specific IDS notes to the Issue and includes the full meeting recap', async () => {
@@ -507,13 +531,13 @@ describe('LocalWorkspaceApi', () => {
     expect(followUp).toMatchObject({ ownerId: 'priya-shah', sourceIssueId: source.id });
   });
 
-  it('shows read and unread incoming messages at Segue while excluding converted and outgoing messages', async () => {
+  it('shows unread incoming messages at Segue while excluding read, converted, and outgoing messages', async () => {
     const workspace = structuredClone(initialWorkspace);
     const incomingRead = { ...workspace.messages[0], id: 'message-read', status: 'read' as const };
     const converted = { ...workspace.messages[0], id: 'message-converted', status: 'converted' as const, convertedIssueId: 'issue-handoffs' };
     const outgoing = { ...workspace.messages[0], id: 'message-outgoing', fromTeamId: 'leadership', toTeamId: 'projects' };
     const pending = pendingTeamMessagesFor([...workspace.messages, incomingRead, converted, outgoing], 'leadership');
-    expect(pending.map((message) => message.id)).toEqual(['message-projects-kickoff', 'message-read']);
+    expect(pending.map((message) => message.id)).toEqual(['message-projects-kickoff']);
   });
 
   it('refreshes the HTTP workspace after a due-date change so linked side effects are visible', async () => {
