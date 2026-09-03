@@ -19,7 +19,10 @@ template is an alternative for environments that need a dedicated host; it
 uses connection-string access to Cosmos DB. If it is used, set the Static Web
 Apps workflow's `api_location` to an empty value and link the existing
 Function App to `/api`. Do not run both modes for the same environment. The
-existing AI Function App is intentionally not provisioned or connected here.
+existing AI Function App is intentionally not provisioned here. The core
+Function App accepts optional `aiWorkerUrl`, secure `aiWorkerSharedSecret`, and
+`aiCallbackUrl` parameters to connect to that separately managed worker for
+meeting-summary jobs.
 
 ## Parameters
 
@@ -32,6 +35,12 @@ defaults to `EnvironmentAccess`. The Bicep template creates the table and
 populates the storage connection string for the dedicated Function App. It
 also populates `COSMOS_CONNECTION_STRING` from the Cosmos account connection
 string; neither secret is emitted as an output.
+
+AI enrichment is disabled until `AI_WORKER_URL` and
+`AI_WORKER_SHARED_SECRET` are configured. `AI_CALLBACK_URL` should point to the
+core API's `/api/internal/meeting-summary-callback` route. Requests and results
+are signed with the shared HMAC secret; do not place the secret in frontend
+configuration or source control.
 
 Static Web Apps exposes an app-specific `x-ms-client-principal.userId`, not the
 Entra directory object ID. The API resolves the principal's signed-in

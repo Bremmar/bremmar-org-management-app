@@ -110,9 +110,29 @@ operational work has been resolved or moved.
   result matching that week key. Teams also store a `meetingCadence` of
   `weekly` or `monthly`; monthly recurrence preserves the configured day of
   month and clamps to the last valid day when needed. Each occurrence stores
-  `scheduledDate` and `scheduledTime`. The current open occurrence can be
-  rescheduled as a versioned, audited mutation without changing the team’s
-  recurring cadence; closed occurrences cannot be rescheduled.
+  `scheduledDate`, `scheduledTime`, and its nominal `recurrenceDate`. Four
+  upcoming occurrences are maintained per operational team. Start records an
+  immutable server UTC `startedAt`; skip persists a required category, optional
+  note, actor/time, and audit event without triggering AI. A one-off schedule
+  change is versioned, audited, future-dated, conflict-checked, and leaves the
+  recurring cadence unchanged; closed and skipped occurrences cannot be moved.
+  At read time, an unstarted occurrence whose slot has passed is `missed`, and
+  an open started occurrence beyond the configured agenda duration is
+  `overdue`.
+- Past meeting review uses bounded, hierarchy-authorized reads. Leadership can
+  review all teams, and a TeamLead or OrgAdmin can review descendants of their
+  team. Parent reviewers and Viewers have no schedule or summary mutation
+  rights on descendant records. Completed records retain attendance, notes,
+  IDS decisions, created To-Dos, manual recap, timestamps, and skip details.
+- Closing stores a manual/action recap plus an immutable close-time
+  `MeetingSummaryContext` in the meeting's `team:{teamId}` partition and queues
+  a `meetingSummaryJob`. The existing AI Function receives the snapshot over
+  signed HTTP and returns a signed, timestamped result. Jobs move through
+  `queued`, `generating`, `ready`, or `failed`; attempt matching and terminal
+  state checks reject replayed callbacks. Structured summaries store an
+  executive summary, decisions, commitments, risks, and next focus. Retrying
+  is limited to direct team editors after failure, while legacy closed meetings
+  can be generated on demand without mutating EOS records.
 - Issue health is meeting-based: an unresolved Issue is neutral at 0 meetings,
   green at 1, yellow at 2, orange at 3, and red at 4 or more. When a meeting
   closes, every unresolved active Issue in that team that existed before the
@@ -158,8 +178,15 @@ The Functions API exposes typed server contracts for:
 - Rock, Rock Task, To-Do, Issue, IDS, and Task-to-To-Do routes.
 - Team message send/read/convert-to-Issue routes and meeting IDS-note/close
   routes.
+- `GET /api/meetings/review` — hierarchy-authorized history with team, status,
+  date, and cursor filters plus attention counts.
+- `GET /api/teams/{teamId}/meetings/{meetingId}` — full read-only meeting detail.
+- `POST /api/teams/{teamId}/meetings/{meetingId}/start` — starts the selected
+  occurrence once and returns its server-generated timestamp.
 - `PATCH /api/teams/{teamId}/meetings/{meetingId}` — reschedule the current
   open meeting occurrence with `If-Match` concurrency protection.
+- `POST /api/teams/{teamId}/meetings/{meetingId}/skip` — persist a categorized
+  skipped occurrence and refill the rolling cadence window.
 - `PATCH /api/teams/{teamId}/meetings/{meetingId}/notes` — save a section note
   for the open meeting with `If-Match`; closed meetings are read-only.
 - `PATCH /api/teams/{teamId}/meetings/{meetingId}/ids/order` — persist the
@@ -184,9 +211,13 @@ The Functions API exposes typed server contracts for:
 - `POST /api/issues/{issueId}/solve` records the follow-up choice and optional
   resolution note when solving an Issue; Issue-created To-Dos expose their
   linked Issue context as read-only in the web dialog.
-- `POST /api/teams/{teamId}/meetings/{meetingId}/start` records the meeting
-  boundary used by meeting-health accounting. The close route then counts all
-  eligible unresolved Issues that predate that boundary.
+- `POST /api/teams/{teamId}/meetings/{meetingId}/ai-summary/retry` queues a
+  failed or legacy AI summary for an authorized direct team editor.
+- `POST /api/internal/meeting-summary-callback` accepts ready/failed results
+  only with a valid HMAC signature, current attempt, and non-terminal job.
+- The start route records the meeting boundary used by meeting-health
+  accounting. The close route then counts all eligible unresolved Issues that
+  predate that boundary and queues the close-time summary snapshot.
 - Issue transfer request, accept, reject, and cancel routes.
 - Platform administration routes for teams, users, memberships, aging settings,
   L10 section configuration, and escalation hierarchies.

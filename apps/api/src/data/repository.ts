@@ -8,6 +8,8 @@ import {
   DEFAULT_MEETING_SECTIONS,
   issueAgeBand,
   issueMeetingBand,
+  meetingScheduledAt,
+  meetingReviewStatus,
   meetingSectionsFor,
   nextConfiguredMeetingDateAfter,
   partitionFor,
@@ -22,6 +24,12 @@ import {
   type IssueRecord,
   type IssueTransferRecord,
   type MeetingActionSummary,
+  type MeetingAiSummary,
+  type MeetingReviewPage,
+  type MeetingReviewQuery,
+  type MeetingSkipReason,
+  type MeetingSummaryContext,
+  type MeetingSummaryJobRecord,
   type MeetingCadence,
   type MeetingIssueNoteRecord,
   type MeetingRecord,
@@ -138,6 +146,8 @@ export interface WorkspaceRepository {
   getTeamDashboard(teamId: string, userId?: string): Promise<DashboardSummary>;
   getTeamWorkspace(teamId: string, userId: string): Promise<TeamWorkspace>;
   getWorkspaceSnapshot(userId: string): Promise<WorkspaceSnapshot>;
+  getMeetingReview(userId: string, query?: MeetingReviewQuery): Promise<MeetingReviewPage>;
+  getMeeting(teamId: string, meetingId: string, userId: string): Promise<MeetingRecord>;
   getCompanyOverview(userId: string): Promise<CompanyOverview>;
   getNotifications(userId: string): Promise<NotificationRecord[]>;
   markNotificationRead(notificationId: string, userId: string, expectedVersion?: number): Promise<NotificationRecord>;
@@ -176,7 +186,12 @@ export interface WorkspaceRepository {
   markMessageRead(messageId: string, userId: string, expectedVersion?: number): Promise<TeamMessageRecord>;
   createIssueFromMessage(input: { messageId: string; title: string; detail: string; priority?: number; horizon?: IssueRecord['horizon']; ownerId?: string }, actorId: string): Promise<IssueRecord>;
   updateMeetingSchedule(teamId: string, meetingId: string, input: { scheduledDate: string; scheduledTime: string }, actorId: string, expectedVersion?: number): Promise<MeetingRecord>;
+  skipMeeting(teamId: string, meetingId: string, reason: MeetingSkipReason, note: string, actorId: string, expectedVersion?: number): Promise<MeetingRecord>;
   closeMeeting(teamId: string, meetingId: string, recap: string, rating: number, actorId: string, expectedVersion?: number): Promise<MeetingRecord>;
+  getMeetingSummaryJob(teamId: string, meetingId: string, userId: string): Promise<MeetingSummaryJobRecord | null>;
+  requestMeetingSummary(teamId: string, meetingId: string, actorId: string, expectedVersion?: number): Promise<MeetingRecord>;
+  updateMeetingSummaryDispatch(jobId: string, status: 'generating' | 'failed', error: string | undefined, actorId: string): Promise<MeetingSummaryJobRecord>;
+  completeMeetingSummary(jobId: string, status: 'ready' | 'failed', summary: MeetingAiSummary | undefined, error: string | undefined, attempt?: number): Promise<MeetingRecord>;
   getAdminSnapshot(actorId: string): Promise<AdminSnapshot>;
   createTeam(input: CreateTeamInput, actorId: string): Promise<TeamRecord>;
   updateTeam(teamId: string, input: Partial<Pick<TeamRecord, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds' | 'active'>>, actorId: string, expectedVersion?: number): Promise<TeamRecord>;
@@ -282,6 +297,11 @@ function assertMeetingConfiguration(cadence: MeetingCadence, meetingDay: string,
   if (cadence === 'weekly' && weekdayOffsets[normalizedDay] === undefined) throw new RepositoryError('VALIDATION', 'Weekly meeting day must be Sunday through Saturday.');
 }
 
+function assertFutureMeetingSchedule(scheduledDate: string, scheduledTime: string) {
+  const timestamp = meetingScheduledAt({ scheduledDate, scheduledTime });
+  if (!Number.isFinite(timestamp) || timestamp <= Date.now()) throw new RepositoryError('VALIDATION', 'A rescheduled meeting must be in the future with a valid time.');
+}
+
 function meetingDateFor(team: Pick<TeamRecord, 'meetingCadence' | 'meetingDay'>, value: string | Date = new Date()) {
   const current = new Date(typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T12:00:00Z` : value);
   if (Number.isNaN(current.getTime())) return new Date().toISOString().slice(0, 10);
@@ -317,6 +337,7 @@ function normalizedMeeting(team: TeamRecord | undefined, meeting: MeetingRecord)
     ...meeting,
     scheduledDate,
     scheduledTime,
+    recurrenceDate: meeting.recurrenceDate ?? scheduledDate,
     dateLabel: meetingDateLabel(scheduledDate),
     weekStartDate: weekStartDateFor(scheduledDate),
     sectionNotes: meeting.sectionNotes ?? {},
@@ -359,6 +380,31 @@ function meetingRecap(team: TeamRecord, meeting: MeetingRecord, rocks: RockRecor
   if (meeting.idsNotes.length) lines.push(`Meeting IDS notes: ${meeting.idsNotes.map((note) => note.note).join(' | ')}`);
   if (manualNotes.trim()) lines.push(`Facilitator notes: ${manualNotes.trim()}`);
   return lines.join('\n');
+}
+
+function meetingSummaryContext(team: TeamRecord, meeting: MeetingRecord, rocks: RockRecord[], todos: TodoRecord[], issues: IssueRecord[], metrics: ScorecardMetricRecord[], results: ScorecardResultRecord[], headlines: Array<{ title: string; type: 'win' | 'concern'; detail: string }> = []): MeetingSummaryContext {
+  return {
+    meetingId: meeting.id,
+    teamId: team.teamId,
+    label: meeting.label,
+    scheduledDate: meeting.scheduledDate,
+    scheduledTime: meeting.scheduledTime,
+    startedAt: meeting.startedAt,
+    closedAt: meeting.closedAt ?? meeting.updatedAt,
+    attendeeIds: [...meeting.attendeeIds],
+    recap: meeting.recap,
+    sectionNotes: clone(meeting.sectionNotes),
+    idsNotes: clone(meeting.idsNotes),
+    actionSummary: meeting.actionSummary ? clone(meeting.actionSummary) : undefined,
+    rocks: rocks.map(({ id, title, status, progress, dueDate }) => ({ id, title, status, progress, dueDate })),
+    todos: todos.map(({ id, title, status, ownerId, dueDate }) => ({ id, title, status, ownerId, dueDate })),
+    issues: issues.map(({ id, title, status, idsNote }) => ({ id, title, status, idsNote })),
+    headlines: headlines.map(({ title, type, detail }) => ({ title, type, detail })),
+    scorecard: metrics.map((metric) => {
+      const result = results.find((candidate) => candidate.metricId === metric.id && candidate.weekStartDate === meeting.weekStartDate);
+      return { label: metric.label, target: metric.target, actual: result?.actual, status: result?.status };
+    }),
+  };
 }
 
 function makeTeam(input: Partial<TeamRecord> & { teamId: string; name: string; shortName: string; parentTeamId: string | null; nodeType: TeamRecord['nodeType'] }): TeamRecord {
@@ -446,6 +492,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
   protected notifications: NotificationRecord[];
   protected messages: TeamMessageRecord[];
   protected meetings: MeetingRecord[];
+  protected summaryJobs: MeetingSummaryJobRecord[];
   protected metrics: ScorecardMetricRecord[];
   protected scorecardResults: ScorecardResultRecord[];
   protected audit: AuditEventRecord[];
@@ -513,6 +560,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       const scheduledDate = meetingDateFor(team);
       return { ...baseRecord(`meeting-${team.teamId}-current`, 'meeting', team.teamId), kind: 'meeting', teamId: team.teamId, label: `${team.shortName} L10`, dateLabel: meetingDateLabel(scheduledDate), scheduledDate, scheduledTime: team.meetingTime, weekStartDate: weekStartDateFor(scheduledDate), status: 'upcoming', facilitatorId: team.escalationUserIds[0] ?? 'ava-khan', attendeeIds: this.memberships.filter((membership) => membership.teamId === team.teamId && membership.active).map((membership) => membership.userId), lastRating: 8, agendaProgress: 0, agendaTotal: sections.length, idsSolved: 0, idsTotal: issueIds.length, recap: '', sectionNotes: {}, idsIssueIds: [], idsAddedIssueIds: [], createdTodoIds: [], idsNotes: [] } satisfies MeetingRecord;
     });
+    this.summaryJobs = [];
     const currentWeekStartDate = weekStartDateFor(new Date());
     const previousWeekStartDate = weekStartDateFor(new Date(new Date(currentWeekStartDate).getTime() - 7 * DAY));
     this.metrics = [
@@ -537,6 +585,8 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     this.audit = [{
       ...baseRecord('audit-seed', 'auditEvent'), kind: 'auditEvent', actorId: 'ava-khan', action: 'Created workspace hierarchy', target: ORG_ID, detail: 'Seeded the Leadership, Professional Services, and Managed Services structure.', eventType: 'team',
     }];
+    this.refreshDerivedState();
+    this.maintainMeetingWindows();
     this.refreshDerivedState();
   }
 
@@ -598,7 +648,12 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
   }
 
   protected canReadTeam(teamId: string, userId: string) {
-    return Boolean(this.membership(teamId, userId) || this.leadershipMember(userId));
+    return this.visibleTeamIds(userId).has(teamId);
+  }
+
+  protected canManageMeetingSummary(teamId: string, userId: string) {
+    const membership = this.membership(teamId, userId);
+    return Boolean(membership && canWriteTeam(membership.role));
   }
 
   protected requireRead(teamId: string, userId: string) {
@@ -630,6 +685,69 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     return children.flatMap((child) => [child, ...this.getDescendantIds(child)]);
   }
 
+  protected visibleTeamIds(userId: string) {
+    const memberships = this.memberships.filter((membership) => membership.userId === userId && membership.active);
+    const teamIds = new Set(memberships.flatMap((membership) => [membership.teamId, ...(membership.role === 'TeamLead' || membership.role === 'OrgAdmin' ? this.getDescendantIds(membership.teamId) : [])]));
+    if (memberships.some((membership) => membership.teamId === 'leadership')) this.teams.filter((team) => team.active).forEach((team) => teamIds.add(team.teamId));
+    return teamIds;
+  }
+
+  protected createUpcomingMeeting(team: TeamRecord, scheduledDate: string, template?: MeetingRecord, idsIssueIds: string[] = []): MeetingRecord {
+    const sections = meetingSectionsFor(team);
+    return {
+      ...baseRecord(generatedId('meeting'), 'meeting', team.teamId),
+      kind: 'meeting',
+      teamId: team.teamId,
+      label: `${team.shortName} L10`,
+      dateLabel: meetingDateLabel(scheduledDate),
+      scheduledDate,
+      scheduledTime: team.meetingTime,
+      recurrenceDate: scheduledDate,
+      weekStartDate: weekStartDateFor(scheduledDate),
+      status: 'upcoming',
+      facilitatorId: team.escalationUserIds[0] ?? template?.facilitatorId ?? 'ava-khan',
+      attendeeIds: [...(template?.attendeeIds ?? this.memberships.filter((membership) => membership.teamId === team.teamId && membership.active).map((membership) => membership.userId))],
+      lastRating: template?.lastRating ?? 0,
+      agendaProgress: 0,
+      agendaTotal: sections.length,
+      idsSolved: 0,
+      idsTotal: idsIssueIds.length,
+      recap: '',
+      sectionNotes: {},
+      idsIssueIds: [...idsIssueIds],
+      idsAddedIssueIds: [],
+      createdTodoIds: [],
+      idsNotes: [],
+    };
+  }
+
+  protected ensureUpcomingMeetingWindow(team: TeamRecord, carriedIssueIds: string[] = [], template?: MeetingRecord) {
+    const now = Date.now();
+    const upcoming = () => this.meetings.filter((meeting) => meeting.teamId === team.teamId && meeting.status === 'upcoming' && (!Number.isFinite(meetingScheduledAt(meeting)) || meetingScheduledAt(meeting) >= now)).sort((left, right) => `${left.scheduledDate}T${left.scheduledTime}`.localeCompare(`${right.scheduledDate}T${right.scheduledTime}`));
+    let openMeetings = upcoming();
+    const first = openMeetings[0];
+    if (first && carriedIssueIds.length) {
+      first.idsIssueIds = [...carriedIssueIds];
+      first.idsTotal = carriedIssueIds.length;
+    }
+    const cadenceDates = this.meetings.filter((meeting) => meeting.teamId === team.teamId).map((meeting) => meeting.recurrenceDate ?? meeting.scheduledDate).filter((date): date is string => Boolean(date)).sort();
+    let cursor = cadenceDates.at(-1) ?? template?.recurrenceDate ?? template?.scheduledDate ?? meetingDateFor(team);
+    while (openMeetings.length < 4) {
+      const nextDate = nextConfiguredMeetingDateAfter(team, cursor, cursor);
+      cursor = nextDate;
+      if (this.meetings.some((meeting) => meeting.teamId === team.teamId && (meeting.recurrenceDate ?? meeting.scheduledDate) === nextDate)) {
+        openMeetings = upcoming();
+        continue;
+      }
+      this.meetings.push(this.createUpcomingMeeting(team, nextDate, template ?? openMeetings.at(-1), carriedIssueIds));
+      openMeetings = upcoming();
+    }
+  }
+
+  protected maintainMeetingWindows() {
+    this.teams.filter((team) => team.active && team.nodeType === 'operational').forEach((team) => this.ensureUpcomingMeetingWindow(team));
+  }
+
   /** Export a sanitized fixture for the one-way Test bootstrap operation. */
   exportWorkspaceRecords(): WorkspaceRecord[] {
     const settings: IssueAgeSettingsRecord = {
@@ -640,7 +758,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       criticalDays: this.settings.criticalDays,
       version: this.settings.version ?? this.settingsVersion,
     };
-    return clone([...this.teams, ...this.users, ...this.memberships, ...this.rocks, ...this.tasks, ...this.todos, ...this.issues, ...this.transfers, ...this.notifications, ...this.messages, ...this.meetings, ...this.metrics, ...this.scorecardResults, ...this.audit, settings].map((record) => ({ ...record, environmentId: this.environmentId })));
+    return clone([...this.teams, ...this.users, ...this.memberships, ...this.rocks, ...this.tasks, ...this.todos, ...this.issues, ...this.transfers, ...this.notifications, ...this.messages, ...this.meetings, ...this.summaryJobs, ...this.metrics, ...this.scorecardResults, ...this.audit, settings].map((record) => ({ ...record, environmentId: this.environmentId })));
   }
 
   async getTeamMembership(teamId: string, userId: string) {
@@ -664,13 +782,13 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     if (!user) return null;
     const memberships = this.memberships.filter((membership) => membership.userId === userId && membership.active);
     const leadershipVisible = memberships.some((membership) => membership.teamId === 'leadership');
-    const teamIds = leadershipVisible ? this.teams.filter((team) => team.active).map((team) => team.teamId) : memberships.map((membership) => membership.teamId);
+    const teamIds = this.visibleTeamIds(userId);
     return {
       user: clone(user),
       memberships: clone(memberships.map(({ teamId, role, active }) => ({ teamId, role, active }))),
       leadershipVisible,
       platformAdmin: canAdministerPlatform(user.platformCapabilities) || memberships.some((membership) => membership.teamId === 'leadership' && membership.role === 'OrgAdmin'),
-      teams: clone(this.teams.filter((team) => teamIds.includes(team.teamId) && team.active).map(({ teamId, name, shortName, parentTeamId, nodeType, active }) => ({ teamId, name, shortName, parentTeamId, nodeType, active }))),
+      teams: clone(this.teams.filter((team) => teamIds.has(team.teamId) && team.active).map(({ teamId, name, shortName, parentTeamId, nodeType, active }) => ({ teamId, name, shortName, parentTeamId, nodeType, active }))),
       currentEnvironment: this.environmentId,
     };
   }
@@ -679,6 +797,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     if (!this.team(teamId)) throw new RepositoryError('NOT_FOUND', 'Team not found.');
     if (userId) this.requireRead(teamId, userId);
     this.refreshDerivedState();
+    this.maintainMeetingWindows();
     return dashboardFor(teamId, this.rocks.filter((rock) => rock.teamId === teamId), this.todos.filter((todo) => todo.teamId === teamId), this.issues.filter((issue) => issue.teamId === teamId));
   }
 
@@ -688,6 +807,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     const team = this.team(teamId);
     if (!team) throw new RepositoryError('NOT_FOUND', 'Team not found.');
     this.refreshDerivedState();
+    this.maintainMeetingWindows();
     const rocks = this.rocks.filter((rock) => rock.teamId === teamId);
     const tasks = this.tasks.filter((task) => task.teamId === teamId);
     const todos = this.todos.filter((todo) => todo.teamId === teamId);
@@ -705,6 +825,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     const session = await this.getSessionContext(userId);
     if (!session) throw new RepositoryError('FORBIDDEN', 'The user is not active in this organization.');
     this.refreshDerivedState();
+    this.maintainMeetingWindows();
     const teamIds = new Set(session.teams.map((team) => team.teamId));
     const teams = this.teams.filter((team) => team.active && teamIds.has(team.teamId));
     const memberships = this.memberships.filter((membership) => membership.active && teamIds.has(membership.teamId));
@@ -742,6 +863,61 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       quarter: { id: '2026-q3', label: 'Q3 2026', theme: 'Make Q3 feel lighter.', startDate: '2026-07-01', endDate: '2026-09-30', daysRemaining },
       etag: etagFor([...teams, ...memberships, ...rocks, ...tasks, ...todos, ...issues, ...transfers, ...messages, ...meetings, ...notifications, ...metrics, ...scorecardResults, ...this.audit]),
     };
+  }
+
+  async getMeetingReview(userId: string, query: MeetingReviewQuery = {}): Promise<MeetingReviewPage> {
+    this.requireUser(userId);
+    this.refreshDerivedState();
+    this.maintainMeetingWindows();
+    const visibleTeamIds = this.visibleTeamIds(userId);
+    if (query.teamId && !visibleTeamIds.has(query.teamId)) throw new RepositoryError('FORBIDDEN', 'You do not have access to this team’s meeting history.');
+    const from = query.from ? normalizeDate(query.from, 'From date') : undefined;
+    const to = query.to ? normalizeDate(query.to, 'To date') : undefined;
+    if (from && to && from > to) throw new RepositoryError('VALIDATION', 'From date must be on or before the To date.');
+    const requestedFilter = query.filter ?? query.status;
+    const allItems = this.meetings
+      .filter((meeting) => visibleTeamIds.has(meeting.teamId) && (!query.teamId || meeting.teamId === query.teamId))
+      .map((meeting) => {
+        const team = this.team(meeting.teamId);
+        if (!team) return null;
+        return { meeting: clone(meeting), team: { teamId: team.teamId, name: team.name, shortName: team.shortName, parentTeamId: team.parentTeamId }, reviewStatus: meetingReviewStatus(meeting, team) };
+      })
+      .filter((item): item is NonNullable<typeof item> => Boolean(item))
+      .filter(({ meeting, reviewStatus }) => (!from || meeting.scheduledDate >= from) && (!to || meeting.scheduledDate <= to) && (
+          requestedFilter === 'attention' ? reviewStatus === 'missed' || reviewStatus === 'overdue'
+          : requestedFilter === 'completed' ? reviewStatus === 'closed'
+            : requestedFilter === 'skipped' ? reviewStatus === 'skipped'
+              : requestedFilter === 'all' || !requestedFilter ? true
+                : reviewStatus === requestedFilter
+      ))
+      .sort((left, right) => meetingScheduledAt(right.meeting) - meetingScheduledAt(left.meeting));
+    const attentionCount = this.meetings
+      .filter((meeting) => visibleTeamIds.has(meeting.teamId))
+      .filter((meeting) => {
+        const team = this.team(meeting.teamId);
+        const status = team ? meetingReviewStatus(meeting, team) : meeting.status;
+        return status === 'missed' || status === 'overdue';
+      }).length;
+    const rawOffset = query.cursor ? Number.parseInt(query.cursor, 10) : 0;
+    if (!Number.isInteger(rawOffset) || rawOffset < 0) throw new RepositoryError('VALIDATION', 'Meeting history cursor is invalid.');
+    const pageSize = 50;
+    const items = allItems.slice(rawOffset, rawOffset + pageSize);
+    return clone({ items, attentionCount, nextCursor: rawOffset + pageSize < allItems.length ? String(rawOffset + pageSize) : undefined });
+  }
+
+  async getMeeting(teamId: string, meetingId: string, userId: string): Promise<MeetingRecord> {
+    this.requireRead(teamId, userId);
+    this.refreshDerivedState();
+    this.maintainMeetingWindows();
+    const meeting = this.meetings.find((candidate) => candidate.teamId === teamId && candidate.id === meetingId);
+    if (!meeting) throw new RepositoryError('NOT_FOUND', 'Meeting not found.');
+    return clone(meeting);
+  }
+
+  async getMeetingSummaryJob(teamId: string, meetingId: string, userId: string): Promise<MeetingSummaryJobRecord | null> {
+    this.requireRead(teamId, userId);
+    const job = this.summaryJobs.find((candidate) => candidate.teamId === teamId && candidate.meetingId === meetingId);
+    return clone(job ?? null);
   }
 
   async getCompanyOverview(userId: string): Promise<CompanyOverview> {
@@ -1572,7 +1748,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     const meeting = this.meetings.find((item) => item.id === meetingId && item.teamId === teamId);
     if (!meeting) throw new RepositoryError('NOT_FOUND', 'Meeting not found.');
     assertExpectedVersion(meeting.version, expectedVersion);
-    if (meeting.status === 'closed') throw new RepositoryError('CONFLICT', 'Closed meetings cannot be started.');
+    if (meeting.status === 'closed' || meeting.status === 'skipped') throw new RepositoryError('CONFLICT', 'Closed or skipped meetings cannot be started.');
     if (meeting.status === 'in-progress') return clone(meeting);
     const timestamp = nowIso();
     meeting.status = 'in-progress';
@@ -1591,10 +1767,12 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     const meeting = this.meetings.find((item) => item.id === meetingId && item.teamId === teamId);
     if (!meeting) throw new RepositoryError('NOT_FOUND', 'Meeting not found.');
     assertExpectedVersion(meeting.version, expectedVersion);
-    if (meeting.status === 'closed') throw new RepositoryError('CONFLICT', 'Closed meetings cannot be rescheduled.');
+    if (meeting.status !== 'upcoming') throw new RepositoryError('CONFLICT', 'Only open upcoming meetings can be rescheduled.');
     const scheduledDate = normalizeDate(input.scheduledDate, 'Meeting date');
     assertText(input.scheduledTime, 'Meeting time');
     const scheduledTime = input.scheduledTime.trim();
+    assertFutureMeetingSchedule(scheduledDate, scheduledTime);
+    if (this.meetings.some((candidate) => candidate.id !== meeting.id && candidate.teamId === teamId && candidate.status === 'upcoming' && candidate.scheduledDate === scheduledDate && candidate.scheduledTime === scheduledTime)) throw new RepositoryError('CONFLICT', 'Another upcoming meeting already uses that date and time.');
     const timestamp = nowIso();
     Object.assign(meeting, {
       scheduledDate,
@@ -1617,6 +1795,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     if (!meeting) throw new RepositoryError('NOT_FOUND', 'Meeting not found.');
     assertExpectedVersion(meeting.version, expectedVersion);
     if (meeting.status === 'closed') throw new RepositoryError('CONFLICT', 'This meeting is already closed.');
+    if (meeting.status === 'skipped') throw new RepositoryError('CONFLICT', 'Skipped meetings cannot be closed.');
     const timestamp = nowIso();
     const sections = meetingSectionsFor(team);
     const teamRocks = this.rocks.filter((rock) => rock.teamId === teamId);
@@ -1631,15 +1810,102 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     meeting.lastRating = Math.min(10, Math.max(0, rating));
     meeting.actionSummary = meetingActionSummary(meeting, teamIssues);
     meeting.recap = meetingRecap(team, meeting, teamRocks, teamTodos, teamIssues, recap, this.metrics, this.scorecardResults);
+    meeting.aiSummaryStatus = 'queued';
+    meeting.aiSummaryRequestedAt = timestamp;
+    meeting.aiSummarySource = 'close';
+    meeting.aiSummaryJobId = meeting.aiSummaryJobId ?? `summary-${meeting.id}`;
+    meeting.aiSummaryError = undefined;
     meeting.updatedAt = timestamp;
     meeting.updatedBy = actorId;
     meeting.version += 1;
     this.advanceIssueEscalations(team, meeting, timestamp);
-    const nextDate = nextConfiguredMeetingDateAfter(team, meeting.scheduledDate, timestamp);
     const carriedIssueIds = meeting.idsIssueIds.filter((issueId) => this.activeIssue(issueId)?.status !== 'solved');
-    const nextMeeting: MeetingRecord = { ...baseRecord(`meeting-${teamId}-${nextDate}-${Date.now()}`, 'meeting', teamId), kind: 'meeting', teamId, label: `${team.shortName} L10`, dateLabel: meetingDateLabel(nextDate), scheduledDate: nextDate, scheduledTime: team.meetingTime, weekStartDate: weekStartDateFor(nextDate), status: 'upcoming', facilitatorId: meeting.facilitatorId, attendeeIds: [...meeting.attendeeIds], lastRating: meeting.lastRating, agendaProgress: 0, agendaTotal: sections.length, idsSolved: 0, idsTotal: carriedIssueIds.length, recap: '', sectionNotes: {}, idsIssueIds: carriedIssueIds, idsAddedIssueIds: [], createdTodoIds: [], idsNotes: [] };
-    this.meetings.push(nextMeeting);
+    const contextSnapshot = meetingSummaryContext(team, meeting, teamRocks, teamTodos, teamIssues, this.metrics, this.scorecardResults);
+    const existingJob = this.summaryJobs.find((job) => job.id === meeting.aiSummaryJobId);
+    if (!existingJob) {
+      this.summaryJobs.push({
+        ...baseRecord(meeting.aiSummaryJobId, 'meetingSummaryJob', teamId),
+        kind: 'meetingSummaryJob', teamId, meetingId: meeting.id, status: 'queued', attempt: 1, source: 'close', contextSnapshot, requestedAt: timestamp, updatedBy: actorId, environmentId: this.environmentId,
+      });
+    }
+    this.ensureUpcomingMeetingWindow(team, carriedIssueIds, meeting);
     this.recordAudit(actorId, 'Closed L10 meeting', meeting.id, recap || 'Meeting closed without a recap.', 'meeting');
+    return clone(meeting);
+  }
+
+  async skipMeeting(teamId: string, meetingId: string, reason: MeetingSkipReason, note: string, actorId: string, expectedVersion?: number) {
+    this.requireWrite(teamId, actorId);
+    const team = this.team(teamId);
+    if (!team) throw new RepositoryError('NOT_FOUND', 'Team not found.');
+    const meeting = this.meetings.find((item) => item.id === meetingId && item.teamId === teamId);
+    if (!meeting) throw new RepositoryError('NOT_FOUND', 'Meeting not found.');
+    assertExpectedVersion(meeting.version, expectedVersion);
+    if (meeting.status !== 'upcoming') throw new RepositoryError('CONFLICT', 'Only meetings that have not started can be skipped.');
+    if (!['public-holiday', 'annual-leave', 'other'].includes(reason)) throw new RepositoryError('VALIDATION', 'Choose a valid skip reason.');
+    const timestamp = nowIso();
+    Object.assign(meeting, {
+      status: 'skipped', skipReason: reason, skipNote: note.trim() || undefined, skippedAt: timestamp, skippedById: actorId, updatedAt: timestamp, updatedBy: actorId, version: meeting.version + 1,
+    });
+    this.ensureUpcomingMeetingWindow(team);
+    this.recordAudit(actorId, 'Skipped L10 meeting', meeting.id, `${team.name} meeting skipped: ${reason}${note.trim() ? ` · ${note.trim()}` : ''}.`, 'meeting');
+    return clone(meeting);
+  }
+
+  async requestMeetingSummary(teamId: string, meetingId: string, actorId: string, expectedVersion?: number) {
+    if (!this.canManageMeetingSummary(teamId, actorId)) throw new RepositoryError('FORBIDDEN', 'You do not have permission to generate this meeting summary.');
+    const team = this.team(teamId);
+    const meeting = this.meetings.find((item) => item.id === meetingId && item.teamId === teamId);
+    if (!team || !meeting) throw new RepositoryError('NOT_FOUND', 'Meeting not found.');
+    assertExpectedVersion(meeting.version, expectedVersion);
+    if (meeting.status !== 'closed') throw new RepositoryError('CONFLICT', 'AI summaries are available after a meeting is closed.');
+    if (meeting.aiSummaryStatus === 'ready' || meeting.aiSummaryStatus === 'queued' || meeting.aiSummaryStatus === 'generating') return clone(meeting);
+    const timestamp = nowIso();
+    const existingJob = this.summaryJobs.find((job) => job.id === meeting.aiSummaryJobId);
+    const source = existingJob?.source ?? meeting.aiSummarySource ?? (meeting.aiSummaryRequestedAt ? 'close' : 'legacy');
+    const rocks = this.rocks.filter((rock) => rock.teamId === teamId);
+    const todos = this.todos.filter((todo) => todo.teamId === teamId);
+    const issues = this.issues.filter((issue) => issue.teamId === teamId && issue.assignmentState !== 'redirected');
+    const contextSnapshot = existingJob?.contextSnapshot ?? meetingSummaryContext(team, meeting, rocks, todos, issues, this.metrics, this.scorecardResults);
+    const jobId = meeting.aiSummaryJobId ?? `summary-${meeting.id}`;
+    const currentJob = this.summaryJobs.find((job) => job.id === jobId);
+    const attempt = (currentJob?.attempt ?? 0) + 1;
+    if (currentJob) {
+      Object.assign(currentJob, { status: 'queued' as const, attempt, source, contextSnapshot, requestedAt: timestamp, startedAt: undefined, completedAt: undefined, lastError: undefined, updatedAt: timestamp, updatedBy: actorId, version: currentJob.version + 1 });
+    } else {
+      this.summaryJobs.push({ ...baseRecord(jobId, 'meetingSummaryJob', teamId), kind: 'meetingSummaryJob', teamId, meetingId: meeting.id, status: 'queued', attempt, source, contextSnapshot, requestedAt: timestamp, updatedBy: actorId, environmentId: this.environmentId });
+    }
+    Object.assign(meeting, { aiSummaryStatus: 'queued' as const, aiSummaryRequestedAt: timestamp, aiSummarySource: source, aiSummaryJobId: jobId, aiSummaryError: undefined, updatedAt: timestamp, updatedBy: actorId, version: meeting.version + 1 });
+    this.recordAudit(actorId, 'Queued meeting AI summary', meeting.id, `${team.name} summary generation queued (${source}).`, 'meeting');
+    return clone(meeting);
+  }
+
+  async updateMeetingSummaryDispatch(jobId: string, status: 'generating' | 'failed', error: string | undefined, actorId: string) {
+    const job = this.summaryJobs.find((candidate) => candidate.id === jobId);
+    if (!job) throw new RepositoryError('NOT_FOUND', 'Meeting summary job not found.');
+    if (job.status === 'ready') return clone(job);
+    const timestamp = nowIso();
+    Object.assign(job, { status, startedAt: status === 'generating' ? (job.startedAt ?? timestamp) : job.startedAt, completedAt: status === 'failed' ? timestamp : undefined, lastError: error?.trim() || undefined, updatedAt: timestamp, updatedBy: actorId, version: job.version + 1 });
+    const meeting = this.meetings.find((candidate) => candidate.id === job.meetingId && candidate.teamId === job.teamId);
+    if (meeting) {
+      Object.assign(meeting, { aiSummaryStatus: status, aiSummaryError: error?.trim() || undefined, updatedAt: timestamp, updatedBy: actorId, version: meeting.version + 1 });
+      this.recordAudit(actorId, status === 'failed' ? 'Meeting AI summary failed' : 'Meeting AI summary started', meeting.id, error?.trim() || `${job.source} summary is being generated.`, 'meeting');
+    }
+    return clone(job);
+  }
+
+  async completeMeetingSummary(jobId: string, status: 'ready' | 'failed', summary: MeetingAiSummary | undefined, error: string | undefined, attempt?: number) {
+    const job = this.summaryJobs.find((candidate) => candidate.id === jobId);
+    if (!job) throw new RepositoryError('NOT_FOUND', 'Meeting summary job not found.');
+    if (attempt !== undefined && job.attempt !== attempt) throw new RepositoryError('CONFLICT', 'This AI summary callback belongs to an older attempt.');
+    const meeting = this.meetings.find((candidate) => candidate.id === job.meetingId && candidate.teamId === job.teamId);
+    if (!meeting) throw new RepositoryError('NOT_FOUND', 'Meeting not found.');
+    if (job.status === 'ready' || job.status === 'failed') throw new RepositoryError('CONFLICT', 'This AI summary job has already completed.');
+    if (status === 'ready' && (!summary || typeof summary.executiveSummary !== 'string' || !summary.executiveSummary.trim() || !Array.isArray(summary.decisions) || !Array.isArray(summary.commitments) || !Array.isArray(summary.risks) || !Array.isArray(summary.nextFocus))) throw new RepositoryError('VALIDATION', 'A ready AI summary must include all structured sections.');
+    const timestamp = nowIso();
+    const normalizedSummary = status === 'ready' && summary ? { ...clone(summary), executiveSummary: summary.executiveSummary.trim(), decisions: summary.decisions.map((item) => String(item).trim()).filter(Boolean), commitments: summary.commitments.map((item) => String(item).trim()).filter(Boolean), risks: summary.risks.map((item) => String(item).trim()).filter(Boolean), nextFocus: summary.nextFocus.map((item) => String(item).trim()).filter(Boolean), generatedAt: summary.generatedAt || timestamp, source: job.source } : undefined;
+    Object.assign(job, { status, completedAt: timestamp, lastError: error?.trim() || undefined, updatedAt: timestamp, updatedBy: 'ai-worker', version: job.version + 1 });
+    Object.assign(meeting, { aiSummaryStatus: status, aiSummary: normalizedSummary, aiSummaryGeneratedAt: normalizedSummary?.generatedAt, aiSummaryError: error?.trim() || undefined, aiSummarySource: job.source, updatedAt: timestamp, updatedBy: 'ai-worker', version: meeting.version + 1 });
+    this.recordAudit('ai-worker', status === 'ready' ? 'Stored meeting AI summary' : 'Meeting AI summary failed', meeting.id, status === 'ready' ? 'AI summary stored from the signed worker callback.' : (error?.trim() || 'The AI worker reported a failed summary.'), 'meeting');
     return clone(meeting);
   }
 
@@ -1667,10 +1933,12 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       this.meetings.push({
         ...baseRecord(`meeting-${team.teamId}-current`, 'meeting', team.teamId),
         kind: 'meeting', teamId: team.teamId, label: `${team.shortName} L10`, dateLabel: meetingDateLabel(scheduledDate), scheduledDate, scheduledTime: team.meetingTime, status: 'upcoming',
+        recurrenceDate: scheduledDate,
         weekStartDate: weekStartDateFor(scheduledDate),
         facilitatorId: team.escalationUserIds[0] ?? actorId, attendeeIds: [], lastRating: 0, agendaProgress: 0,
         agendaTotal: sections.length, idsSolved: 0, idsTotal: 0, recap: '', sectionNotes: {}, idsIssueIds: [], idsAddedIssueIds: [], createdTodoIds: [], idsNotes: [],
       });
+      this.ensureUpcomingMeetingWindow(team);
     }
     this.recordAudit(actorId, 'Created team', teamId, `Created ${team.name} as a ${team.nodeType} node.`, 'team');
     return clone(team);
@@ -1881,6 +2149,7 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
       this.notifications = ofKind<NotificationRecord>('notification');
       this.messages = ofKind<TeamMessageRecord>('message');
       this.meetings = ofKind<MeetingRecord>('meeting');
+      this.summaryJobs = ofKind<MeetingSummaryJobRecord>('meetingSummaryJob');
       this.metrics = ofKind<ScorecardMetricRecord>('scorecardMetric');
       this.scorecardResults = ofKind<ScorecardResultRecord>('scorecardResult');
       this.audit = ofKind<AuditEventRecord>('auditEvent');
@@ -1888,6 +2157,10 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
       this.settings = this.settingsRecord ? { agingDays: this.settingsRecord.agingDays, staleDays: this.settingsRecord.staleDays, criticalDays: this.settingsRecord.criticalDays, version: this.settingsRecord.version } : clone(DEFAULT_ISSUE_AGE_SETTINGS);
       this.settingsVersion = this.settingsRecord?.version ?? 1;
       this.refreshDerivedState();
+      const meetingIdsBeforeWindow = new Set(this.meetings.map((meeting) => meeting.id));
+      this.maintainMeetingWindows();
+      const generatedMeetings = this.meetings.filter((meeting) => !meetingIdsBeforeWindow.has(meeting.id));
+      if (generatedMeetings.length) await this.persistRecords(generatedMeetings);
       this.loaded = true;
     })();
     try {
@@ -1898,9 +2171,23 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
   }
 
   private allRecords(): WorkspaceRecord[] {
-    const records: WorkspaceRecord[] = [...this.teams, ...this.users, ...this.memberships, ...this.rocks, ...this.tasks, ...this.todos, ...this.issues, ...this.transfers, ...this.notifications, ...this.messages, ...this.meetings, ...this.metrics, ...this.scorecardResults, ...this.audit];
+    const records: WorkspaceRecord[] = [...this.teams, ...this.users, ...this.memberships, ...this.rocks, ...this.tasks, ...this.todos, ...this.issues, ...this.transfers, ...this.notifications, ...this.messages, ...this.meetings, ...this.summaryJobs, ...this.metrics, ...this.scorecardResults, ...this.audit];
     if (this.settingsRecord) records.push(this.settingsRecord);
     return records;
+  }
+
+  private async maintainMeetingWindowsAndPersist() {
+    await this.ensureLoaded();
+    const existingMeetingIds = new Set(this.meetings.map((meeting) => meeting.id));
+    this.maintainMeetingWindows();
+    const generatedMeetings = this.meetings.filter((meeting) => !existingMeetingIds.has(meeting.id));
+    if (!generatedMeetings.length) return;
+    try {
+      await this.persistRecords(generatedMeetings);
+    } catch (error) {
+      this.loaded = false;
+      throw error;
+    }
   }
 
   private recordKey(record: WorkspaceRecord) {
@@ -1996,7 +2283,7 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
   }
 
   private async withMutation<T>(actorId: string, mutation: () => Promise<T>): Promise<T> {
-    await this.ensureLoaded();
+    await this.maintainMeetingWindowsAndPersist();
     const before = new Map(this.allRecords().map((record) => [this.recordKey(record), JSON.stringify(this.payload(record))]));
     const settingsBefore = JSON.stringify(this.settings);
     try {
@@ -2038,7 +2325,8 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
     if (!user) return null;
     const ownMemberships = memberships.filter((membership) => membership.userId === userId && membership.active);
     const leadershipVisible = ownMemberships.some((membership) => membership.teamId === 'leadership');
-    const teamIds = leadershipVisible ? teams.map((team) => team.teamId) : ownMemberships.map((membership) => membership.teamId);
+    const descendants = (teamId: string): string[] => teams.filter((team) => team.parentTeamId === teamId).flatMap((child) => [child.teamId, ...descendants(child.teamId)]);
+    const teamIds = leadershipVisible ? teams.map((team) => team.teamId) : ownMemberships.flatMap((membership) => [membership.teamId, ...(membership.role === 'TeamLead' || membership.role === 'OrgAdmin' ? descendants(membership.teamId) : [])]);
     return this.publicValue({ user: clone(user), memberships: clone(ownMemberships.map(({ teamId, role, active }) => ({ teamId, role, active }))), leadershipVisible, platformAdmin: canAdministerPlatform(user.platformCapabilities) || ownMemberships.some((membership) => membership.teamId === 'leadership' && membership.role === 'OrgAdmin'), teams: clone(teams.filter((team) => teamIds.includes(team.teamId) && team.active).map(({ teamId, name, shortName, parentTeamId, nodeType, active }) => ({ teamId, name, shortName, parentTeamId, nodeType, active }))), currentEnvironment: this.environmentId } satisfies SessionContext);
   }
 
@@ -2049,18 +2337,18 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
   }
 
   async getTeamDashboard(teamId: string, userId?: string) {
-    const teams = await this.getTeams();
-    if (!teams.some((team) => team.teamId === teamId)) throw new RepositoryError('NOT_FOUND', 'Team not found.');
-    if (userId) {
-      const [membership, leadership] = await Promise.all([this.getTeamMembership(teamId, userId), this.getLeadershipMembership(userId)]);
-      if (!membership && !leadership) throw new RepositoryError('FORBIDDEN', 'You do not have access to this team.');
-    }
+    await this.maintainMeetingWindowsAndPersist();
+    if (!this.team(teamId)) throw new RepositoryError('NOT_FOUND', 'Team not found.');
+    if (userId) this.requireRead(teamId, userId);
     const settings = await this.ageSettings();
     const [rocks, todos, issues] = await Promise.all([this.teamRecords<RockRecord>(teamId, 'rock'), this.teamRecords<TodoRecord>(teamId, 'todo'), this.teamRecords<IssueRecord>(teamId, 'issue')]);
     return dashboardFor(teamId, rocks, todos, issues.map((issue) => issueAge(issue, settings)));
   }
 
   async getTeamWorkspace(teamId: string, userId: string): Promise<TeamWorkspace> {
+    await this.maintainMeetingWindowsAndPersist();
+    if (!this.team(teamId)) throw new RepositoryError('NOT_FOUND', 'Team not found.');
+    this.requireRead(teamId, userId);
     const [team, membership, rocks, tasks, todos, issues, transfers, notifications, messages, meetings, metrics, scorecardResults, settings] = await Promise.all([
       this.orgRecords<TeamRecord>('team').then((items) => items.find((item) => item.teamId === teamId && item.active) ?? null),
       this.getTeamMembership(teamId, userId),
@@ -2068,9 +2356,7 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
       this.orgRecords<TeamMessageRecord>('message'), this.teamRecords<MeetingRecord>(teamId, 'meeting'), this.teamRecords<ScorecardMetricRecord>(teamId, 'scorecardMetric'), this.teamRecords<ScorecardResultRecord>(teamId, 'scorecardResult'),
       this.ageSettings(),
     ]);
-    const leadership = await this.getLeadershipMembership(userId);
     if (!team) throw new RepositoryError('NOT_FOUND', 'Team not found.');
-    if (!membership && !leadership) throw new RepositoryError('FORBIDDEN', 'You do not have access to this team.');
     const teamIssues = issues.filter((issue) => issue.assignmentState !== 'redirected').map((issue) => issueAge(issue, settings));
     const teamTransfers = transfers.filter((transfer) => transfer.sourceTeamId === teamId || transfer.destinationTeamId === teamId);
     const teamNotifications = notifications.filter((notification) => notification.recipientUserId === userId && (!notification.teamId || notification.teamId === teamId));
@@ -2127,6 +2413,21 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
       quarter: { id: '2026-q3', label: 'Q3 2026', theme: 'Make Q3 feel lighter.', startDate: '2026-07-01', endDate: '2026-09-30', daysRemaining: Math.max(0, Math.ceil((quarterEnd - Date.now()) / DAY)) },
       etag: etagFor([...teams, ...users, ...memberships, ...rocks, ...tasks, ...todos, ...issues, ...transfers, ...notifications, ...messages, ...meetings, ...metrics, ...scorecardResults, ...headlines, ...audit]),
     });
+  }
+
+  async getMeetingReview(userId: string, query: MeetingReviewQuery = {}) {
+    await this.maintainMeetingWindowsAndPersist();
+    return this.publicValue(await super.getMeetingReview(userId, query));
+  }
+
+  async getMeeting(teamId: string, meetingId: string, userId: string) {
+    await this.maintainMeetingWindowsAndPersist();
+    return this.publicValue(await super.getMeeting(teamId, meetingId, userId));
+  }
+
+  async getMeetingSummaryJob(teamId: string, meetingId: string, userId: string) {
+    await this.maintainMeetingWindowsAndPersist();
+    return this.publicValue(await super.getMeetingSummaryJob(teamId, meetingId, userId));
   }
 
   async getCompanyOverview(userId: string) {
@@ -2204,6 +2505,10 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
   async reorderMeetingIssues(teamId: string, meetingId: string, issueIds: string[], actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.reorderMeetingIssues(teamId, meetingId, issueIds, actorId, expectedVersion)); }
   async startMeeting(teamId: string, meetingId: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.startMeeting(teamId, meetingId, actorId, expectedVersion)); }
   async updateMeetingSchedule(teamId: string, meetingId: string, input: { scheduledDate: string; scheduledTime: string }, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateMeetingSchedule(teamId, meetingId, input, actorId, expectedVersion)); }
+  async skipMeeting(teamId: string, meetingId: string, reason: MeetingSkipReason, note: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.skipMeeting(teamId, meetingId, reason, note, actorId, expectedVersion)); }
+  async requestMeetingSummary(teamId: string, meetingId: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.requestMeetingSummary(teamId, meetingId, actorId, expectedVersion)); }
+  async updateMeetingSummaryDispatch(jobId: string, status: 'generating' | 'failed', error: string | undefined, actorId: string) { return this.withMutation(actorId, () => super.updateMeetingSummaryDispatch(jobId, status, error, actorId)); }
+  async completeMeetingSummary(jobId: string, status: 'ready' | 'failed', summary: MeetingAiSummary | undefined, error: string | undefined, attempt?: number) { return this.withMutation('ai-worker', () => super.completeMeetingSummary(jobId, status, summary, error, attempt)); }
   async startIssue(issueId: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.startIssue(issueId, actorId, expectedVersion)); }
   async solveIssue(issueId: string, input: SolveIssueInput, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.solveIssue(issueId, input, actorId, expectedVersion)); }
   async createRock(input: { teamId: string; title: string; description?: string; notes?: string; ownerId: string; dueDate?: string; priority?: RockRecord['priority'] }, actorId: string) { return this.withMutation(actorId, () => super.createRock(input, actorId)); }

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { canAcceptTransfer, canAdministerPlatform, canManageTeam, canWriteTeam, issueAgeBand, nextConfiguredMeetingDateAfter, nextMeetingDateAfter, nextMeetingDateFor, nextTodoStatus, partitionFor, validateAgeSettings, validateHierarchy } from './domain.js';
+import { canAcceptTransfer, canAdministerPlatform, canManageTeam, canWriteTeam, issueAgeBand, meetingReviewStatus, meetingScheduledAt, nextConfiguredMeetingDateAfter, nextMeetingDateAfter, nextMeetingDateFor, nextTodoStatus, partitionFor, validateAgeSettings, validateHierarchy } from './domain.js';
+import type { MeetingRecord, TeamRecord } from './domain.js';
 
 test('team partitions are stable and explicit', () => {
   assert.equal(partitionFor('org', 'bremmar'), 'org');
@@ -14,6 +15,20 @@ test('meeting recurrence supports weekly and month-end monthly schedules', () =>
   assert.equal(nextMeetingDateAfter('2026-08-31', 'weekly', '2026-09-03'), '2026-09-07');
   assert.equal(nextConfiguredMeetingDateAfter({ meetingCadence: 'monthly', meetingDay: '31' }, '2026-02-28', '2026-02-28'), '2026-03-31');
   assert.equal(nextConfiguredMeetingDateAfter({ meetingCadence: 'weekly', meetingDay: 'Monday' }, '2026-09-09', '2026-09-09'), '2026-09-14');
+});
+
+test('meeting review attention states respect exact schedule and agenda-duration boundaries', () => {
+  const scheduledAt = Date.parse('2026-09-03T12:00:00.000Z');
+  const meeting = { scheduledDate: '2026-09-03', scheduledTime: '12:00 PM', status: 'upcoming' } as MeetingRecord;
+  const team = { meetingSections: [{ id: 'ids', label: 'IDS', enabled: true, duration: 60 }] } as TeamRecord;
+
+  assert.equal(meetingScheduledAt(meeting), scheduledAt);
+  assert.equal(meetingReviewStatus(meeting, team, scheduledAt), 'upcoming');
+  assert.equal(meetingReviewStatus(meeting, team, scheduledAt + 1), 'missed');
+
+  const inProgress = { ...meeting, status: 'in-progress' as const, startedAt: new Date(scheduledAt).toISOString() };
+  assert.equal(meetingReviewStatus(inProgress, team, scheduledAt + 60 * 60 * 1000), 'in-progress');
+  assert.equal(meetingReviewStatus(inProgress, team, scheduledAt + 60 * 60 * 1000 + 1), 'overdue');
 });
 
 test('role capabilities keep viewers read-only', () => {

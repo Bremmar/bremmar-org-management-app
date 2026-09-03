@@ -1,4 +1,4 @@
-export type ViewId = 'overview' | 'company' | 'meeting' | 'rocks' | 'todos' | 'issues' | 'messages' | 'scorecard' | 'admin' | 'profile';
+export type ViewId = 'overview' | 'company' | 'meeting' | 'meeting-history' | 'rocks' | 'todos' | 'issues' | 'messages' | 'scorecard' | 'admin' | 'profile';
 
 export type RockStatus = 'on-track' | 'off-track' | 'complete';
 export type RockTaskStatus = 'open' | 'in-progress' | 'done';
@@ -8,7 +8,11 @@ export type IssueHorizon = 'short-term' | 'long-term';
 export type IssueAssignmentState = 'assigned' | 'pending-transfer' | 'unassigned' | 'redirected';
 export type IssueAgeBand = 'fresh' | 'aging' | 'stale' | 'critical';
 export type IssueMeetingBand = 'neutral' | 'green' | 'yellow' | 'orange' | 'red';
-export type MeetingStatus = 'upcoming' | 'in-progress' | 'closed';
+export type MeetingStatus = 'upcoming' | 'in-progress' | 'closed' | 'skipped';
+export type MeetingReviewStatus = MeetingStatus | 'missed' | 'overdue';
+export type MeetingReviewFilter = 'attention' | 'completed' | 'skipped' | 'all';
+export type MeetingSkipReason = 'public-holiday' | 'annual-leave' | 'other';
+export type MeetingAiSummaryStatus = 'not-generated' | 'queued' | 'generating' | 'ready' | 'failed';
 export type MetricStatus = 'on-track' | 'off-track';
 export type ScorecardTrend = 'up' | 'down' | 'flat';
 export type TeamNodeType = 'operational' | 'grouping';
@@ -273,6 +277,16 @@ export interface MeetingActionSummary {
   issuesSolved: number;
 }
 
+export interface MeetingAiSummary {
+  executiveSummary: string;
+  decisions: string[];
+  commitments: string[];
+  risks: string[];
+  nextFocus: string[];
+  generatedAt: string;
+  source: 'close' | 'legacy';
+}
+
 export interface ScorecardMetric {
   id: string;
   teamId: string;
@@ -319,6 +333,8 @@ export interface MeetingInstance {
   scheduledDate?: string;
   /** Display-ready time selected for this meeting occurrence. Legacy snapshots may omit it. */
   scheduledTime?: string;
+  /** The recurring cadence slot. One-off reschedules leave this unchanged. */
+  recurrenceDate?: string;
   weekStartDate?: string;
   status: MeetingStatus;
   facilitatorId: string;
@@ -338,7 +354,39 @@ export interface MeetingInstance {
   createdTodoIds: string[];
   idsNotes: MeetingIssueNote[];
   actionSummary?: MeetingActionSummary;
+  skipReason?: MeetingSkipReason;
+  skipNote?: string;
+  skippedAt?: string;
+  skippedById?: string;
+  aiSummaryStatus?: MeetingAiSummaryStatus;
+  aiSummary?: MeetingAiSummary;
+  aiSummaryError?: string;
+  aiSummaryRequestedAt?: string;
+  aiSummaryGeneratedAt?: string;
+  aiSummaryJobId?: string;
+  aiSummarySource?: 'close' | 'legacy';
   version?: number;
+}
+
+export interface MeetingReviewItem {
+  meeting: MeetingInstance;
+  team: Pick<Team, 'id' | 'name' | 'shortName' | 'parentTeamId'>;
+  reviewStatus: MeetingReviewStatus;
+}
+
+export interface MeetingReviewQuery {
+  filter?: MeetingReviewFilter;
+  status?: MeetingReviewFilter | MeetingReviewStatus;
+  teamId?: string;
+  from?: string;
+  to?: string;
+  cursor?: string;
+}
+
+export interface MeetingReviewPage {
+  items: MeetingReviewItem[];
+  attentionCount: number;
+  nextCursor?: string;
 }
 
 export interface AuditEvent {
@@ -472,6 +520,40 @@ export function meetingDateLabel(scheduledDate: string) {
   return dateOnlyFor(scheduledDate).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' }).replace(', ', ' · ');
 }
 
+export function meetingScheduledAt(meeting: Pick<MeetingInstance, 'scheduledDate' | 'scheduledTime'>): number {
+  if (!meeting.scheduledDate) return Number.NaN;
+  const dateMatch = meeting.scheduledDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!dateMatch) return Number.NaN;
+  const time = (meeting.scheduledTime ?? '').trim();
+  const timeMatch = time.match(/^(\d{1,2}):(\d{2})(?:\s*([AP]M))?$/i);
+  if (!timeMatch) return Date.parse(`${meeting.scheduledDate}T00:00:00Z`);
+  let hour = Number(timeMatch[1]);
+  const minute = Number(timeMatch[2]);
+  const meridiem = timeMatch[3]?.toUpperCase();
+  if (meridiem) {
+    if (hour < 1 || hour > 12) return Number.NaN;
+    if (meridiem === 'PM' && hour !== 12) hour += 12;
+    if (meridiem === 'AM' && hour === 12) hour = 0;
+  }
+  if (hour > 23 || minute > 59) return Number.NaN;
+  return Date.UTC(Number(dateMatch[1]), Number(dateMatch[2]) - 1, Number(dateMatch[3]), hour, minute);
+}
+
+export function meetingDurationMinutes(team: Pick<Team, 'meetingSections'>) {
+  return meetingSectionsFor(team).reduce((total, section) => total + section.duration, 0);
+}
+
+export function meetingReviewStatus(meeting: MeetingInstance, team: Pick<Team, 'meetingSections'>, at = Date.now()): MeetingReviewStatus {
+  if (meeting.status === 'closed' || meeting.status === 'skipped') return meeting.status;
+  if (meeting.status === 'in-progress') {
+    const startedAt = meeting.startedAt ? new Date(meeting.startedAt).getTime() : Number.NaN;
+    if (Number.isFinite(startedAt) && startedAt + meetingDurationMinutes(team) * 60_000 < at) return 'overdue';
+    return 'in-progress';
+  }
+  const scheduledAt = meetingScheduledAt(meeting);
+  return Number.isFinite(scheduledAt) && scheduledAt < at ? 'missed' : 'upcoming';
+}
+
 export function normalizeMeeting(meeting: MeetingInstance, team?: Pick<Team, 'meetingCadence' | 'meetingDay' | 'meetingTime'>): MeetingInstance {
   const fallbackTeam = team ?? { meetingCadence: 'weekly' as const, meetingDay: 'Monday', meetingTime: '9:00 AM' };
   let scheduledDate = meeting.scheduledDate;
@@ -482,7 +564,7 @@ export function normalizeMeeting(meeting: MeetingInstance, team?: Pick<Team, 'me
     scheduledDate = meetingDateFor(fallbackTeam, meeting.weekStartDate ?? new Date());
   }
   const scheduledTime = meeting.scheduledTime?.trim() || fallbackTeam.meetingTime || '9:00 AM';
-  return { ...meeting, scheduledDate, scheduledTime, dateLabel: meetingDateLabel(scheduledDate), weekStartDate: weekStartDateFor(scheduledDate), sectionNotes: meeting.sectionNotes ?? {}, idsIssueIds: meeting.idsIssueIds ?? [], idsAddedIssueIds: meeting.idsAddedIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: meeting.idsNotes ?? [], version: meeting.version ?? 1 };
+  return { ...meeting, scheduledDate, scheduledTime, recurrenceDate: meeting.recurrenceDate ?? scheduledDate, dateLabel: meetingDateLabel(scheduledDate), weekStartDate: weekStartDateFor(scheduledDate), sectionNotes: meeting.sectionNotes ?? {}, idsIssueIds: meeting.idsIssueIds ?? [], idsAddedIssueIds: meeting.idsAddedIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: meeting.idsNotes ?? [], version: meeting.version ?? 1 };
 }
 
 export function scorecardTrendFor(actual: string, priorActual?: string): { trend: ScorecardTrend; trendLabel: string } {

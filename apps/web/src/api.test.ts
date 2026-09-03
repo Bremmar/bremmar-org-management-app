@@ -90,7 +90,7 @@ describe('LocalWorkspaceApi', () => {
     await expect(api.updateMeetingSchedule(team.id, meeting.id, { scheduledDate: '2026-09-22', scheduledTime: '2:30 PM' }, (meeting.version ?? 1) - 1)).rejects.toMatchObject({ code: 'CONFLICT' });
 
     workspace = await api.closeMeeting(team.id, 'Monthly review complete.', 9);
-    expect(workspace.meetings.filter((candidate) => candidate.teamId === team.id && candidate.status === 'upcoming')).toHaveLength(1);
+    expect(workspace.meetings.filter((candidate) => candidate.teamId === team.id && candidate.status === 'upcoming')).toHaveLength(4);
     expect(workspace.meetings.find((candidate) => candidate.teamId === team.id && candidate.status === 'upcoming')?.scheduledTime).toBe('10:00 AM');
   });
 
@@ -335,13 +335,72 @@ describe('LocalWorkspaceApi', () => {
     expect(issue.meetingsPassed).toBe(3);
     expect(issue.meetingBand).toBe('orange');
     expect(issue.escalationState).toBe('not-scheduled');
-    expect(workspace.meetings.filter((meeting) => meeting.teamId === 'leadership')).toHaveLength(4);
+    expect(workspace.meetings.filter((meeting) => meeting.teamId === 'leadership' && meeting.status === 'closed')).toHaveLength(3);
+    expect(workspace.meetings.filter((meeting) => meeting.teamId === 'leadership' && meeting.status === 'upcoming')).toHaveLength(4);
     expect(workspace.meetings.filter((meeting) => meeting.teamId === 'leadership' && meeting.status !== 'closed')[0]?.idsIssueIds).toContain(issue.id);
 
     workspace = await api.closeMeeting('leadership', 'Fourth meeting escalates the Issue.', 8);
     const escalated = workspace.issues.find((item) => item.id === 'issue-handoffs')!;
     expect(escalated).toMatchObject({ meetingsPassed: 4, meetingBand: 'red', escalationState: 'escalated' });
     expect(workspace.notifications.filter((notification) => notification.type === 'issue-escalation' && notification.issueId === issue.id)).toHaveLength(1);
+  });
+
+  it('selects occurrences, records an immutable start, skips with a reason, reschedules once, and filters history', async () => {
+    const api = new LocalWorkspaceApi();
+    let workspace = await api.getWorkspace();
+    const upcoming = () => workspace.meetings.filter((meeting) => meeting.teamId === 'leadership' && meeting.status === 'upcoming').sort((left, right) => `${left.scheduledDate}T${left.scheduledTime}`.localeCompare(`${right.scheduledDate}T${right.scheduledTime}`));
+    const first = upcoming()[0];
+    workspace = await api.startMeeting('leadership', first.id, first.version);
+    const started = workspace.meetings.find((meeting) => meeting.id === first.id)!;
+    workspace = await api.startMeeting('leadership', first.id, started.version);
+    const resumed = workspace.meetings.find((meeting) => meeting.id === first.id)!;
+    expect(resumed).toMatchObject({ status: 'in-progress', startedAt: started.startedAt, version: started.version });
+
+    const skippedCandidate = upcoming()[1];
+    workspace = await api.skipMeeting('leadership', skippedCandidate.id, 'annual-leave', 'The facilitator is on annual leave.', skippedCandidate.version);
+    const skipped = workspace.meetings.find((meeting) => meeting.id === skippedCandidate.id)!;
+    expect(skipped).toMatchObject({ status: 'skipped', skipReason: 'annual-leave', skipNote: 'The facilitator is on annual leave.', skippedById: 'ava-khan' });
+    expect(upcoming()).toHaveLength(4);
+
+    const movedCandidate = upcoming()[0];
+    const nominalDate = movedCandidate.recurrenceDate;
+    workspace = await api.updateMeetingSchedule('leadership', movedCandidate.id, { scheduledDate: '2099-01-05', scheduledTime: '2:30 PM' }, movedCandidate.version);
+    const moved = workspace.meetings.find((meeting) => meeting.id === movedCandidate.id)!;
+    expect(moved).toMatchObject({ scheduledDate: '2099-01-05', scheduledTime: '2:30 PM', recurrenceDate: nominalDate });
+    const history = await api.getMeetingReview({ filter: 'skipped', teamId: 'leadership' });
+    expect(history.items.some((item) => item.meeting.id === skipped.id && item.reviewStatus === 'skipped')).toBe(true);
+    expect((await api.getMeetingReview({ status: 'skipped', teamId: 'leadership' })).items.some((item) => item.meeting.id === skipped.id)).toBe(true);
+  });
+
+  it('keeps descendant meeting summary retries read-only for parent reviewers', async () => {
+    const seed = structuredClone(initialWorkspace);
+    seed.currentUser = seed.users.find((user) => user.id === 'marcus-lee')!;
+    seed.memberships.push({ id: 'membership-marcus-professional-services', teamId: 'professional-services', userId: 'marcus-lee', role: 'TeamLead', active: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    const childMeeting = seed.meetings.find((meeting) => meeting.teamId === 'cybersecurity')!;
+    Object.assign(childMeeting, { status: 'closed' as const, closedAt: new Date().toISOString(), aiSummaryStatus: 'failed' as const, aiSummaryError: 'Worker timeout.' });
+    const api = new LocalWorkspaceApi(seed);
+
+    await expect(api.getMeeting('cybersecurity', childMeeting.id)).resolves.toMatchObject({ id: childMeeting.id, status: 'closed' });
+    await expect(api.requestMeetingSummary('cybersecurity', childMeeting.id, childMeeting.version)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  it('queues a close-time AI recap and exposes the structured result through meeting history', async () => {
+    const api = new LocalWorkspaceApi();
+    let workspace = await api.getWorkspace();
+    const meeting = workspace.meetings.find((candidate) => candidate.teamId === 'leadership' && candidate.status === 'upcoming')!;
+    workspace = await api.startMeeting('leadership', meeting.id, meeting.version);
+    const started = workspace.meetings.find((candidate) => candidate.id === meeting.id)!;
+    workspace = await api.closeMeeting('leadership', 'The team agreed the owner matrix is the next focus.', 9, started.id);
+    const queued = workspace.meetings.find((candidate) => candidate.id === meeting.id)!;
+    expect(queued).toMatchObject({ status: 'closed', aiSummaryStatus: 'queued', aiSummarySource: 'close' });
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    workspace = await api.getWorkspace();
+    const ready = workspace.meetings.find((candidate) => candidate.id === meeting.id)!;
+    expect(ready.aiSummaryStatus).toBe('ready');
+    expect(ready.aiSummary?.executiveSummary).toContain('owner matrix');
+    expect(ready.aiSummary?.decisions.length).toBeGreaterThan(0);
+    expect((await api.getMeetingReview({ filter: 'completed', teamId: 'leadership' })).items.some((item) => item.meeting.id === meeting.id && item.meeting.aiSummaryStatus === 'ready')).toBe(true);
   });
 
   it('saves meeting notes, converts off-track work once, and keeps IDS order separate from priority', async () => {

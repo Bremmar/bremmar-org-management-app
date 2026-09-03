@@ -1,5 +1,5 @@
 import { defaultAgeBand, initialWorkspace, testWorkspace } from './data';
-import { meetingDateFor, meetingDateLabel, meetingSectionsFor, nextConfiguredMeetingDateAfter, normalizeMeeting, issueMeetingBand, scorecardTrendFor, weekStartDateFor } from './types';
+import { meetingDateFor, meetingDateLabel, meetingReviewStatus, meetingScheduledAt, meetingSectionsFor, nextConfiguredMeetingDateAfter, normalizeMeeting, issueMeetingBand, scorecardTrendFor, weekStartDateFor } from './types';
 import { sanitizeTodoNotes } from './richText';
 import type {
   CompanyOverview,
@@ -15,6 +15,11 @@ import type {
   IssueTransferStatus,
   IssueStatus,
   MeetingActionSummary,
+  MeetingAiSummary,
+  MeetingReviewItem,
+  MeetingReviewQuery,
+  MeetingReviewPage,
+  MeetingSkipReason,
   Notification,
   TeamMessage,
   MeetingSection,
@@ -99,7 +104,11 @@ export interface WorkspaceApi {
   updateUser(userId: string, input: Partial<Pick<User, 'name' | 'email'>> & { platformAdmin?: boolean }, expectedVersion?: number): Promise<Workspace>;
   upsertMembership(input: Pick<TeamMembership, 'userId' | 'teamId' | 'role'>): Promise<Workspace>;
   updateAgeSettings(settings: IssueAgeSettings): Promise<Workspace>;
-  closeMeeting(teamId: string, recap: string, rating: number): Promise<Workspace>;
+  closeMeeting(teamId: string, recap: string, rating: number, meetingId?: string): Promise<Workspace>;
+  getMeetingReview(query?: MeetingReviewQuery): Promise<MeetingReviewPage>;
+  getMeeting(teamId: string, meetingId: string): Promise<Workspace['meetings'][number]>;
+  skipMeeting(teamId: string, meetingId: string, reason: MeetingSkipReason, note?: string, expectedVersion?: number): Promise<Workspace>;
+  requestMeetingSummary(teamId: string, meetingId: string, expectedVersion?: number): Promise<Workspace>;
 }
 
 const cloneWorkspace = (workspace: Workspace): Workspace => structuredClone(workspace);
@@ -118,6 +127,18 @@ function normalizeTodoDate(value: string) {
   const parsed = new Date(`${normalized}T12:00:00Z`);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized) || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== normalized) throw new WorkspaceApiError('VALIDATION', 'Choose a valid due date.');
   return normalized;
+}
+
+function normalizeMeetingDate(value: string) {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  const parsed = new Date(`${normalized}T12:00:00Z`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized) || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== normalized) throw new WorkspaceApiError('VALIDATION', 'Meeting date must be a valid date.');
+  return normalized;
+}
+
+function assertFutureMeetingSchedule(scheduledDate: string, scheduledTime: string) {
+  const timestamp = meetingScheduledAt({ scheduledDate, scheduledTime });
+  if (!Number.isFinite(timestamp) || timestamp <= Date.now()) throw new WorkspaceApiError('VALIDATION', 'A rescheduled meeting must be in the future with a valid time.');
 }
 
 function normalizedChecklist(todo: Todo, users: User[], memberships: TeamMembership[]) {
@@ -210,6 +231,54 @@ function meetingActionSummary(workspace: Workspace, meeting: Workspace['meetings
   };
 }
 
+function meetingAiSummary(workspace: Workspace, team: Team, meeting: Workspace['meetings'][number], source: MeetingAiSummary['source']): MeetingAiSummary {
+  const issues = workspace.issues.filter((issue) => issue.teamId === team.id && issue.assignmentState !== 'redirected');
+  const rocks = workspace.rocks.filter((rock) => rock.teamId === team.id);
+  const todos = workspace.todos.filter((todo) => todo.teamId === team.id);
+  const decisions = meeting.idsNotes.map((note) => note.note.trim()).filter(Boolean);
+  const commitments = meeting.createdTodoIds.map((id) => todos.find((todo) => todo.id === id)?.title ?? id);
+  const risks = [
+    ...rocks.filter((rock) => rock.status === 'off-track').map((rock) => `Off-track Rock: ${rock.title}`),
+    ...issues.filter((issue) => issue.status !== 'solved' && issue.horizon === 'short-term').map((issue) => `Open Issue: ${issue.title}`),
+  ];
+  const nextFocus = [
+    ...todos.filter((todo) => todo.status !== 'done').slice(0, 3).map((todo) => todo.title),
+    ...issues.filter((issue) => issue.status !== 'solved').slice(0, 2).map((issue) => issue.title),
+  ];
+  const executiveSummary = meeting.recap.trim()
+    ? meeting.recap.trim().split('\n').filter(Boolean).at(-1) ?? `${team.name} completed its L10.`
+    : `${team.name} completed its L10 with ${meeting.idsIssueIds.length} Issue${meeting.idsIssueIds.length === 1 ? '' : 's'} reviewed in IDS.`;
+  return {
+    executiveSummary,
+    decisions: decisions.length ? decisions : ['No explicit IDS decision notes were recorded.'],
+    commitments: commitments.length ? commitments : ['No new To-Dos were created during this meeting.'],
+    risks: risks.length ? risks.slice(0, 5) : ['No immediate risks were identified from the recorded meeting context.'],
+    nextFocus: nextFocus.length ? nextFocus : ['Continue the team’s current quarterly priorities.'],
+    generatedAt: nowIso(),
+    source,
+  };
+}
+
+function teamForReview(workspace: Workspace, teamId: string): Team {
+  return workspace.teams.find((team) => team.id === teamId) ?? {
+    id: teamId,
+    name: teamId,
+    shortName: teamId,
+    description: '',
+    parentTeamId: null,
+    nodeType: 'operational',
+    memberCount: 0,
+    meetingCadence: 'weekly',
+    meetingDay: 'Monday',
+    meetingTime: '9:00 AM',
+    accent: '#8b96a8',
+    initials: '?',
+    active: true,
+    meetingSections: [],
+    escalationUserIds: [],
+  };
+}
+
 function teamForMessage(workspace: Workspace, teamId: string) {
   return workspace.teams.find((team) => team.id === teamId)?.name ?? teamId;
 }
@@ -259,7 +328,13 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     };
     this.testAccessUserIds = new Set(options.testAccessUserIds ?? [liveSeed.currentUser.id]);
     this.refreshDerivedState();
+    this.maintainMeetingWindows();
+    this.refreshDerivedState();
+    this.selectedEnvironment = 'test';
     this.refreshWorkspace('test');
+    this.maintainMeetingWindows();
+    this.refreshDerivedState();
+    this.selectedEnvironment = 'live';
   }
 
   private refreshWorkspace(environment: EnvironmentId) {
@@ -337,7 +412,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     this.workspace.meetings = this.workspace.meetings.map((meeting) => {
       const team = this.workspace.teams.find((candidate) => candidate.id === meeting.teamId);
       const sections = team ? meetingSectionsFor(team) : meetingSectionsFor({ meetingSections: [] });
-      return normalizeMeeting({ ...meeting, agendaTotal: sections.length, sectionNotes: meeting.sectionNotes ?? {}, idsIssueIds: meeting.idsIssueIds ?? [], idsAddedIssueIds: meeting.idsAddedIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: meeting.idsNotes ?? [] }, team);
+      return normalizeMeeting({ ...meeting, agendaTotal: sections.length, sectionNotes: meeting.sectionNotes ?? {}, idsIssueIds: meeting.idsIssueIds ?? [], idsAddedIssueIds: meeting.idsAddedIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: meeting.idsNotes ?? [], aiSummaryStatus: meeting.aiSummaryStatus ?? (meeting.status === 'closed' ? 'not-generated' : undefined), aiSummarySource: meeting.aiSummarySource }, team);
     });
   }
 
@@ -350,7 +425,11 @@ export class LocalWorkspaceApi implements WorkspaceApi {
   }
 
   private canReadTeam(teamId: string) {
-    return Boolean(this.membership(teamId) || this.leadershipMember());
+    if (this.membership(teamId) || this.leadershipMember()) return true;
+    return this.workspace.memberships.some((membership) => membership.userId === this.workspace.currentUser.id
+      && membership.active
+      && (membership.role === 'TeamLead' || membership.role === 'OrgAdmin')
+      && this.descendantIds(membership.teamId).includes(teamId));
   }
 
   private canWriteTeam(teamId: string) {
@@ -364,6 +443,13 @@ export class LocalWorkspaceApi implements WorkspaceApi {
 
   private requireWrite(teamId: string) {
     if (!this.canWriteTeam(teamId)) throw new WorkspaceApiError('FORBIDDEN', 'You need team editing access for this action.');
+  }
+
+  private canManageMeetingSummary(teamId: string) {
+    // Summary generation is a write against the meeting's own team record.
+    // Parent-team reviewers can read descendant meetings, but do not gain
+    // mutation rights through the hierarchy.
+    return this.canWriteTeam(teamId);
   }
 
   private requireChecklistSupporter(teamId: string, userId: string) {
@@ -390,13 +476,67 @@ export class LocalWorkspaceApi implements WorkspaceApi {
   private result() {
     this.requireSelectedEnvironmentAccess();
     this.refreshDerivedState();
+    this.maintainMeetingWindows();
     return cloneWorkspace(this.workspace);
   }
 
   async getWorkspace() {
     this.requireSelectedEnvironmentAccess();
     this.refreshDerivedState();
+    this.maintainMeetingWindows();
     return cloneWorkspace(this.workspace);
+  }
+
+  async getMeetingReview(query: MeetingReviewQuery = {}): Promise<MeetingReviewPage> {
+    this.requireSelectedEnvironmentAccess();
+    this.refreshDerivedState();
+    this.maintainMeetingWindows();
+    const userId = this.workspace.currentUser.id;
+    const leadership = Boolean(this.leadershipMember());
+    const visibleTeamIds = new Set<string>(this.workspace.memberships
+      .filter((membership) => membership.userId === userId && membership.active)
+      .flatMap((membership) => [membership.teamId, ...(membership.role === 'TeamLead' || membership.role === 'OrgAdmin' ? this.descendantIds(membership.teamId) : [])]));
+    if (leadership) this.workspace.teams.filter((team) => team.active).forEach((team) => visibleTeamIds.add(team.id));
+    if (query.teamId && !visibleTeamIds.has(query.teamId)) throw new WorkspaceApiError('FORBIDDEN', 'You do not have access to this team’s meeting history.');
+    const from = query.from ? normalizeMeetingDate(query.from) : undefined;
+    const to = query.to ? normalizeMeetingDate(query.to) : undefined;
+    if (from && to && from > to) throw new WorkspaceApiError('VALIDATION', 'From date must be on or before the To date.');
+    const requestedFilter = query.filter ?? query.status;
+    const items = this.workspace.meetings
+      .filter((meeting) => visibleTeamIds.has(meeting.teamId) && (!query.teamId || meeting.teamId === query.teamId))
+      .map((meeting) => {
+        const team = teamForReview(this.workspace, meeting.teamId);
+        return { meeting, team, reviewStatus: meetingReviewStatus(meeting, team) } satisfies MeetingReviewItem;
+      })
+      .filter(({ meeting, reviewStatus }) => (!from || (meeting.scheduledDate ?? '') >= from) && (!to || (meeting.scheduledDate ?? '') <= to) && (
+          requestedFilter === 'attention' ? reviewStatus === 'missed' || reviewStatus === 'overdue'
+          : requestedFilter === 'completed' ? reviewStatus === 'closed'
+            : requestedFilter === 'skipped' ? reviewStatus === 'skipped'
+              : requestedFilter === 'all' || !requestedFilter ? true
+                : reviewStatus === requestedFilter
+      ))
+      .sort((left, right) => `${right.meeting.scheduledDate}T${right.meeting.scheduledTime}`.localeCompare(`${left.meeting.scheduledDate}T${left.meeting.scheduledTime}`));
+    const attentionCount = this.workspace.meetings
+      .filter((meeting) => visibleTeamIds.has(meeting.teamId))
+      .some((meeting) => {
+        const team = teamForReview(this.workspace, meeting.teamId);
+        const status = meetingReviewStatus(meeting, team);
+        return status === 'missed' || status === 'overdue';
+      }) ? this.workspace.meetings.filter((meeting) => visibleTeamIds.has(meeting.teamId)).filter((meeting) => {
+        const status = meetingReviewStatus(meeting, teamForReview(this.workspace, meeting.teamId));
+        return status === 'missed' || status === 'overdue';
+      }).length : 0;
+    return { items, attentionCount };
+  }
+
+  async getMeeting(teamId: string, meetingId: string) {
+    this.requireSelectedEnvironmentAccess();
+    this.requireRead(teamId);
+    this.refreshDerivedState();
+    this.maintainMeetingWindows();
+    const meeting = this.workspace.meetings.find((candidate) => candidate.teamId === teamId && candidate.id === meetingId);
+    if (!meeting) throw new WorkspaceApiError('NOT_FOUND', 'Meeting not found.');
+    return structuredClone(meeting);
   }
 
   async getCompanyOverview(): Promise<CompanyOverview> {
@@ -966,7 +1106,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const meeting = this.workspace.meetings.find((item) => item.id === meetingId && item.teamId === teamId);
     if (!meeting) throw new WorkspaceApiError('NOT_FOUND', 'Meeting record not found.');
     this.requireVersion(meeting.version ?? 1, expectedVersion);
-    if (meeting.status === 'closed') throw new WorkspaceApiError('CONFLICT', 'Closed meetings cannot be started.');
+    if (meeting.status === 'closed' || meeting.status === 'skipped') throw new WorkspaceApiError('CONFLICT', 'Closed or skipped meetings cannot be started.');
     if (meeting.status === 'in-progress') return this.result();
     const timestamp = nowIso();
     meeting.status = 'in-progress';
@@ -1154,7 +1294,8 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     this.workspace.teams.push(team);
     if (team.nodeType === 'operational') {
       const scheduledDate = meetingDateFor(team);
-      this.workspace.meetings.push({ id: `meeting-${team.id}-current`, teamId: team.id, label: `${team.shortName} L10`, dateLabel: meetingDateLabel(scheduledDate), scheduledDate, scheduledTime: team.meetingTime, weekStartDate: weekStartDateFor(scheduledDate), status: 'upcoming', facilitatorId: team.escalationUserIds[0] ?? this.workspace.currentUser.id, attendeeIds: [], lastRating: 0, agendaProgress: 0, agendaTotal: meetingSectionsFor(team).length, idsSolved: 0, idsTotal: 0, recap: '', startedAt: undefined, closedAt: undefined, sectionNotes: {}, idsIssueIds: [], idsAddedIssueIds: [], createdTodoIds: [], idsNotes: [], version: 1 });
+      this.workspace.meetings.push({ id: `meeting-${team.id}-current`, teamId: team.id, label: `${team.shortName} L10`, dateLabel: meetingDateLabel(scheduledDate), scheduledDate, scheduledTime: team.meetingTime, recurrenceDate: scheduledDate, weekStartDate: weekStartDateFor(scheduledDate), status: 'upcoming', facilitatorId: team.escalationUserIds[0] ?? this.workspace.currentUser.id, attendeeIds: [], lastRating: 0, agendaProgress: 0, agendaTotal: meetingSectionsFor(team).length, idsSolved: 0, idsTotal: 0, recap: '', startedAt: undefined, closedAt: undefined, sectionNotes: {}, idsIssueIds: [], idsAddedIssueIds: [], createdTodoIds: [], idsNotes: [], version: 1 });
+      this.ensureUpcomingMeetingWindow(team);
     }
     this.audit('Created team', id, input.name, 'team');
     return this.result();
@@ -1179,16 +1320,138 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     return this.result();
   }
 
+  private createUpcomingMeeting(team: Team, scheduledDate: string, template?: Workspace['meetings'][number], idsIssueIds: string[] = []): Workspace['meetings'][number] {
+    const sections = meetingSectionsFor(team);
+    return {
+      id: `meeting-${team.id}-${scheduledDate}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      teamId: team.id,
+      label: `${team.shortName} L10`,
+      dateLabel: meetingDateLabel(scheduledDate),
+      scheduledDate,
+      scheduledTime: team.meetingTime,
+      recurrenceDate: scheduledDate,
+      weekStartDate: weekStartDateFor(scheduledDate),
+      status: 'upcoming',
+      facilitatorId: team.escalationUserIds[0] ?? template?.facilitatorId ?? this.workspace.currentUser.id,
+      attendeeIds: [...(template?.attendeeIds ?? this.workspace.memberships.filter((membership) => membership.teamId === team.id && membership.active).map((membership) => membership.userId))],
+      lastRating: template?.lastRating ?? 0,
+      agendaProgress: 0,
+      agendaTotal: sections.length,
+      idsSolved: 0,
+      idsTotal: idsIssueIds.length,
+      recap: '',
+      sectionNotes: {},
+      idsIssueIds: [...idsIssueIds],
+      idsAddedIssueIds: [],
+      createdTodoIds: [],
+      idsNotes: [],
+      version: 1,
+    };
+  }
+
+  private ensureUpcomingMeetingWindow(team: Team, carriedIssueIds: string[] = [], template?: Workspace['meetings'][number]) {
+    const now = Date.now();
+    const upcoming = () => this.workspace.meetings.filter((meeting) => meeting.teamId === team.id && meeting.status === 'upcoming' && (!Number.isFinite(meetingScheduledAt(meeting)) || meetingScheduledAt(meeting) >= now)).sort((left, right) => `${left.scheduledDate}T${left.scheduledTime}`.localeCompare(`${right.scheduledDate}T${right.scheduledTime}`));
+    let openMeetings = upcoming();
+    const first = openMeetings[0];
+    if (first && carriedIssueIds.length) {
+      first.idsIssueIds = [...carriedIssueIds];
+      first.idsTotal = carriedIssueIds.length;
+    }
+    const cadenceDates = this.workspace.meetings
+      .filter((meeting) => meeting.teamId === team.id)
+      .map((meeting) => meeting.recurrenceDate ?? meeting.scheduledDate)
+      .filter((date): date is string => Boolean(date))
+      .sort();
+    let cursor = cadenceDates.at(-1) ?? template?.recurrenceDate ?? template?.scheduledDate ?? meetingDateFor(team);
+    while (openMeetings.length < 4) {
+      const nextDate = nextConfiguredMeetingDateAfter(team, cursor, cursor);
+      const existing = this.workspace.meetings.some((meeting) => meeting.teamId === team.id && (meeting.recurrenceDate ?? meeting.scheduledDate) === nextDate);
+      cursor = nextDate;
+      if (existing) {
+        openMeetings = upcoming();
+        continue;
+      }
+      const next = this.createUpcomingMeeting(team, nextDate, template ?? openMeetings.at(-1), carriedIssueIds);
+      this.workspace.meetings.push(next);
+      openMeetings = upcoming();
+    }
+  }
+
+  private maintainMeetingWindows() {
+    this.workspace.teams.filter((team) => team.active && team.nodeType === 'operational').forEach((team) => this.ensureUpcomingMeetingWindow(team));
+  }
+
+  private queueLocalSummary(environment: EnvironmentId, teamId: string, meetingId: string, sourceWorkspace: Workspace, source: 'close' | 'legacy') {
+    const timer = setTimeout(() => {
+      const targetWorkspace = this.workspaces[environment];
+      const meeting = targetWorkspace.meetings.find((candidate) => candidate.id === meetingId && candidate.teamId === teamId);
+      const team = targetWorkspace.teams.find((candidate) => candidate.id === teamId);
+      const sourceMeeting = sourceWorkspace.meetings.find((candidate) => candidate.id === meetingId);
+      if (!meeting || !team || meeting.status !== 'closed' || meeting.aiSummaryStatus !== 'queued') return;
+      meeting.aiSummary = meetingAiSummary(sourceWorkspace, team, sourceMeeting ?? meeting, source);
+      meeting.aiSummaryStatus = 'ready';
+      meeting.aiSummarySource = source;
+      meeting.aiSummaryGeneratedAt = meeting.aiSummary.generatedAt;
+      meeting.aiSummaryError = undefined;
+      meeting.updatedAt = meeting.aiSummary.generatedAt;
+      meeting.version = (meeting.version ?? 1) + 1;
+    }, 250);
+    const unref = (timer as unknown as { unref?: () => void }).unref;
+    if (unref) unref.call(timer);
+  }
+
   async updateMeetingSchedule(teamId: string, meetingId: string, input: { scheduledDate: string; scheduledTime: string }, expectedVersion?: number) {
     this.requireWrite(teamId);
     const meeting = this.workspace.meetings.find((item) => item.id === meetingId && item.teamId === teamId);
     if (!meeting) throw new WorkspaceApiError('NOT_FOUND', 'Meeting not found.');
     this.requireVersion(meeting.version ?? 1, expectedVersion);
-    if (meeting.status === 'closed') throw new WorkspaceApiError('CONFLICT', 'Closed meetings cannot be rescheduled.');
-    const scheduledDate = normalizeTodoDate(input.scheduledDate);
+    if (meeting.status !== 'upcoming') throw new WorkspaceApiError('CONFLICT', 'Only open upcoming meetings can be rescheduled.');
+    const scheduledDate = normalizeMeetingDate(input.scheduledDate);
     if (!input.scheduledTime.trim()) throw new WorkspaceApiError('VALIDATION', 'Meeting time is required.');
+    assertFutureMeetingSchedule(scheduledDate, input.scheduledTime.trim());
+    if (this.workspace.meetings.some((candidate) => candidate.id !== meeting.id && candidate.teamId === teamId && candidate.status === 'upcoming' && candidate.scheduledDate === scheduledDate && candidate.scheduledTime === input.scheduledTime.trim())) throw new WorkspaceApiError('CONFLICT', 'Another upcoming meeting already uses that date and time.');
     Object.assign(meeting, { scheduledDate, scheduledTime: input.scheduledTime.trim(), dateLabel: meetingDateLabel(scheduledDate), weekStartDate: weekStartDateFor(scheduledDate), updatedAt: nowIso(), version: (meeting.version ?? 1) + 1 });
     this.audit('Updated meeting schedule', meeting.id, `Moved ${this.workspace.teams.find((team) => team.id === teamId)?.name ?? teamId} L10 to ${meeting.dateLabel} at ${meeting.scheduledTime}.`, 'meeting');
+    return this.result();
+  }
+
+  async skipMeeting(teamId: string, meetingId: string, reason: MeetingSkipReason, note = '', expectedVersion?: number) {
+    this.requireWrite(teamId);
+    const meeting = this.workspace.meetings.find((item) => item.id === meetingId && item.teamId === teamId);
+    if (!meeting) throw new WorkspaceApiError('NOT_FOUND', 'Meeting not found.');
+    this.requireVersion(meeting.version ?? 1, expectedVersion);
+    if (meeting.status !== 'upcoming') throw new WorkspaceApiError('CONFLICT', 'Only meetings that have not started can be skipped.');
+    if (!['public-holiday', 'annual-leave', 'other'].includes(reason)) throw new WorkspaceApiError('VALIDATION', 'Choose a valid skip reason.');
+    const team = this.workspace.teams.find((candidate) => candidate.id === teamId);
+    if (!team) throw new WorkspaceApiError('NOT_FOUND', 'Team not found.');
+    const timestamp = nowIso();
+    Object.assign(meeting, { status: 'skipped' as const, skipReason: reason, skipNote: note.trim() || undefined, skippedAt: timestamp, skippedById: this.workspace.currentUser.id, updatedAt: timestamp, version: (meeting.version ?? 1) + 1 });
+    this.ensureUpcomingMeetingWindow(team);
+    this.audit('Skipped L10 meeting', meeting.id, `${team.name} meeting skipped: ${reason}${note.trim() ? ` · ${note.trim()}` : ''}.`, 'meeting');
+    return this.result();
+  }
+
+  async requestMeetingSummary(teamId: string, meetingId: string, expectedVersion?: number) {
+    if (!this.canManageMeetingSummary(teamId)) throw new WorkspaceApiError('FORBIDDEN', 'You do not have permission to generate this meeting summary.');
+    const meeting = this.workspace.meetings.find((item) => item.id === meetingId && item.teamId === teamId);
+    const team = this.workspace.teams.find((candidate) => candidate.id === teamId);
+    if (!meeting || !team) throw new WorkspaceApiError('NOT_FOUND', 'Meeting not found.');
+    this.requireVersion(meeting.version ?? 1, expectedVersion);
+    if (meeting.status !== 'closed') throw new WorkspaceApiError('CONFLICT', 'AI summaries are available after a meeting is closed.');
+    if (meeting.aiSummaryStatus === 'ready' || meeting.aiSummaryStatus === 'queued' || meeting.aiSummaryStatus === 'generating') return this.result();
+    const timestamp = nowIso();
+    const source = meeting.aiSummaryRequestedAt ? 'close' : 'legacy';
+    const sourceWorkspace = cloneWorkspace(this.workspace);
+    meeting.aiSummaryStatus = 'queued';
+    meeting.aiSummaryRequestedAt = timestamp;
+    meeting.aiSummarySource = source;
+    meeting.aiSummaryJobId = meeting.aiSummaryJobId ?? `summary-${meeting.id}`;
+    meeting.aiSummaryError = undefined;
+    meeting.updatedAt = timestamp;
+    meeting.version = (meeting.version ?? 1) + 1;
+    this.audit('Queued meeting AI summary', meeting.id, `${team.name} summary generation queued (${source}).`, 'meeting');
+    this.queueLocalSummary(this.selectedEnvironment, teamId, meetingId, sourceWorkspace, source);
     return this.result();
   }
 
@@ -1256,17 +1519,17 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     return this.result();
   }
 
-  async closeMeeting(teamId: string, recap: string, rating: number) {
+  async closeMeeting(teamId: string, recap: string, rating: number, meetingId?: string) {
     this.requireWrite(teamId);
-    const meeting = this.workspace.meetings.find((item) => item.teamId === teamId && item.status !== 'closed');
+    const meeting = this.workspace.meetings.find((item) => item.teamId === teamId && (meetingId ? item.id === meetingId : true) && (item.status === 'upcoming' || item.status === 'in-progress'));
     if (!meeting) throw new WorkspaceApiError('NOT_FOUND', 'Meeting not found.');
-    if (meeting.status === 'closed') throw new WorkspaceApiError('CONFLICT', 'This meeting is already closed.');
     const activeTeam = this.workspace.teams.find((team) => team.id === teamId);
     if (!activeTeam) throw new WorkspaceApiError('NOT_FOUND', 'Team not found.');
     const timestamp = nowIso();
     const sections = meetingSectionsFor(activeTeam);
     meeting.status = 'closed';
     meeting.closedAt = timestamp;
+    meeting.updatedAt = timestamp;
     meeting.version = (meeting.version ?? 1) + 1;
     meeting.agendaProgress = sections.length;
     meeting.agendaTotal = sections.length;
@@ -1275,12 +1538,17 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     meeting.idsSolved = meeting.idsIssueIds.filter((issueId) => this.workspace.issues.find((issue) => issue.id === issueId)?.status === 'solved').length;
     meeting.actionSummary = meetingActionSummary(this.workspace, meeting);
     meeting.recap = meetingRecap(this.workspace, activeTeam, meeting, recap);
+    meeting.aiSummaryStatus = 'queued';
+    meeting.aiSummaryRequestedAt = timestamp;
+    meeting.aiSummaryJobId = meeting.aiSummaryJobId ?? `summary-${meeting.id}`;
+    meeting.aiSummarySource = 'close';
+    meeting.aiSummaryError = undefined;
     advanceIssueEscalations(this.workspace, activeTeam, meeting, timestamp, this.notify.bind(this));
-    const nextDate = nextConfiguredMeetingDateAfter(activeTeam, meeting.scheduledDate ?? weekStartDateFor(new Date()), timestamp);
+    const summaryWorkspace = cloneWorkspace(this.workspace);
     const carriedIssueIds = meeting.idsIssueIds.filter((issueId) => this.workspace.issues.find((issue) => issue.id === issueId)?.status !== 'solved');
-    const nextMeeting: Workspace['meetings'][number] = { id: `meeting-${activeTeam.id}-${nextDate}-${Date.now()}`, teamId: activeTeam.id, label: `${activeTeam.shortName} L10`, dateLabel: meetingDateLabel(nextDate), scheduledDate: nextDate, scheduledTime: activeTeam.meetingTime, weekStartDate: weekStartDateFor(nextDate), status: 'upcoming', facilitatorId: activeTeam.escalationUserIds[0] ?? meeting.facilitatorId, attendeeIds: [...meeting.attendeeIds], lastRating: meeting.lastRating, agendaProgress: 0, agendaTotal: sections.length, idsSolved: 0, idsTotal: carriedIssueIds.length, recap: '', sectionNotes: {}, idsIssueIds: carriedIssueIds, idsAddedIssueIds: [], createdTodoIds: [], idsNotes: [], version: 1 };
-    this.workspace.meetings.push(nextMeeting);
+    this.ensureUpcomingMeetingWindow(activeTeam, carriedIssueIds, meeting);
     this.audit('Closed L10 meeting', meeting.id, recap || 'Meeting closed without a recap.', 'meeting');
+    this.queueLocalSummary(this.selectedEnvironment, teamId, meeting.id, summaryWorkspace, 'close');
     return this.result();
   }
 }
@@ -1559,8 +1827,16 @@ export class HttpWorkspaceApi implements WorkspaceApi {
   }
   async updateMeetingSectionNote(teamId: string, meetingId: string, section: MeetingSection, note: string, expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/notes`, 'PATCH', { section, note }, expectedVersion); }
   async reorderMeetingIssues(teamId: string, meetingId: string, issueIds: string[], expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/ids/order`, 'PATCH', { issueIds }, expectedVersion); }
+  async getMeetingReview(query: MeetingReviewQuery = {}) {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(query)) if (value) params.set(key, value);
+    return this.request<MeetingReviewPage>(`/meetings/review${params.toString() ? `?${params.toString()}` : ''}`);
+  }
+  async getMeeting(teamId: string, meetingId: string) { return this.request<Workspace['meetings'][number]>(`/teams/${teamId}/meetings/${meetingId}`); }
   async startMeeting(teamId: string, meetingId: string, expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/start`, 'POST', undefined, expectedVersion, { refresh: true }); }
   async updateMeetingSchedule(teamId: string, meetingId: string, input: { scheduledDate: string; scheduledTime: string }, expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}`, 'PATCH', input, expectedVersion); }
+  async skipMeeting(teamId: string, meetingId: string, reason: MeetingSkipReason, note = '', expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/skip`, 'POST', { reason, note }, expectedVersion, { refresh: true }); }
+  async requestMeetingSummary(teamId: string, meetingId: string, expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/ai-summary/retry`, 'POST', undefined, expectedVersion, { refresh: true }); }
   async requestIssueTransfer(issueId: string, destinationTeamId: string, note?: string) { return this.mutate(`/issues/${issueId}/transfers`, 'POST', { destinationTeamId, note }, undefined, { refresh: true }); }
   async acceptIssueTransfer(transferId: string, expectedVersion?: number) { return this.mutate(`/issue-transfers/${transferId}/accept`, 'POST', undefined, expectedVersion, { refresh: true }); }
   async rejectIssueTransfer(transferId: string, message: string, expectedVersion?: number) { return this.mutate(`/issue-transfers/${transferId}/reject`, 'POST', { message }, expectedVersion, { refresh: true }); }
@@ -1576,9 +1852,9 @@ export class HttpWorkspaceApi implements WorkspaceApi {
   async updateUser(userId: string, input: Partial<Pick<User, 'name' | 'email'>> & { platformAdmin?: boolean }, expectedVersion?: number) { return this.mutate(`/platform-admin/users/${encodeURIComponent(userId)}`, 'PATCH', input, expectedVersion); }
   async upsertMembership(input: Pick<TeamMembership, 'userId' | 'teamId' | 'role'>) { return this.mutate('/platform-admin/memberships', 'PUT', input); }
   async updateAgeSettings(settings: IssueAgeSettings) { return this.mutate('/platform-admin/settings/aging', 'PUT', settings); }
-  async closeMeeting(teamId: string, recap: string, rating: number) {
+  async closeMeeting(teamId: string, recap: string, rating: number, meetingId?: string) {
     const workspace = this.cachedWorkspace ?? await this.getWorkspace();
-    const meeting = workspace.meetings.find((candidate) => candidate.teamId === teamId && candidate.status !== 'closed');
+    const meeting = workspace.meetings.find((candidate) => candidate.teamId === teamId && (meetingId ? candidate.id === meetingId : true) && (candidate.status === 'upcoming' || candidate.status === 'in-progress'));
     if (!meeting) throw new WorkspaceApiError('NOT_FOUND', 'Meeting not found.');
     return this.mutate(`/teams/${teamId}/meetings/${meeting.id}/close`, 'POST', { recap, rating }, meeting.version, { refresh: true });
   }

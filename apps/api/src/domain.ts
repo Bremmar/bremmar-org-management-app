@@ -18,6 +18,7 @@ export type RecordKind =
   | 'teamMembership'
   | 'quarter'
   | 'meeting'
+  | 'meetingSummaryJob'
   | 'rock'
   | 'rockTask'
   | 'todo'
@@ -46,6 +47,11 @@ export type ScorecardStatus = 'on-track' | 'off-track';
 export type ScorecardTrend = 'up' | 'down' | 'flat';
 export type EscalationState = 'not-scheduled' | 'scheduled' | 'due' | 'escalated';
 export type MeetingSection = 'segue' | 'scorecard' | 'rock-review' | 'headlines' | 'todo-review' | 'ids' | 'conclude';
+export type MeetingStatus = 'upcoming' | 'in-progress' | 'closed' | 'skipped';
+export type MeetingReviewStatus = MeetingStatus | 'missed' | 'overdue';
+export type MeetingReviewFilter = 'attention' | 'completed' | 'skipped' | 'all';
+export type MeetingSkipReason = 'public-holiday' | 'annual-leave' | 'other';
+export type MeetingAiSummaryStatus = 'not-generated' | 'queued' | 'generating' | 'ready' | 'failed';
 
 export function issueMeetingBand(meetingsPassed: number, status: IssueStatus): IssueMeetingBand {
   if (status === 'solved' || meetingsPassed <= 0) return 'neutral';
@@ -256,6 +262,16 @@ export interface MeetingActionSummary {
   issuesSolved: number;
 }
 
+export interface MeetingAiSummary {
+  executiveSummary: string;
+  decisions: string[];
+  commitments: string[];
+  risks: string[];
+  nextFocus: string[];
+  generatedAt: string;
+  source: 'close' | 'legacy';
+}
+
 export interface MeetingRecord extends WorkspaceRecord {
   kind: 'meeting';
   teamId: string;
@@ -265,9 +281,11 @@ export interface MeetingRecord extends WorkspaceRecord {
   scheduledDate: string;
   /** Display-ready time selected for this meeting occurrence. */
   scheduledTime: string;
+  /** The recurring cadence slot. One-off reschedules leave this unchanged. */
+  recurrenceDate?: string;
   /** ISO Monday-start week used to match this meeting to Scorecard results. */
   weekStartDate: string;
-  status: 'upcoming' | 'in-progress' | 'closed';
+  status: MeetingStatus;
   facilitatorId: string;
   attendeeIds: string[];
   lastRating: number;
@@ -284,6 +302,73 @@ export interface MeetingRecord extends WorkspaceRecord {
   createdTodoIds: string[];
   idsNotes: MeetingIssueNoteRecord[];
   actionSummary?: MeetingActionSummary;
+  skipReason?: MeetingSkipReason;
+  skipNote?: string;
+  skippedAt?: string;
+  skippedById?: string;
+  aiSummaryStatus?: MeetingAiSummaryStatus;
+  aiSummary?: MeetingAiSummary;
+  aiSummaryError?: string;
+  aiSummaryRequestedAt?: string;
+  aiSummaryGeneratedAt?: string;
+  aiSummaryJobId?: string;
+  aiSummarySource?: 'close' | 'legacy';
+}
+
+export interface MeetingSummaryContext {
+  meetingId: string;
+  teamId: string;
+  label: string;
+  scheduledDate: string;
+  scheduledTime: string;
+  startedAt?: string;
+  closedAt: string;
+  attendeeIds: string[];
+  recap: string;
+  sectionNotes: Partial<Record<MeetingSection, string>>;
+  idsNotes: MeetingIssueNoteRecord[];
+  actionSummary?: MeetingActionSummary;
+  rocks: Array<{ id: string; title: string; status: RockStatus; progress: number; dueDate: string }>;
+  todos: Array<{ id: string; title: string; status: TodoStatus; ownerId: string; dueDate: string }>;
+  issues: Array<{ id: string; title: string; status: IssueStatus; idsNote?: string }>;
+  headlines: Array<{ title: string; type: 'win' | 'concern'; detail: string }>;
+  scorecard: Array<{ label: string; target: string; actual?: string; status?: ScorecardStatus }>;
+}
+
+export interface MeetingSummaryJobRecord extends WorkspaceRecord {
+  kind: 'meetingSummaryJob';
+  teamId: string;
+  meetingId: string;
+  status: Exclude<MeetingAiSummaryStatus, 'not-generated'>;
+  attempt: number;
+  source: 'close' | 'legacy';
+  contextSnapshot: MeetingSummaryContext;
+  requestedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  lastError?: string;
+}
+
+export interface MeetingReviewItem {
+  meeting: MeetingRecord;
+  team: Pick<TeamRecord, 'teamId' | 'name' | 'shortName' | 'parentTeamId'>;
+  reviewStatus: MeetingReviewStatus;
+}
+
+export interface MeetingReviewQuery {
+  filter?: MeetingReviewFilter;
+  /** Optional status alias for API consumers that want a precise review state. */
+  status?: MeetingReviewFilter | MeetingReviewStatus;
+  teamId?: string;
+  from?: string;
+  to?: string;
+  cursor?: string;
+}
+
+export interface MeetingReviewPage {
+  items: MeetingReviewItem[];
+  attentionCount: number;
+  nextCursor?: string;
 }
 
 export interface ScorecardMetricRecord extends WorkspaceRecord {
@@ -420,6 +505,38 @@ export const DEFAULT_MEETING_SECTIONS: MeetingSectionConfig[] = [
 export function meetingSectionsFor(team: Pick<TeamRecord, 'meetingSections'>): MeetingSectionConfig[] {
   const configured = team.meetingSections?.length ? team.meetingSections : DEFAULT_MEETING_SECTIONS;
   return configured.filter((section) => section.enabled).map((section) => ({ ...section }));
+}
+
+export function meetingScheduledAt(meeting: Pick<MeetingRecord, 'scheduledDate' | 'scheduledTime'>): number {
+  const dateMatch = meeting.scheduledDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!dateMatch) return Number.NaN;
+  const timeMatch = meeting.scheduledTime.trim().match(/^(\d{1,2}):(\d{2})(?:\s*([AP]M))?$/i);
+  if (!timeMatch) return Date.parse(`${meeting.scheduledDate}T00:00:00Z`);
+  let hour = Number(timeMatch[1]);
+  const minute = Number(timeMatch[2]);
+  const meridiem = timeMatch[3]?.toUpperCase();
+  if (meridiem) {
+    if (hour < 1 || hour > 12) return Number.NaN;
+    if (meridiem === 'PM' && hour !== 12) hour += 12;
+    if (meridiem === 'AM' && hour === 12) hour = 0;
+  }
+  if (hour > 23 || minute > 59) return Number.NaN;
+  return Date.UTC(Number(dateMatch[1]), Number(dateMatch[2]) - 1, Number(dateMatch[3]), hour, minute);
+}
+
+export function meetingDurationMinutes(team: Pick<TeamRecord, 'meetingSections'>) {
+  return meetingSectionsFor(team).reduce((total, section) => total + section.duration, 0);
+}
+
+export function meetingReviewStatus(meeting: MeetingRecord, team: Pick<TeamRecord, 'meetingSections'>, at = Date.now()): MeetingReviewStatus {
+  if (meeting.status === 'closed' || meeting.status === 'skipped') return meeting.status;
+  if (meeting.status === 'in-progress') {
+    const startedAt = meeting.startedAt ? new Date(meeting.startedAt).getTime() : Number.NaN;
+    if (Number.isFinite(startedAt) && startedAt + meetingDurationMinutes(team) * 60_000 < at) return 'overdue';
+    return 'in-progress';
+  }
+  const scheduledAt = meetingScheduledAt(meeting);
+  return Number.isFinite(scheduledAt) && scheduledAt < at ? 'missed' : 'upcoming';
 }
 
 export const partitionFor = (scope: 'org' | 'team', id: string) => scope === 'org' ? 'org' : `team:${id}`;

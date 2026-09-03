@@ -23,6 +23,16 @@ param initialOrgAdminObjectId string
 @secure()
 param environmentCookieSecret string
 
+@description('Existing AI Function endpoint that accepts signed meeting-summary jobs. Leave empty until AI enrichment is enabled.')
+param aiWorkerUrl string = ''
+
+@description('Shared HMAC secret used between the core API and the AI Function. Supply through a secure deployment parameter.')
+@secure()
+param aiWorkerSharedSecret string = ''
+
+@description('Callback URL exposed by the core API for signed AI summary results.')
+param aiCallbackUrl string = ''
+
 @description('Cosmos database for production workspace data.')
 param liveDatabaseName string = 'eos-live'
 
@@ -226,6 +236,18 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           name: 'ENVIRONMENT_COOKIE_SECRET'
           value: environmentCookieSecret
+        }
+        {
+          name: 'AI_WORKER_URL'
+          value: aiWorkerUrl
+        }
+        {
+          name: 'AI_WORKER_SHARED_SECRET'
+          value: aiWorkerSharedSecret
+        }
+        {
+          name: 'AI_CALLBACK_URL'
+          value: aiCallbackUrl
         }
         {
           name: 'ENTRA_TENANT_ID'

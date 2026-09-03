@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Container } from '@azure/cosmos';
 import { CosmosWorkspaceRepository, MemoryWorkspaceRepository, RepositoryError } from './repository.js';
-import { DEFAULT_MEETING_SECTIONS, issueMeetingBand, type WorkspaceRecord } from '../domain.js';
+import { DEFAULT_MEETING_SECTIONS, issueMeetingBand, meetingScheduledAt, type MeetingAiSummary, type MeetingSkipReason, type WorkspaceRecord } from '../domain.js';
 import { sanitizeTodoNotes } from '../richText.js';
 
 async function rejectsWithCode(operation: Promise<unknown>, code: RepositoryError['code']) {
@@ -259,7 +259,7 @@ test('administrators can disable a team Scorecard while retaining IDS and Conclu
 
   const created = await repository.createTeam({ name: 'Quality Assurance', shortName: 'QA', description: 'Quality controls.', parentTeamId: 'leadership', nodeType: 'operational', meetingDay: 'Friday', meetingTime: '9:00 AM', accent: '#4c8f86', initials: 'QA', meetingSections: DEFAULT_MEETING_SECTIONS, escalationUserIds: ['ava-khan'] }, 'ava-khan');
   const workspace = await repository.getTeamWorkspace(created.teamId, 'ava-khan');
-  assert.equal(workspace.meetings.length, 1);
+  assert.equal(workspace.meetings.length, 4);
   assert.equal(workspace.meetings[0].agendaTotal, DEFAULT_MEETING_SECTIONS.length);
 });
 
@@ -299,9 +299,9 @@ test('new-team writes fall back to ordinary Cosmos creates when transactional ba
 
   const team = await repository.createTeam({ name: 'Batch Fallback', shortName: 'Fallback', description: 'Verifies ordinary writes remain available.', parentTeamId: 'leadership', nodeType: 'operational', meetingCadence: 'weekly', meetingDay: 'Friday', meetingTime: '9:00 AM', accent: '#4c8f86', initials: 'BF', meetingSections: DEFAULT_MEETING_SECTIONS, escalationUserIds: [] }, 'ava-khan');
   assert.equal(team.name, 'Batch Fallback');
-  assert.equal(batchCalls, 1);
+  assert.equal(batchCalls, 2);
   assert.equal(created.some((record) => record.kind === 'team' && record.id === team.teamId), true);
-  assert.equal(created.some((record) => record.kind === 'meeting' && record.teamId === team.teamId), true);
+  assert.equal(created.filter((record) => record.kind === 'meeting' && record.teamId === team.teamId).length, 4);
 });
 
 test('unresolved Issues use meeting health, count non-IDS Issues, and escalate once at four meetings', async () => {
@@ -477,4 +477,128 @@ test('Issue meeting health bands and close-time boundaries are based on total me
   assert.equal(state.issues.find((issue) => issue.id === preExisting.id)!.meetingsPassed, 1);
   assert.equal(state.issues.find((issue) => issue.id === solvedDuring.id)!.meetingsPassed, 0);
   assert.equal(state.issues.find((issue) => issue.id === createdDuring.id)!.meetingsPassed, 0);
+});
+
+test('meeting history allows descendant review while keeping descendant records read-only', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  await repository.upsertMembership({ userId: 'marcus-lee', teamId: 'professional-services', role: 'TeamLead' }, 'ava-khan');
+
+  const parentReview = await repository.getMeetingReview('marcus-lee', { filter: 'all' });
+  assert.equal(parentReview.items.some((item) => item.team.teamId === 'professional-services'), true);
+  assert.equal(parentReview.items.some((item) => item.team.teamId === 'projects'), true);
+  assert.equal(parentReview.items.some((item) => item.team.teamId === 'cybersecurity'), true);
+  assert.equal(parentReview.items.some((item) => item.team.teamId === 'leadership'), false);
+
+  const childMeeting = parentReview.items.find((item) => item.team.teamId === 'cybersecurity')!.meeting;
+  assert.equal((await repository.getMeeting('cybersecurity', childMeeting.id, 'marcus-lee')).id, childMeeting.id);
+  await rejectsWithCode(repository.startMeeting('cybersecurity', childMeeting.id, 'marcus-lee', childMeeting.version), 'FORBIDDEN');
+  await rejectsWithCode(repository.updateMeetingSchedule('cybersecurity', childMeeting.id, { scheduledDate: '2099-01-05', scheduledTime: '2:30 PM' }, 'marcus-lee', childMeeting.version), 'FORBIDDEN');
+  await rejectsWithCode(repository.skipMeeting('cybersecurity', childMeeting.id, 'other', 'Parent review only.', 'marcus-lee', childMeeting.version), 'FORBIDDEN');
+
+  const leadershipReview = await repository.getMeetingReview('ava-khan', { filter: 'all' });
+  assert.equal(new Set(leadershipReview.items.map((item) => item.team.teamId)).size, 7);
+});
+
+test('meeting occurrences record immutable starts, skip reasons, audit events, and a four-item cadence window', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  let workspace = await repository.getTeamWorkspace('leadership', 'ava-khan');
+  const upcoming = () => workspace.meetings.filter((meeting) => meeting.status === 'upcoming' && meetingScheduledAt(meeting) >= Date.now()).sort((left, right) => `${left.scheduledDate}T${left.scheduledTime}`.localeCompare(`${right.scheduledDate}T${right.scheduledTime}`));
+  assert.equal(upcoming().length, 4);
+
+  const first = upcoming()[0];
+  const started = await repository.startMeeting('leadership', first.id, 'ava-khan', first.version);
+  assert.equal(started.status, 'in-progress');
+  assert.match(started.startedAt ?? '', /T/);
+  const resumed = await repository.startMeeting('leadership', first.id, 'ava-khan', started.version);
+  assert.equal(resumed.startedAt, started.startedAt);
+  assert.equal(resumed.version, started.version);
+  const closed = await repository.closeMeeting('leadership', first.id, 'The team left with clear owners.', 8, 'ava-khan', resumed.version);
+  assert.equal(closed.status, 'closed');
+  workspace = await repository.getTeamWorkspace('leadership', 'ava-khan');
+  assert.equal(upcoming().length, 4);
+  assert.equal(workspace.meetings.some((meeting) => meeting.id === first.id && meeting.status === 'closed'), true);
+
+  const skippedCandidate = upcoming()[0];
+  await rejectsWithCode(repository.skipMeeting('leadership', skippedCandidate.id, 'invalid' as unknown as MeetingSkipReason, '', 'ava-khan', skippedCandidate.version), 'VALIDATION');
+  const skipped = await repository.skipMeeting('leadership', skippedCandidate.id, 'public-holiday', 'Office closed for the bank holiday.', 'ava-khan', skippedCandidate.version);
+  assert.deepEqual({ status: skipped.status, skipReason: skipped.skipReason, skipNote: skipped.skipNote, skippedById: skipped.skippedById }, { status: 'skipped', skipReason: 'public-holiday', skipNote: 'Office closed for the bank holiday.', skippedById: 'ava-khan' });
+  workspace = await repository.getTeamWorkspace('leadership', 'ava-khan');
+  assert.equal(upcoming().length, 4);
+  assert.equal((await repository.getMeetingReview('ava-khan', { filter: 'skipped' })).items.some((item) => item.meeting.id === skipped.id), true);
+  assert.equal(repository.exportWorkspaceRecords().some((record) => record.kind === 'auditEvent' && 'target' in record && record.target === skipped.id && 'action' in record && record.action === 'Skipped L10 meeting'), true);
+  assert.equal((await repository.getMeetingSummaryJob('leadership', skipped.id, 'ava-khan')), null);
+  assert.equal((await repository.getMeetingReview('ava-khan', { status: 'skipped', teamId: 'leadership' })).items.some((item) => item.meeting.id === skipped.id), true);
+});
+
+test('one-off meeting rescheduling preserves the nominal cadence and checks future conflicts', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const workspace = await repository.getTeamWorkspace('leadership', 'ava-khan');
+  const meetings = workspace.meetings.filter((meeting) => meeting.status === 'upcoming').sort((left, right) => `${left.scheduledDate}T${left.scheduledTime}`.localeCompare(`${right.scheduledDate}T${right.scheduledTime}`));
+  const first = meetings[0];
+  const second = meetings[1];
+  const nominalDate = first.recurrenceDate;
+  const moved = await repository.updateMeetingSchedule('leadership', first.id, { scheduledDate: '2099-01-05', scheduledTime: '2:30 PM' }, 'ava-khan', first.version);
+  assert.deepEqual({ scheduledDate: moved.scheduledDate, scheduledTime: moved.scheduledTime, recurrenceDate: moved.recurrenceDate }, { scheduledDate: '2099-01-05', scheduledTime: '2:30 PM', recurrenceDate: nominalDate });
+  await rejectsWithCode(repository.updateMeetingSchedule('leadership', second.id, { scheduledDate: moved.scheduledDate, scheduledTime: moved.scheduledTime }, 'ava-khan', second.version), 'CONFLICT');
+  await rejectsWithCode(repository.updateMeetingSchedule('leadership', first.id, { scheduledDate: '2000-01-05', scheduledTime: '2:30 PM' }, 'ava-khan', moved.version), 'VALIDATION');
+});
+
+test('meeting close snapshots context and moves AI summaries through queued, generating, ready, and replay-safe states', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const before = await repository.getTeamWorkspace('projects', 'marcus-lee');
+  const started = await repository.startMeeting('projects', before.meetings[0].id, 'marcus-lee', before.meetings[0].version);
+  const closed = await repository.closeMeeting('projects', started.id, 'The implementation owner is confirmed.', 9, 'marcus-lee', started.version);
+  assert.equal(closed.aiSummaryStatus, 'queued');
+  assert.equal(closed.aiSummarySource, 'close');
+  const queuedJob = await repository.getMeetingSummaryJob('projects', closed.id, 'marcus-lee');
+  assert.equal(queuedJob?.status, 'queued');
+  assert.equal(queuedJob?.attempt, 1);
+  assert.equal(queuedJob?.pk, 'team:projects');
+  assert.equal(queuedJob?.contextSnapshot.closedAt, closed.closedAt);
+  assert.equal(queuedJob?.contextSnapshot.recap, closed.recap);
+
+  const state = repository as unknown as { rocks: Array<{ id: string; title: string }>; summaryJobs: Array<{ id: string; contextSnapshot: { rocks: Array<{ id: string; title: string }> } }> };
+  const snapshotTitle = queuedJob?.contextSnapshot.rocks[0]?.title;
+  if (state.rocks[0]) state.rocks[0].title = 'Changed after close';
+  assert.equal(state.summaryJobs.find((job) => job.id === queuedJob?.id)?.contextSnapshot.rocks[0]?.title, snapshotTitle);
+
+  const generating = await repository.updateMeetingSummaryDispatch(queuedJob!.id, 'generating', undefined, 'ai-worker');
+  assert.equal(generating.status, 'generating');
+  assert.equal((await repository.getMeeting('projects', closed.id, 'marcus-lee')).aiSummaryStatus, 'generating');
+  const summary: MeetingAiSummary = { executiveSummary: 'The team aligned delivery ownership and the next customer milestone.', decisions: ['Keep one accountable owner for each implementation handoff.'], commitments: ['Publish the revised kickoff checklist.'], risks: ['The next milestone depends on security review timing.'], nextFocus: ['Review the first pilot outcome next week.'], generatedAt: new Date().toISOString(), source: 'close' };
+  const ready = await repository.completeMeetingSummary(queuedJob!.id, 'ready', summary, undefined, 1);
+  assert.equal(ready.aiSummaryStatus, 'ready');
+  assert.equal(ready.aiSummary?.executiveSummary, summary.executiveSummary);
+  assert.deepEqual(ready.aiSummary?.decisions, summary.decisions);
+  await rejectsWithCode(repository.completeMeetingSummary(queuedJob!.id, 'ready', summary, undefined, 1), 'CONFLICT');
+});
+
+test('failed summary retry requires a direct editor and legacy meetings can be generated from persisted data', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const cyber = await repository.getTeamWorkspace('cybersecurity', 'priya-shah');
+  const started = await repository.startMeeting('cybersecurity', cyber.meetings[0].id, 'priya-shah', cyber.meetings[0].version);
+  const closed = await repository.closeMeeting('cybersecurity', started.id, 'Security ownership was clarified.', 8, 'priya-shah', started.version);
+  const job = await repository.getMeetingSummaryJob('cybersecurity', closed.id, 'priya-shah');
+  await repository.completeMeetingSummary(job!.id, 'failed', undefined, 'Worker timeout.', 1);
+  const failed = await repository.getMeeting('cybersecurity', closed.id, 'priya-shah');
+  assert.equal(failed.aiSummaryStatus, 'failed');
+  await rejectsWithCode(repository.requestMeetingSummary('cybersecurity', closed.id, 'ava-khan', failed.version), 'FORBIDDEN');
+  const retried = await repository.requestMeetingSummary('cybersecurity', closed.id, 'priya-shah', failed.version);
+  const retriedJob = await repository.getMeetingSummaryJob('cybersecurity', closed.id, 'priya-shah');
+  assert.equal(retried.aiSummaryStatus, 'queued');
+  assert.deepEqual({ source: retriedJob?.source, attempt: retriedJob?.attempt, status: retriedJob?.status }, { source: 'close', attempt: 2, status: 'queued' });
+
+  const legacyRepository = new MemoryWorkspaceRepository();
+  const legacyWorkspace = await legacyRepository.getTeamWorkspace('projects', 'marcus-lee');
+  const legacyStarted = await legacyRepository.startMeeting('projects', legacyWorkspace.meetings[0].id, 'marcus-lee', legacyWorkspace.meetings[0].version);
+  const legacyClosed = await legacyRepository.closeMeeting('projects', legacyStarted.id, 'Legacy record retained for review.', 7, 'marcus-lee', legacyStarted.version);
+  const legacyState = legacyRepository as unknown as { meetings: Array<{ id: string; aiSummaryStatus?: string; aiSummary?: unknown; aiSummaryRequestedAt?: string; aiSummarySource?: string; aiSummaryJobId?: string }>; summaryJobs: unknown[] };
+  const legacyMeeting = legacyState.meetings.find((meeting) => meeting.id === legacyClosed.id)!;
+  Object.assign(legacyMeeting, { aiSummaryStatus: undefined, aiSummary: undefined, aiSummaryRequestedAt: undefined, aiSummarySource: undefined, aiSummaryJobId: undefined });
+  legacyState.summaryJobs.length = 0;
+  const generatedLegacy = await legacyRepository.requestMeetingSummary('projects', legacyClosed.id, 'marcus-lee', legacyClosed.version);
+  const legacyJob = await legacyRepository.getMeetingSummaryJob('projects', legacyClosed.id, 'marcus-lee');
+  assert.equal(generatedLegacy.aiSummarySource, 'legacy');
+  assert.equal(legacyJob?.source, 'legacy');
+  assert.equal(legacyJob?.contextSnapshot.recap, legacyClosed.recap);
 });

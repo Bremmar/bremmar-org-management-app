@@ -57,18 +57,41 @@ the meeting’s `weekStartDate`, while the Scorecard screen owns weekly entry an
 history. Teams with the Scorecard section disabled have no Scorecard navigation
 or L10 Scorecard content until an administrator enables it.
 
-## Meeting cadence and rescheduling
+## Meeting history, cadence, and AI recap
 
 Team configuration stores `meetingCadence` as `weekly` or `monthly`. Monthly
 recurrence preserves the selected day of month and clamps month-end meetings
-to the last valid day. Every meeting occurrence stores its `scheduledDate` and
-`scheduledTime`. Team editors can update the current open occurrence through:
+to the last valid day. Four upcoming occurrences are kept for every
+operational team. Every occurrence stores its `scheduledDate`, `scheduledTime`,
+and nominal `recurrenceDate`; a one-off move changes only the selected open
+occurrence. Team editors can update it through:
 
 - `PATCH /api/teams/{teamId}/meetings/{meetingId}`
+- `POST /api/teams/{teamId}/meetings/{meetingId}/skip`
+- `POST /api/teams/{teamId}/meetings/{meetingId}/start`
 
-The schedule update is version-checked with `If-Match`, records an immutable
-meeting audit event, and leaves the team’s future cadence unchanged. Closed
-meeting records cannot be rescheduled.
+Start writes an immutable server UTC timestamp. Skip requires a public holiday,
+annual leave, or other reason, keeps the occurrence in history, records the
+actor/time, and leaves the cadence unchanged. Schedule, start, and skip actions
+are version-checked and limited to editors of the meeting’s own team; parent
+TeamLeads and Viewers can review descendant meetings but remain read-only.
+
+`GET /api/meetings/review` powers Past meetings. It accepts grouped `filter`
+values or precise `status` values alongside team, date, and cursor filters. It
+derives Missed (the
+scheduled slot passed without a start) and Overdue (an open meeting exceeded
+the configured agenda duration) at read time. `GET
+/api/teams/{teamId}/meetings/{meetingId}` returns the full read-only meeting
+record for detail review.
+
+Closing stores the manual recap, action summary, and a same-team immutable
+context snapshot in a `meetingSummaryJob`, then queues the existing AI Function.
+The post-Conclude recap shows queued/generating/ready/failed states and stores
+structured Executive summary, Decisions, Commitments, Risks, and Next focus
+output on the meeting. Failed jobs can be retried by a direct team editor;
+legacy closed meetings show Not generated and can be requested once. Core API
+worker requests and callbacks use HMAC signatures with timestamp and attempt
+checks to prevent replayed results.
 
 Changing an incomplete To-Do’s due date to a later date automatically reopens it,
 increments its rollover count, synchronizes a linked Rock Task, and creates the
@@ -125,7 +148,10 @@ access grants, and grant audit events. All workspace records are stored only in
 their selected Cosmos database. Supply the secure `environmentCookieSecret`
 parameter, configure `COSMOS_CONNECTION_STRING`, `AZURE_STORAGE_CONNECTION_STRING`,
 and `AZURE_STORAGE_TABLE_NAME` for a Static Web Apps managed API when
-applicable, and run
+applicable. When enabling the existing AI Function, also configure
+`AI_WORKER_URL`, `AI_WORKER_SHARED_SECRET`, and `AI_CALLBACK_URL`; keep the
+shared secret in secure deployment settings and configure the same secret on
+the worker. Run
 `npm run bootstrap:environments --workspace @eos/api` after deployment with the
 initial Entra object IDs. Bootstrap initializes Live with the organization
 configuration and an empty initial Leadership L10 shell, seeds Test from the
