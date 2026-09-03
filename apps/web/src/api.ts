@@ -1063,12 +1063,12 @@ export class HttpWorkspaceApi implements WorkspaceApi {
   }
 
   async getEnvironmentAccess(): Promise<EnvironmentAccess[]> {
-    const response = await this.request<{ access: EnvironmentAccess[] }>('/admin/environment-access');
+    const response = await this.request<{ access: EnvironmentAccess[] }>('/platform-admin/environment-access');
     return response.access;
   }
 
   async updateEnvironmentAccess(userId: string, testAllowed: boolean): Promise<EnvironmentAccess[]> {
-    await this.request(`/admin/environment-access/${encodeURIComponent(userId)}`, 'PATCH', { testAllowed });
+    await this.request(`/platform-admin/environment-access/${encodeURIComponent(userId)}`, 'PATCH', { testAllowed });
     return this.getEnvironmentAccess();
   }
 
@@ -1118,11 +1118,11 @@ export class HttpWorkspaceApi implements WorkspaceApi {
   async createIssueFromMessage(messageId: string, input: Pick<Issue, 'title' | 'detail' | 'category' | 'priority' | 'horizon' | 'ownerId'>) { return this.mutate(`/messages/${messageId}/issue`, 'POST', input); }
   async markNotificationRead(notificationId: string) { return this.mutate(`/notifications/${notificationId}/read`, 'PATCH'); }
   async updateProfile(input: Pick<Partial<User>, 'name' | 'email' | 'avatarDataUrl'>) { return this.mutate('/profile', 'PATCH', input); }
-  async createTeam(input: Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials'> & { meetingSections?: MeetingSectionConfig[]; escalationUserIds?: string[] }) { return this.mutate('/admin/teams', 'POST', input); }
-  async updateTeam(teamId: string, input: Partial<Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds'>>) { return this.mutate(`/admin/teams/${teamId}`, 'PATCH', input); }
-  async createUser(input: Pick<User, 'name' | 'email' | 'accent'> & { platformAdmin?: boolean }) { return this.mutate('/admin/users', 'POST', input); }
-  async upsertMembership(input: Pick<TeamMembership, 'userId' | 'teamId' | 'role'>) { return this.mutate('/admin/memberships', 'PUT', input); }
-  async updateAgeSettings(settings: IssueAgeSettings) { return this.mutate('/admin/settings/aging', 'PUT', settings); }
+  async createTeam(input: Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials'> & { meetingSections?: MeetingSectionConfig[]; escalationUserIds?: string[] }) { return this.mutate('/platform-admin/teams', 'POST', input); }
+  async updateTeam(teamId: string, input: Partial<Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds'>>) { return this.mutate(`/platform-admin/teams/${teamId}`, 'PATCH', input); }
+  async createUser(input: Pick<User, 'name' | 'email' | 'accent'> & { platformAdmin?: boolean }) { return this.mutate('/platform-admin/users', 'POST', input); }
+  async upsertMembership(input: Pick<TeamMembership, 'userId' | 'teamId' | 'role'>) { return this.mutate('/platform-admin/memberships', 'PUT', input); }
+  async updateAgeSettings(settings: IssueAgeSettings) { return this.mutate('/platform-admin/settings/aging', 'PUT', settings); }
   async closeMeeting(teamId: string, recap: string, rating: number) {
     const workspace = await this.getWorkspace();
     const meeting = workspace.meetings.find((candidate) => candidate.teamId === teamId && candidate.status !== 'closed');

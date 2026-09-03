@@ -157,11 +157,13 @@ async function updateEnvironmentAccessHandler(request: HttpRequest, _context: In
   }
 }
 
-app.http('adminSnapshot', { methods: ['GET'], authLevel: 'anonymous', route: 'admin', handler: adminSnapshotHandler });
-app.http('adminCreateTeam', { methods: ['POST'], authLevel: 'anonymous', route: 'admin/teams', handler: createTeamHandler });
-app.http('adminUpdateTeam', { methods: ['PATCH'], authLevel: 'anonymous', route: 'admin/teams/{teamId}', handler: updateTeamHandler });
-app.http('adminCreateUser', { methods: ['POST'], authLevel: 'anonymous', route: 'admin/users', handler: createUserHandler });
-app.http('adminMembership', { methods: ['PUT'], authLevel: 'anonymous', route: 'admin/memberships', handler: upsertMembershipHandler });
-app.http('adminAgingSettings', { methods: ['PUT'], authLevel: 'anonymous', route: 'admin/settings/aging', handler: updateAgeSettingsHandler });
-app.http('adminEnvironmentAccess', { methods: ['GET'], authLevel: 'anonymous', route: 'admin/environment-access', handler: environmentAccessHandler });
-app.http('adminUpdateEnvironmentAccess', { methods: ['PATCH'], authLevel: 'anonymous', route: 'admin/environment-access/{userId}', handler: updateEnvironmentAccessHandler });
+// Azure Functions reserves /admin/* for its host-management API. Keep the
+// application administration surface under a distinct first path segment.
+app.http('adminSnapshot', { methods: ['GET'], authLevel: 'anonymous', route: 'platform-admin', handler: adminSnapshotHandler });
+app.http('adminCreateTeam', { methods: ['POST'], authLevel: 'anonymous', route: 'platform-admin/teams', handler: createTeamHandler });
+app.http('adminUpdateTeam', { methods: ['PATCH'], authLevel: 'anonymous', route: 'platform-admin/teams/{teamId}', handler: updateTeamHandler });
+app.http('adminCreateUser', { methods: ['POST'], authLevel: 'anonymous', route: 'platform-admin/users', handler: createUserHandler });
+app.http('adminMembership', { methods: ['PUT'], authLevel: 'anonymous', route: 'platform-admin/memberships', handler: upsertMembershipHandler });
+app.http('adminAgingSettings', { methods: ['PUT'], authLevel: 'anonymous', route: 'platform-admin/settings/aging', handler: updateAgeSettingsHandler });
+app.http('adminEnvironmentAccess', { methods: ['GET'], authLevel: 'anonymous', route: 'platform-admin/environment-access', handler: environmentAccessHandler });
+app.http('adminUpdateEnvironmentAccess', { methods: ['PATCH'], authLevel: 'anonymous', route: 'platform-admin/environment-access/{userId}', handler: updateEnvironmentAccessHandler });

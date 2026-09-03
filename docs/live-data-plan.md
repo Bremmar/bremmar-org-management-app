@@ -127,7 +127,7 @@ The Functions API exposes typed server contracts for:
   environment cookie.
 - `GET /api/workspace` — load the environment-scoped workspace snapshot used by
   the authenticated shell.
-- `GET/PATCH /api/admin/environment-access...` — OrgAdmin-managed Test access
+- `GET/PATCH /api/platform-admin/environment-access...` — OrgAdmin-managed Test access
   grants and immutable grant audit records; these routes are available from the
   Live Admin center only.
 - `GET /api/teams/{teamId}/workspace` and the legacy dashboard route.

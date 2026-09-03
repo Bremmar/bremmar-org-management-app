@@ -46,7 +46,7 @@ jobs:
           npm install --omit=dev --ignore-scripts --prefix apps/api/dist --no-package-lock
           test -f apps/api/dist/host.json
           test "$(node -p "require('./apps/api/dist/package.json').main")" = "index.js"
-          grep -q "route: 'admin/users'" apps/api/dist/functions/admin.js
+          grep -q "route: 'platform-admin/users'" apps/api/dist/functions/admin.js
 
       - name: Get ID token
         uses: actions/github-script@v9
