@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { HttpRequest } from '@azure/functions';
-import { clearIdentityResolutionCache, type AuthFetch, getClientPrincipal, resolveClientPrincipal, resolveClientPrincipalIdentity, IdentityResolutionError } from './auth.js';
+import { clearIdentityResolutionCache, lookupEntraObjectId, type AuthFetch, getClientPrincipal, resolveClientPrincipal, resolveClientPrincipalIdentity, IdentityResolutionError } from './auth.js';
 
 function requestFor(principal: Record<string, unknown>) {
   const encoded = Buffer.from(JSON.stringify(principal), 'utf8').toString('base64');
@@ -99,6 +99,16 @@ test('Graph identity lookups are cached briefly for the same SWA principal', asy
     await resolveClientPrincipalIdentity(principal, { fetch, now: () => 1_000 });
     await resolveClientPrincipalIdentity(principal, { fetch, now: () => 1_001 });
     assert.equal(callCount, 2);
+  });
+});
+
+test('directory profile linking resolves an email to the normalized Entra object ID', async () => {
+  await withEnvironment(graphEnvironment, async () => {
+    const fetch: AuthFetch = async (url) => {
+      if (url.includes('/oauth2/v2.0/token')) return { ok: true, status: 200, json: async () => ({ access_token: 'graph-access-token' }) };
+      return { ok: true, status: 200, json: async () => ({ value: [{ id: 'CA795A1D-6402-4335-9141-D40E7F078812' }] }) };
+    };
+    assert.equal(await lookupEntraObjectId('new-user@example.com', { fetch }), 'ca795a1d-6402-4335-9141-d40e7f078812');
   });
 });
 

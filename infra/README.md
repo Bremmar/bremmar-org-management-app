@@ -11,8 +11,10 @@
 - An `EnvironmentAccess` Azure Storage Table for environment definitions, Test
   access grants, and immutable access audit events.
 
-The default GitHub Actions workflow deploys `apps/api` as the Static Web Apps
-managed Functions API using `api_location`. The separate Function App in this
+The default GitHub Actions workflow builds and deploys `apps/api/dist` as the
+Static Web Apps managed Functions API using `api_location` with
+`skip_api_build: true`. The prepared artifact contains `host.json`, a runtime
+`package.json`, and the compiled Functions entrypoint at its root. The separate Function App in this
 template is an alternative for environments that need a dedicated host; it
 uses connection-string access to Cosmos DB. If it is used, set the Static Web
 Apps workflow's `api_location` to an empty value and link the existing
@@ -42,6 +44,10 @@ consent. For the alternative Function App, grant the same permission to its
 system-assigned managed identity instead; the API will use the platform-managed
 identity endpoint automatically. Graph is used only for identity resolution,
 not workspace synchronization.
+
+Admin user creation also uses this application permission: the submitted
+email must match an Entra user's `userPrincipalName` or `mail`, and the
+returned object ID becomes the profile's stable key.
 
 After deployment, run the API environment bootstrap with the initial Entra
 object IDs. Bootstrap is additive and idempotent: it creates control metadata

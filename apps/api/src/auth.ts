@@ -278,6 +278,26 @@ export function clearIdentityResolutionCache() {
   identityCache.clear();
 }
 
+/**
+ * Resolve a directory user's Entra object ID from their sign-in address.
+ *
+ * This is deliberately separate from principal resolution because an OrgAdmin
+ * may be creating a profile for another directory user. The caller must use
+ * application Graph credentials (rather than trusting a browser-supplied ID)
+ * when it needs to link a new profile.
+ */
+export async function lookupEntraObjectId(userDetails: string, options: IdentityResolutionOptions = {}): Promise<string | undefined> {
+  const details = nonEmptyString(userDetails);
+  if (!details) return undefined;
+  const fetchImpl = options.fetch ?? defaultFetch;
+  const accessToken = options.accessToken;
+  const config = accessToken ? null : graphCredentialConfig();
+  if (!accessToken && !config) {
+    throw new IdentityResolutionError('Entra directory lookup is not configured. Configure Graph credentials.');
+  }
+  return graphUserObjectId(details, accessToken ?? await appAccessToken(config!, fetchImpl), fetchImpl);
+}
+
 export async function resolveClientPrincipalIdentity(principal: ClientPrincipal, options: IdentityResolutionOptions = {}): Promise<ClientPrincipal> {
   if (!isEntraProvider(principal.identityProvider)) return principal;
   const directObjectId = principal.entraObjectId ?? normalizeObjectId(principal.userDetails);
@@ -290,12 +310,7 @@ export async function resolveClientPrincipalIdentity(principal: ClientPrincipal,
 
   const fetchImpl = options.fetch ?? defaultFetch;
   const accessToken = options.accessToken;
-  const config = accessToken ? null : graphCredentialConfig();
-  if (!accessToken && !config) {
-    throw new IdentityResolutionError('Entra identity lookup is not configured. Configure Graph credentials or provide the Entra object ID as an oid claim.');
-  }
-
-  const objectId = await graphUserObjectId(principal.userDetails, accessToken ?? await appAccessToken(config!, fetchImpl), fetchImpl);
+  const objectId = await lookupEntraObjectId(principal.userDetails, { ...options, fetch: fetchImpl, accessToken });
   // An unknown directory user is intentionally left unresolved. The caller
   // will return the normal local-profile-not-found response, while Graph and
   // credential failures remain explicit availability errors.

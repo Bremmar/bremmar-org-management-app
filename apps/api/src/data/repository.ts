@@ -1,5 +1,5 @@
 import { CosmosClient, type Container } from '@azure/cosmos';
-import type { ClientPrincipal } from '../auth.js';
+import { normalizeObjectId, type ClientPrincipal } from '../auth.js';
 import {
   canAcceptTransfer,
   canAdministerPlatform,
@@ -55,6 +55,15 @@ export interface AdminSnapshot {
   etag: string;
 }
 
+export interface CreateUserInput {
+  name: string;
+  email: string;
+  accent: string;
+  platformAdmin?: boolean;
+  /** Normalized Entra directory object ID for a deployed identity-linked user. */
+  identityId?: string;
+}
+
 export interface WorkspaceRepository {
   readonly environmentId: EnvironmentId;
   getTeamMembership(teamId: string, userId: string): Promise<TeamMembership | null>;
@@ -98,7 +107,7 @@ export interface WorkspaceRepository {
   getAdminSnapshot(actorId: string): Promise<AdminSnapshot>;
   createTeam(input: Omit<TeamRecord, keyof WorkspaceRecord | 'teamId' | 'active' | 'memberCount'> & { teamId?: string }, actorId: string): Promise<TeamRecord>;
   updateTeam(teamId: string, input: Partial<Pick<TeamRecord, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds' | 'active'>>, actorId: string, expectedVersion?: number): Promise<TeamRecord>;
-  createUser(input: { name: string; email: string; accent: string; platformAdmin?: boolean }, actorId: string): Promise<UserProfile>;
+  createUser(input: CreateUserInput, actorId: string): Promise<UserProfile>;
   upsertMembership(input: { userId: string; teamId: string; role: TeamMembership['role'] }, actorId: string): Promise<TeamMembership>;
   updateAgeSettings(settings: IssueAgeSettings, actorId: string, expectedVersion?: number): Promise<IssueAgeSettings>;
   updateUserProfile(input: { name?: string; email?: string; avatarDataUrl?: string | null }, actorId: string, expectedVersion?: number): Promise<UserProfile>;
@@ -1268,16 +1277,22 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     return clone(team);
   }
 
-  async createUser(input: { name: string; email: string; accent: string; platformAdmin?: boolean }, actorId: string) {
+  async createUser(input: CreateUserInput, actorId: string) {
     this.requireAdmin(actorId);
     assertText(input.name, 'Name');
     assertText(input.email, 'Email');
     if (this.users.some((user) => user.email.toLowerCase() === input.email.toLowerCase())) throw new RepositoryError('CONFLICT', 'A user with that email already exists.');
-    let userId = idFor('user', input.email.split('@')[0]);
-    if (this.users.some((user) => user.id === userId)) userId = `${userId}-${Date.now()}`;
+    const requestedIdentityId = input.identityId?.trim();
+    const identityId = requestedIdentityId ? normalizeObjectId(requestedIdentityId) : undefined;
+    if (requestedIdentityId && !identityId) throw new RepositoryError('VALIDATION', 'identityId must be a valid Entra object ID.');
+    let userId = identityId ?? idFor('user', input.email.split('@')[0]);
+    if (this.users.some((user) => user.id === userId)) {
+      if (identityId) throw new RepositoryError('CONFLICT', 'A user with that Entra identity already exists.');
+      userId = `${userId}-${Date.now()}`;
+    }
     const user = makeUser({ id: userId, name: input.name, email: input.email, accent: input.accent, platformAdmin: input.platformAdmin });
     this.users.push(user);
-    this.recordAudit(actorId, 'Created local user', user.id, `Created the local profile for ${user.name}.`, 'admin');
+    this.recordAudit(actorId, identityId ? 'Created Entra-linked user' : 'Created local user', user.id, `Created the ${identityId ? 'Entra-linked' : 'local'} profile for ${user.name}.`, 'admin');
     return clone(user);
   }
 
@@ -1705,7 +1720,7 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
   }
   async createTeam(input: Omit<TeamRecord, keyof WorkspaceRecord | 'teamId' | 'active' | 'memberCount'> & { teamId?: string }, actorId: string) { return this.withMutation(actorId, () => super.createTeam(input, actorId)); }
   async updateTeam(teamId: string, input: Partial<Pick<TeamRecord, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds' | 'active'>>, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateTeam(teamId, input, actorId, expectedVersion)); }
-  async createUser(input: { name: string; email: string; accent: string; platformAdmin?: boolean }, actorId: string) { return this.withMutation(actorId, () => super.createUser(input, actorId)); }
+  async createUser(input: CreateUserInput, actorId: string) { return this.withMutation(actorId, () => super.createUser(input, actorId)); }
   async upsertMembership(input: { userId: string; teamId: string; role: TeamMembership['role'] }, actorId: string) { return this.withMutation(actorId, () => super.upsertMembership(input, actorId)); }
   async updateAgeSettings(settings: IssueAgeSettings, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateAgeSettings(settings, actorId, expectedVersion)); }
   async updateUserProfile(input: { name?: string; email?: string; avatarDataUrl?: string | null }, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateUserProfile(input, actorId, expectedVersion)); }

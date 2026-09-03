@@ -37,6 +37,17 @@ jobs:
           VITE_LOCAL_POC_MODE: 'false'
         run: npm run build:web
 
+      - name: Build the Functions API
+        run: npm run build:api
+
+      - name: Prepare the Static Web Apps API artifact
+        run: |
+          npm run prepare:swa --workspace @eos/api
+          npm install --omit=dev --ignore-scripts --prefix apps/api/dist --no-package-lock
+          test -f apps/api/dist/host.json
+          test "$(node -p "require('./apps/api/dist/package.json').main")" = "index.js"
+          grep -q "route: 'admin/users'" apps/api/dist/functions/admin.js
+
       - name: Get ID token
         uses: actions/github-script@v9
         id: idtoken
@@ -54,9 +65,10 @@ jobs:
           app_location: apps/web/dist
           output_location: ''
           skip_app_build: true
-          # The Functions v4 API is built by the Static Web Apps task and exposed at /api.
-          api_location: apps/api
-          api_build_command: npm run build
+          # Deploy the complete Functions v4 output. The artifact has host.json
+          # and package.json at its root, with main pointing to index.js.
+          api_location: apps/api/dist
+          skip_api_build: true
           github_id_token: ${{ steps.idtoken.outputs.result }}
 
   close_pull_request_job:

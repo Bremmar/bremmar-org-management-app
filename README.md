@@ -73,9 +73,11 @@ npm run build
 The deployment workflow expects the app-specific
 `AZURE_STATIC_WEB_APPS_API_TOKEN_VICTORIOUS_MEADOW_02A0D9700` GitHub secret.
 The token binds the deployment to the Victorious Meadow Static Web App. It
-deploys `apps/web` as the static frontend and `apps/api` as the managed Azure
-Functions API under `/api`. The API's `main` field points Azure Functions at
-`dist/index.js` after the TypeScript build.
+deploys `apps/web` as the static frontend and the prepared `apps/api/dist`
+artifact as the managed Azure Functions API under `/api`. The workflow places
+`host.json` and a deployment `package.json` at the artifact root, with `main`
+pointing to the compiled `index.js`, and installs only API runtime dependencies
+before the Static Web Apps upload.
 
 `infra/main.bicep` also contains a separate Bring Your Own Functions deployment
 for environments that require a dedicated Function App. That deployment
@@ -104,6 +106,12 @@ resolves the signed-in Entra username/email through Microsoft Graph and uses the
 returned directory `id` as the application identity key. This is an identity
 lookup only—Bremmar does not synchronize Graph users or groups into workspace
 data.
+
+Creating a user from Admin uses the same Graph credentials to look up the
+submitted email against `userPrincipalName` or `mail`, then stores that
+directory object ID as the new profile's stable key. The email must belong to
+an Entra user in the configured tenant; otherwise the API returns a clear
+directory-not-found response and does not create a local-only profile.
 
 For the managed Static Web Apps API, add these settings to the Static Web App's
 Configuration page (never commit the secret):

@@ -32,6 +32,13 @@ test('PlatformAdmin can administer configuration without receiving work-data acc
   await rejectsWithCode(repository.getCompanyOverview(user.id), 'FORBIDDEN');
 });
 
+test('created directory users use the Entra object ID as their stable application key', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const user = await repository.createUser({ name: 'Directory User', email: 'directory-user@bremmar.com', accent: '#123456', identityId: 'CA795A1D-6402-4335-9141-D40E7F078812' }, 'ava-khan');
+  assert.equal(user.id, 'ca795a1d-6402-4335-9141-d40e7f078812');
+  assert.equal((await repository.getUser(user.id))?.email, 'directory-user@bremmar.com');
+});
+
 test('Issue transfers preserve identity, original age, and first-decision semantics', async () => {
   const repository = new MemoryWorkspaceRepository();
   const before = await repository.getIssue('issue-project-scope', 'marcus-lee');

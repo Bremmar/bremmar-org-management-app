@@ -1,7 +1,9 @@
 import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } from '@azure/functions';
+import { lookupEntraObjectId } from '../auth.js';
 import { expectedVersion, isResponse, repositoryErrorResponse, requestJson, requestScope, responseWithEtag } from './http.js';
 import { DEFAULT_MEETING_SECTIONS } from '../domain.js';
 import type { IssueAgeSettings, MeetingSectionConfig, TeamMembership, TeamNodeType } from '../domain.js';
+import { RepositoryError } from '../data/repository.js';
 import { environmentRepositories } from '../data/services.js';
 
 interface TeamBody {
@@ -65,7 +67,13 @@ async function createUserHandler(request: HttpRequest, _context: InvocationConte
   const { principal, repository } = scope;
   try {
     const body = await requestJson<{ name?: string; email?: string; accent?: string; platformAdmin?: boolean }>(request);
-    const user = await repository.createUser({ name: body.name ?? '', email: body.email ?? '', accent: body.accent ?? '#6787b7', platformAdmin: body.platformAdmin }, principal.userId);
+    const name = body.name?.trim() ?? '';
+    const email = body.email?.trim() ?? '';
+    if (!name || !email) throw new RepositoryError('VALIDATION', 'Name and email are required.');
+    const localPoc = process.env.LOCAL_POC_MODE === 'true' && process.env.COSMOS_ENABLED !== 'true';
+    const identityId = localPoc ? undefined : await lookupEntraObjectId(email);
+    if (!localPoc && !identityId) throw new RepositoryError('NOT_FOUND', 'No Entra user was found for that email address.');
+    const user = await repository.createUser({ name, email, accent: body.accent ?? '#6787b7', platformAdmin: body.platformAdmin, identityId }, principal.userId);
     return responseWithEtag(user, `W/\"${user.version}\"`, 201);
   } catch (error) {
     return repositoryErrorResponse(error);
