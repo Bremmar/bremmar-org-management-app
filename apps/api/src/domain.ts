@@ -38,6 +38,7 @@ export type IssueStatus = 'open' | 'in-ids' | 'solved';
 export type IssueHorizon = 'short-term' | 'long-term';
 export type IssueAssignmentState = 'assigned' | 'pending-transfer' | 'unassigned' | 'redirected';
 export type IssueAgeBand = 'fresh' | 'aging' | 'stale' | 'critical';
+export type IssueMeetingBand = 'neutral' | 'green' | 'yellow' | 'orange' | 'red';
 export type IssueTransferStatus = 'pending' | 'accepted' | 'rejected' | 'cancelled';
 export type NotificationType = 'issue-transfer-requested' | 'issue-transfer-decided' | 'team-message' | 'issue-escalation' | 'system';
 export type MessageStatus = 'unread' | 'read' | 'converted';
@@ -45,6 +46,14 @@ export type ScorecardStatus = 'on-track' | 'off-track';
 export type ScorecardTrend = 'up' | 'down' | 'flat';
 export type EscalationState = 'not-scheduled' | 'scheduled' | 'due' | 'escalated';
 export type MeetingSection = 'segue' | 'scorecard' | 'rock-review' | 'headlines' | 'todo-review' | 'ids' | 'conclude';
+
+export function issueMeetingBand(meetingsPassed: number, status: IssueStatus): IssueMeetingBand {
+  if (status === 'solved' || meetingsPassed <= 0) return 'neutral';
+  if (meetingsPassed >= 4) return 'red';
+  if (meetingsPassed === 3) return 'orange';
+  if (meetingsPassed === 2) return 'yellow';
+  return 'green';
+}
 
 export interface MeetingSectionConfig {
   id: MeetingSection;
@@ -136,6 +145,15 @@ export interface RockTaskRecord extends WorkspaceRecord {
   linkedTodoId?: string;
 }
 
+export interface TodoChecklistItem {
+  id: string;
+  text: string;
+  completed: boolean;
+  supporterId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface TodoRecord extends WorkspaceRecord {
   kind: 'todo';
   teamId: string;
@@ -146,6 +164,8 @@ export interface TodoRecord extends WorkspaceRecord {
   status: TodoStatus;
   origin: string;
   linkedRockTaskId?: string;
+  sourceIssueId?: string;
+  checklist: TodoChecklistItem[];
   carryForwardCount: number;
   flagged: boolean;
   convertedIssueId?: string;
@@ -158,7 +178,6 @@ export interface IssueRecord extends WorkspaceRecord {
   currentTeamId: string | null;
   title: string;
   detail: string;
-  category: string;
   priority: number;
   status: IssueStatus;
   horizon: IssueHorizon;
@@ -173,6 +192,7 @@ export interface IssueRecord extends WorkspaceRecord {
   ageInDays: number;
   ageBand: IssueAgeBand;
   meetingsPassed: number;
+  meetingBand: IssueMeetingBand;
   escalationState: EscalationState;
   escalationDueAt?: string;
   escalationLevel: number;
@@ -313,7 +333,7 @@ export interface DashboardSummary {
   teamId: string;
   rocks: { total: number; onTrack: number; offTrack: number; complete: number };
   todos: { total: number; done: number; open: number; notDone: number };
-  issues: { total: number; open: number; inIds: number; solved: number; aging: number; stale: number; critical: number };
+  issues: { total: number; open: number; inIds: number; solved: number; neutral: number; green: number; yellow: number; orange: number; red: number };
   metrics: { total: number; onTrack: number; offTrack: number };
 }
 
@@ -372,7 +392,7 @@ export interface TeamRollup {
   direct: {
     rocks: { total: number; onTrack: number; offTrack: number; complete: number };
     todos: { total: number; open: number; done: number; notDone: number };
-    issues: { total: number; open: number; inIds: number; solved: number; aging: number; stale: number; critical: number };
+    issues: { total: number; open: number; inIds: number; solved: number; neutral: number; green: number; yellow: number; orange: number; red: number };
   };
   descendants: { rocks: number; todos: number; issues: number };
 }

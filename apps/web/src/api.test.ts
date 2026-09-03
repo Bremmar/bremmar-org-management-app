@@ -3,6 +3,8 @@ import { ageBandFor, HttpWorkspaceApi, LocalWorkspaceApi } from './api';
 import { initialWorkspace } from './data';
 import { defaultMeetingSections } from './types';
 import type { TeamMembership, Workspace } from './types';
+import { sanitizeTodoNotes } from './richText';
+import { pendingTeamMessagesFor } from './App';
 
 describe('LocalWorkspaceApi', () => {
   it('starts in Live, hides Test without a grant, and isolates granted Test changes', async () => {
@@ -15,7 +17,7 @@ describe('LocalWorkspaceApi', () => {
     await api.updateEnvironmentAccess('ava-khan', true);
     expect((await api.getEnvironmentSession()).canSwitchToTest).toBe(true);
     await api.selectEnvironment('test');
-    const testWorkspace = await api.addIssue({ title: 'Test-only issue', detail: 'This belongs only to the Test database.', category: 'Testing', teamId: 'leadership', raisedById: 'ava-khan' });
+    const testWorkspace = await api.addIssue({ title: 'Test-only issue', detail: 'This belongs only to the Test database.', teamId: 'leadership', raisedById: 'ava-khan' });
     expect(testWorkspace.environment).toBe('test');
     expect(testWorkspace.issues.some((issue) => issue.title === 'Test-only issue')).toBe(true);
 
@@ -49,8 +51,8 @@ describe('LocalWorkspaceApi', () => {
 
   it('solving an Issue creates one accountable follow-up To-Do', async () => {
     const api = new LocalWorkspaceApi();
-    const first = await api.solveIssue('issue-handoffs');
-    const second = await api.solveIssue('issue-handoffs');
+    const first = await api.solveIssue('issue-handoffs', { createFollowUpTodo: true });
+    const second = await api.solveIssue('issue-handoffs', { createFollowUpTodo: true });
 
     expect(first.issues.find((issue) => issue.id === 'issue-handoffs')?.status).toBe('solved');
     expect(first.todos.filter((todo) => todo.id === 'todo-follow-up-issue-handoffs')).toHaveLength(1);
@@ -62,7 +64,6 @@ describe('LocalWorkspaceApi', () => {
     const workspace = await api.addIssue({
       title: 'The weekly agenda needs one owner',
       detail: 'Capture the decision before the meeting starts.',
-      category: 'Process',
       teamId: 'leadership',
       raisedById: 'ava-khan',
     });
@@ -237,7 +238,8 @@ describe('LocalWorkspaceApi', () => {
     const todo = workspace.todos.find((item) => item.id === 'todo-handoff')!;
     const issue = workspace.issues.find((item) => item.sourceTodoId === todo.id);
     expect(todo).toMatchObject({ carryForwardCount: 4, flagged: true, convertedIssueId: issue?.id });
-    expect(issue).toMatchObject({ category: 'To-Do rollover', horizon: 'short-term', sourceTodoId: todo.id });
+    expect(issue).toMatchObject({ horizon: 'short-term', sourceTodoId: todo.id });
+    expect(issue).not.toHaveProperty('category');
   });
 
   it('creates, edits, and upserts team scorecard records with weekly trends', async () => {
@@ -281,7 +283,7 @@ describe('LocalWorkspaceApi', () => {
     workspace = await api.markMessageRead('message-projects-kickoff');
     const message = workspace.messages.find((item) => item.id === 'message-projects-kickoff')!;
     expect(message.status).toBe('read');
-    workspace = await api.createIssueFromMessage(message.id, { title: 'Security review before kickoff', detail: 'Leadership will confirm the receiving team before Friday.', category: 'Cross-team', priority: 2, horizon: 'short-term', ownerId: 'ava-khan' });
+    workspace = await api.createIssueFromMessage(message.id, { title: 'Security review before kickoff', detail: 'Leadership will confirm the receiving team before Friday.', priority: 2, horizon: 'short-term', ownerId: 'ava-khan' });
     const convertedMessage = workspace.messages.find((item) => item.id === message.id)!;
     const created = workspace.issues.find((issue) => issue.id === convertedMessage.convertedIssueId);
     expect(created).toMatchObject({ title: 'Security review before kickoff', detail: 'Leadership will confirm the receiving team before Friday.', teamId: 'leadership' });
@@ -306,7 +308,7 @@ describe('LocalWorkspaceApi', () => {
     expect(recap).toContain('publish the owner matrix');
   });
 
-  it('schedules an Issue for escalation after its third meeting and preserves team L10 configuration', async () => {
+  it('marks an Issue orange after its third meeting and preserves team L10 configuration', async () => {
     const seed = structuredClone(initialWorkspace);
     seed.issues.find((issue) => issue.id === 'issue-handoffs')!.meetingsPassed = 2;
     seed.meetings.find((meeting) => meeting.id === 'meeting-leadership-2026-08-31')!.idsIssueIds = ['issue-handoffs'];
@@ -316,8 +318,9 @@ describe('LocalWorkspaceApi', () => {
     workspace = await api.closeMeeting('leadership', 'Issue remains open after the third L10.', 8);
     const issue = workspace.issues.find((item) => item.id === 'issue-handoffs')!;
     expect(issue.meetingsPassed).toBe(3);
-    expect(issue.escalationState).toBe('scheduled');
-    expect(issue.escalationDueAt).toBeDefined();
+    expect(issue.meetingBand).toBe('orange');
+    expect(issue.escalationState).toBe('not-scheduled');
+    expect(issue.escalationDueAt).toBeUndefined();
   });
 
   it('creates the next L10 and carries unresolved IDS Issues forward', async () => {
@@ -330,9 +333,15 @@ describe('LocalWorkspaceApi', () => {
 
     const issue = workspace.issues.find((item) => item.id === 'issue-handoffs')!;
     expect(issue.meetingsPassed).toBe(3);
-    expect(issue.escalationState).toBe('scheduled');
+    expect(issue.meetingBand).toBe('orange');
+    expect(issue.escalationState).toBe('not-scheduled');
     expect(workspace.meetings.filter((meeting) => meeting.teamId === 'leadership')).toHaveLength(4);
     expect(workspace.meetings.filter((meeting) => meeting.teamId === 'leadership' && meeting.status !== 'closed')[0]?.idsIssueIds).toContain(issue.id);
+
+    workspace = await api.closeMeeting('leadership', 'Fourth meeting escalates the Issue.', 8);
+    const escalated = workspace.issues.find((item) => item.id === 'issue-handoffs')!;
+    expect(escalated).toMatchObject({ meetingsPassed: 4, meetingBand: 'red', escalationState: 'escalated' });
+    expect(workspace.notifications.filter((notification) => notification.type === 'issue-escalation' && notification.issueId === issue.id)).toHaveLength(1);
   });
 
   it('saves meeting notes, converts off-track work once, and keeps IDS order separate from priority', async () => {
@@ -373,11 +382,119 @@ describe('LocalWorkspaceApi', () => {
     const responseIssue = { ...cached.issues[0], id: 'http-created-issue', title: 'Created without a reload', kind: 'issue' };
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify(responseIssue), { status: 201, headers: { 'Content-Type': 'application/json', ETag: 'W/"1"' } }));
 
-    const workspace = await api.addIssue({ title: responseIssue.title, detail: responseIssue.detail, category: responseIssue.category, teamId: responseIssue.teamId, raisedById: cached.currentUser.id });
+    const workspace = await api.addIssue({ title: responseIssue.title, detail: responseIssue.detail, teamId: responseIssue.teamId, raisedById: cached.currentUser.id });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][0]).toBe('/api/teams/leadership/issues');
     expect(workspace.issues.some((issue) => issue.id === responseIssue.id && issue.title === responseIssue.title)).toBe(true);
+    fetchMock.mockRestore();
+  });
+
+  it('supports embedded checklists with default owners, compact reassignment, and independent completion', async () => {
+    const seed = structuredClone(initialWorkspace);
+    seed.currentUser = seed.users.find((user) => user.id === 'marcus-lee')!;
+    const api = new LocalWorkspaceApi(seed);
+    let workspace = await api.getWorkspace();
+    const before = workspace.todos.find((todo) => todo.id === 'todo-project-kickoff')!;
+    workspace = await api.addTodoChecklistItem(before.id, 'Confirm the customer handoff', undefined, before.version);
+    const added = workspace.todos.find((todo) => todo.id === before.id)!;
+    expect(added.checklist[0]).toMatchObject({ text: 'Confirm the customer handoff', completed: false, supporterId: 'maya-green' });
+    expect(added.version).toBe(before.version + 1);
+
+    const item = added.checklist[0];
+    workspace = await api.updateTodoChecklistItem(added.id, item.id, { completed: true }, added.version);
+    const completed = workspace.todos.find((todo) => todo.id === added.id)!;
+    expect(completed.checklist[0].completed).toBe(true);
+    expect(completed.status).toBe(before.status);
+    await expect(api.updateTodoChecklistItem(added.id, item.id, { supporterId: 'priya-shah' }, completed.version)).rejects.toMatchObject({ code: 'VALIDATION' });
+    await expect(api.deleteTodoChecklistItem(added.id, item.id, completed.version - 1)).rejects.toMatchObject({ code: 'CONFLICT' });
+    workspace = await api.deleteTodoChecklistItem(added.id, item.id, completed.version);
+    expect(workspace.todos.find((todo) => todo.id === added.id)?.checklist).toHaveLength(0);
+  });
+
+  it('sanitizes rich To-Do notes and converts legacy plain text safely', async () => {
+    const api = new LocalWorkspaceApi();
+    let workspace = await api.getWorkspace();
+    const todo = workspace.todos.find((item) => item.id === 'todo-handoff')!;
+    workspace = await api.updateTodo(todo.id, { notes: '<p><strong>Keep</strong></p><script>alert(1)</script><a href="javascript:bad">unsafe</a>' }, todo.version);
+    const rich = workspace.todos.find((item) => item.id === todo.id)!;
+    expect(rich.notes).toContain('<strong>Keep</strong>');
+    expect(rich.notes).not.toMatch(/script|javascript|<a/i);
+    workspace = await api.updateTodo(todo.id, { notes: 'First line\nSecond line' }, rich.version);
+    expect(workspace.todos.find((item) => item.id === todo.id)?.notes).toMatch(/^<p>First line<br(?:\s*\/)?>Second line<\/p>$/);
+    expect(sanitizeTodoNotes('<p><em>Allowed</em></p><img src=x onerror=alert(1)>')).not.toMatch(/img|onerror/i);
+  });
+
+  it('records either Issue resolution choice and links created follow-up To-Dos back to the Issue', async () => {
+    const api = new LocalWorkspaceApi();
+    let workspace = await api.getWorkspace();
+    const issue = workspace.issues.find((item) => item.id === 'issue-handoffs')!;
+    workspace = await api.solveIssue(issue.id, { createFollowUpTodo: false, resolutionNote: 'Resolved in the customer review.' }, issue.version);
+    const solved = workspace.issues.find((item) => item.id === issue.id)!;
+    expect(solved.idsNote).toContain('Follow-up To-Do not created');
+    expect(solved.idsNote).toContain('Resolved in the customer review');
+    workspace = await api.solveIssue(issue.id, { createFollowUpTodo: true, resolutionNote: 'Should not append twice.' }, issue.version);
+    const repeated = workspace.issues.find((item) => item.id === issue.id)!;
+    expect(repeated.version).toBe(solved.version);
+    expect(repeated.idsNote).not.toContain('Should not append twice');
+
+    const seed = structuredClone(initialWorkspace);
+    seed.currentUser = seed.users.find((user) => user.id === 'priya-shah')!;
+    const supporterApi = new LocalWorkspaceApi(seed);
+    workspace = await supporterApi.getWorkspace();
+    const source = workspace.issues.find((item) => item.id === 'issue-cyber-owners')!;
+    workspace = await supporterApi.solveIssue(source.id, { createFollowUpTodo: true }, source.version);
+    const followUp = workspace.todos.find((todo) => todo.sourceIssueId === source.id);
+    expect(followUp).toMatchObject({ ownerId: 'priya-shah', sourceIssueId: source.id });
+  });
+
+  it('shows read and unread incoming messages at Segue while excluding converted and outgoing messages', async () => {
+    const workspace = structuredClone(initialWorkspace);
+    const incomingRead = { ...workspace.messages[0], id: 'message-read', status: 'read' as const };
+    const converted = { ...workspace.messages[0], id: 'message-converted', status: 'converted' as const, convertedIssueId: 'issue-handoffs' };
+    const outgoing = { ...workspace.messages[0], id: 'message-outgoing', fromTeamId: 'leadership', toTeamId: 'projects' };
+    const pending = pendingTeamMessagesFor([...workspace.messages, incomingRead, converted, outgoing], 'leadership');
+    expect(pending.map((message) => message.id)).toEqual(['message-projects-kickoff', 'message-read']);
+  });
+
+  it('refreshes the HTTP workspace after a due-date change so linked side effects are visible', async () => {
+    const api = new HttpWorkspaceApi();
+    const cached = structuredClone(initialWorkspace) as Workspace;
+    (api as unknown as { cachedWorkspace: Workspace }).cachedWorkspace = cached;
+    const before = cached.todos.find((todo) => todo.id === 'todo-handoff')!;
+    const changed = { ...before, dueDate: '2026-09-21', version: before.version + 1, kind: 'todo' as const };
+    const snapshot = {
+      environmentId: cached.environment,
+      user: cached.currentUser,
+      quarter: cached.quarter,
+      teams: cached.teams,
+      users: cached.users,
+      memberships: cached.memberships,
+      settings: cached.settings,
+      rocks: cached.rocks.map(({ tasks: _tasks, ...rock }) => rock),
+      tasks: cached.rocks.flatMap((rock) => rock.tasks),
+      todos: cached.todos.map((todo) => todo.id === before.id ? changed : todo),
+      issues: cached.issues,
+      transfers: cached.transfers,
+      notifications: cached.notifications,
+      messages: cached.messages,
+      meetings: cached.meetings,
+      metrics: cached.metrics,
+      scorecardResults: cached.scorecardResults,
+      headlines: cached.headlines,
+      audit: cached.activity,
+      etag: 'W/"2"',
+    };
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify(changed), { status: 200, headers: { 'Content-Type': 'application/json', ETag: 'W/"2"' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(snapshot), { status: 200, headers: { 'Content-Type': 'application/json', ETag: 'W/"2"' } }));
+
+    const result = await api.updateTodo(before.id, { dueDate: '2026-09-21' }, before.version);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/todos/todo-handoff');
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({ dueDate: '2026-09-21' });
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/workspace');
+    expect(result.todos.find((todo) => todo.id === before.id)?.dueDate).toBe('2026-09-21');
     fetchMock.mockRestore();
   });
 });

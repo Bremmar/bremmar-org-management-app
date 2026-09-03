@@ -275,6 +275,20 @@ img { max-width: 100%; }
 
 .age-critical { color: #8e3038; background: #fbe6e5; }
 
+.meeting-health-pill { display: inline-flex; min-width: 83px; flex-direction: column; align-items: flex-start; gap: 2px; padding: 5px 8px; border-radius: 6px; font-size: 11px; font-weight: 800; line-height: 1.1; white-space: nowrap; }
+
+.meeting-health-pill small { color: inherit; font-size: 10px; font-weight: 650; opacity: 0.78; }
+
+.meeting-health-neutral { color: #728097; background: #f0f3f7; }
+
+.meeting-health-green { color: #3e8977; background: #eaf7f2; }
+
+.meeting-health-yellow { color: #94681e; background: #fff6e6; }
+
+.meeting-health-orange { color: #ae6848; background: #fff0e5; }
+
+.meeting-health-red { color: #8e3038; background: #fbe6e5; }
+
 .avatar { display: inline-grid; flex: 0 0 auto; place-items: center; overflow: hidden; border-radius: 50%; color: #fff; font-size: 11px; font-weight: 850; letter-spacing: -0.02em; }
 
 .avatar-image { object-fit: cover; }
@@ -1102,7 +1116,111 @@ img { max-width: 100%; }
 
 .detail-title-row .button { flex: 0 0 auto; min-height: 36px; margin-top: 16px; padding: 0 12px; font-size: 12px; }
 
-.focus-category, .detail-category { color: #9c99b6; font-size: 12px; }
+.focus-horizon, .detail-horizon { color: #9c99b6; font-size: 12px; }
+
+.rich-text-editor { overflow: hidden; border: 1px solid #dfe5ec; border-radius: 8px; background: #fff; }
+
+.rich-text-editor:focus-within { border-color: #9eb8d6; box-shadow: 0 0 0 3px rgba(89, 128, 174, 0.12); }
+
+.rich-text-toolbar { display: flex; gap: 3px; padding: 5px; border-bottom: 1px solid #edf0f4; background: #fafbfd; }
+
+.rich-text-toolbar button { min-width: 30px; min-height: 28px; padding: 3px 7px; border: 0; border-radius: 5px; color: #63738b; background: transparent; font-size: 12px; cursor: pointer; }
+
+.rich-text-toolbar button:hover:not(:disabled), .rich-text-toolbar button:focus-visible:not(:disabled) { color: var(--brand); background: var(--brand-soft); }
+
+.rich-text-input { min-height: 105px; padding: 11px 12px; color: #53647c; font-size: 13px; line-height: 1.6; outline: 0; }
+
+.rich-text-input:empty::before { content: attr(data-placeholder); color: #a7b1bf; pointer-events: none; }
+
+.rich-text-input p, .rich-text-viewer p { margin: 0 0 7px; }
+
+.rich-text-input p:last-child, .rich-text-viewer p:last-child { margin-bottom: 0; }
+
+.rich-text-input ul, .rich-text-input ol, .rich-text-viewer ul, .rich-text-viewer ol { margin: 5px 0 8px 21px; padding: 0; }
+
+.rich-text-viewer { color: #687991; font-size: 13px; line-height: 1.6; }
+
+.todo-checklist, .linked-issue-panel { margin-top: 20px; padding: 16px; border: 1px solid #e7ebf0; border-radius: 9px; background: #fbfcfe; }
+
+.todo-checklist-heading, .linked-issue-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+
+.todo-checklist-heading strong { display: block; margin-top: 4px; color: #506079; font-size: 14px; }
+
+.todo-checklist-heading > span { color: #8795a8; font-size: 12px; font-weight: 750; }
+
+.todo-checklist-list { display: flex; flex-direction: column; gap: 5px; margin-top: 12px; }
+
+.todo-checklist-row { display: flex; min-width: 0; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid #eef1f5; }
+
+.todo-checklist-row:last-child { border-bottom: 0; }
+
+.todo-checklist-row-complete .todo-checklist-text { color: #9aa7b8; text-decoration: line-through; }
+
+.todo-checkbox { display: grid; width: 20px; height: 20px; flex: 0 0 auto; place-items: center; padding: 0; border: 1px solid #b8c3d0; border-radius: 5px; color: #fff; background: #fff; font-size: 12px; font-weight: 850; cursor: pointer; }
+
+.todo-checkbox.checked { border-color: var(--teal); background: var(--teal); }
+
+.todo-checklist-text { min-width: 0; flex: 1; padding: 5px 0; border: 0; color: #5b6c82; background: transparent; font-size: 12px; outline: 0; }
+
+.supporter-popover { position: relative; flex: 0 0 auto; }
+
+.supporter-chip { display: flex; align-items: center; gap: 5px; padding: 3px 6px 3px 3px; border: 1px solid #e1e7ee; border-radius: 16px; color: #64748a; background: #fff; font-size: 11px; cursor: pointer; list-style: none; }
+
+.supporter-chip::-webkit-details-marker { display: none; }
+
+.supporter-chip small { color: #9aa7b8; font-size: 9px; }
+
+.supporter-menu { position: absolute; z-index: 3; right: 0; top: calc(100% + 5px); display: flex; min-width: 155px; flex-direction: column; padding: 5px; border: 1px solid #dfe5ec; border-radius: 7px; background: #fff; box-shadow: 0 8px 24px rgba(31, 52, 82, 0.16); }
+
+.supporter-menu button { padding: 7px 9px; border: 0; border-radius: 5px; color: #5d6e84; background: transparent; text-align: left; font-size: 11px; cursor: pointer; }
+
+.supporter-menu button:hover, .supporter-menu button:focus-visible { background: #f2f6fb; }
+
+.checklist-delete { padding: 3px 5px; border: 0; color: #aab5c1; background: transparent; font-size: 16px; cursor: pointer; }
+
+.checklist-delete:hover:not(:disabled) { color: var(--coral); }
+
+.todo-checklist-empty { margin: 12px 0; color: #94a1b1; font-size: 12px; line-height: 1.5; }
+
+.todo-checklist-add { display: flex; align-items: center; gap: 7px; margin-top: 10px; }
+
+.todo-checklist-add input { min-width: 0; flex: 1; }
+
+.todo-checklist-add select { width: 135px; }
+
+.linked-issue-heading strong { display: block; max-width: 450px; margin-top: 4px; color: #506079; font-size: 14px; line-height: 1.35; }
+
+.linked-chip { padding: 5px 7px; border-radius: 5px; color: #6d7fa0; background: #edf3fb; font-size: 10px; font-weight: 800; white-space: nowrap; }
+
+.linked-issue-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; margin: 15px 0 0; }
+
+.linked-issue-grid > div { min-width: 0; }
+
+.linked-issue-grid dt { color: #9aa7b8; font-size: 10px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; }
+
+.linked-issue-grid dd { margin: 4px 0 0; color: #63738b; font-size: 12px; line-height: 1.45; white-space: pre-wrap; }
+
+.pending-messages-panel { margin-bottom: 20px; padding: 15px 16px; border: 1px solid #e1e9f2; border-left: 3px solid #6588b7; border-radius: 8px; background: #f6f9fd; }
+
+.pending-messages-panel-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+
+.pending-messages-panel-header strong { display: block; margin-top: 4px; color: #506079; font-size: 14px; }
+
+.pending-messages-panel-header > span { color: #6d7fa0; font-size: 11px; font-weight: 750; }
+
+.pending-message-row { display: flex; align-items: flex-start; gap: 10px; margin-top: 11px; padding-top: 11px; border-top: 1px solid #e5ebf2; }
+
+.pending-message-copy { min-width: 0; flex: 1; }
+
+.pending-message-copy strong, .pending-message-copy small, .pending-message-copy p { display: block; }
+
+.pending-message-copy strong { overflow: hidden; color: #53647c; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+
+.pending-message-copy small { margin-top: 3px; color: #97a4b4; font-size: 10px; }
+
+.pending-message-copy p { margin: 6px 0 0; color: #7c8b9d; font-size: 11px; line-height: 1.45; }
+
+.pending-message-actions { display: flex; flex: 0 0 auto; gap: 5px; }
 
 .issue-detail-panel h2 { max-width: 610px; margin: 22px 0 11px; color: #32425c; font-size: 27px; font-weight: 750; letter-spacing: -0.04em; line-height: 1.25; }
 

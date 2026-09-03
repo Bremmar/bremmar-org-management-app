@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Container } from '@azure/cosmos';
 import { CosmosWorkspaceRepository, MemoryWorkspaceRepository, RepositoryError } from './repository.js';
-import { DEFAULT_MEETING_SECTIONS, type WorkspaceRecord } from '../domain.js';
+import { DEFAULT_MEETING_SECTIONS, issueMeetingBand, type WorkspaceRecord } from '../domain.js';
+import { sanitizeTodoNotes } from '../richText.js';
 
 async function rejectsWithCode(operation: Promise<unknown>, code: RepositoryError['code']) {
   await assert.rejects(operation, (error: unknown) => error instanceof RepositoryError && error.code === code);
@@ -116,7 +117,7 @@ test('Rock Task conversion is idempotent and keeps linked To-Do fields synchroni
 
 test('solving an Issue creates an idempotent follow-up To-Do in the same team workspace', async () => {
   const repository = new MemoryWorkspaceRepository();
-  await repository.solveIssue('issue-project-scope', 'marcus-lee');
+  await repository.solveIssue('issue-project-scope', { createFollowUpTodo: true }, 'marcus-lee');
   const workspace = await repository.getTeamWorkspace('projects', 'marcus-lee');
   assert.equal(workspace.todos.filter((todo) => todo.id === 'todo-follow-up-issue-project-scope').length, 1);
 });
@@ -229,7 +230,7 @@ test('team messages can be read and converted into an editable Issue in the rece
   assert.equal(sent.status, 'unread');
   const read = await repository.markMessageRead(sent.id, 'ava-khan', sent.version);
   assert.equal(read.status, 'read');
-  const issue = await repository.createIssueFromMessage({ messageId: sent.id, title: 'Kickoff owner needs confirmation', detail: 'Please choose the receiving owner before the customer meeting.', category: 'Cross-team', priority: 2, horizon: 'short-term', ownerId: 'ava-khan' }, 'ava-khan');
+  const issue = await repository.createIssueFromMessage({ messageId: sent.id, title: 'Kickoff owner needs confirmation', detail: 'Please choose the receiving owner before the customer meeting.', priority: 2, horizon: 'short-term', ownerId: 'ava-khan' }, 'ava-khan');
   assert.deepEqual({ teamId: issue.teamId, title: issue.title }, { teamId: 'leadership', title: 'Kickoff owner needs confirmation' });
   assert.equal((await repository.getTeamWorkspace('leadership', 'ava-khan')).messages.find((message) => message.id === sent.id)?.status, 'converted');
 });
@@ -303,22 +304,30 @@ test('new-team writes fall back to ordinary Cosmos creates when transactional ba
   assert.equal(created.some((record) => record.kind === 'meeting' && record.teamId === team.teamId), true);
 });
 
-test('an unresolved Issue is scheduled for escalation after three meetings', async () => {
+test('unresolved Issues use meeting health, count non-IDS Issues, and escalate once at four meetings', async () => {
   const repository = new MemoryWorkspaceRepository();
-  const issue = await repository.createIssue({ teamId: 'leadership', title: 'Escalation test Issue', detail: 'This should route after three meetings.', raisedById: 'ava-khan', ownerId: 'ava-khan' }, 'ava-khan');
-  const state = repository as unknown as { issues: Array<{ id: string; meetingsPassed: number }>; meetings: Array<{ id: string; teamId: string; status: 'upcoming' | 'in-progress' | 'closed'; idsIssueIds: string[]; version: number }> };
-  const meeting = state.meetings.find((candidate) => candidate.teamId === 'leadership')!;
-  meeting.idsIssueIds = [issue.id];
-  for (let count = 0; count < 3; count += 1) {
-    meeting.status = 'upcoming';
-    const closed = await repository.closeMeeting('leadership', meeting.id, `Meeting ${count + 1}`, 8, 'ava-khan', meeting.version);
-    if (count < 2) meeting.status = 'upcoming';
-    else assert.equal(closed.status, 'closed');
+  const issue = await repository.createIssue({ teamId: 'leadership', title: 'Escalation test Issue', detail: 'This should route after four meetings.', raisedById: 'ava-khan', ownerId: 'ava-khan' }, 'ava-khan');
+  const nonIds = await repository.createIssue({ teamId: 'leadership', title: 'Non-IDS Issue', detail: 'This is not manually added to IDS.', raisedById: 'ava-khan', ownerId: 'ava-khan' }, 'ava-khan');
+  const state = repository as unknown as { issues: Array<{ id: string; createdAt: string; status: 'open' | 'in-ids' | 'solved'; meetingsPassed: number; meetingBand: string; escalationState: string; escalationDueAt?: string }>; meetings: Array<{ id: string; teamId: string; status: 'upcoming' | 'in-progress' | 'closed'; startedAt?: string; idsIssueIds: string[]; version: number }>; notifications: Array<{ type: string; issueId?: string }> };
+  const issueRecord = state.issues.find((candidate) => candidate.id === issue.id)!;
+  const nonIdsRecord = state.issues.find((candidate) => candidate.id === nonIds.id)!;
+  const oldCreatedAt = new Date(Date.now() - 60_000).toISOString();
+  issueRecord.createdAt = oldCreatedAt;
+  nonIdsRecord.createdAt = oldCreatedAt;
+
+  for (let count = 0; count < 4; count += 1) {
+    const meeting = state.meetings.find((candidate) => candidate.teamId === 'leadership' && candidate.status === 'upcoming')!;
+    const started = await repository.startMeeting('leadership', meeting.id, 'ava-khan', meeting.version);
+    const closed = await repository.closeMeeting('leadership', meeting.id, `Meeting ${count + 1}`, 8, 'ava-khan', started.version);
+    assert.equal(closed.status, 'closed');
   }
-  const storedIssue = state.issues.find((candidate) => candidate.id === issue.id)! as typeof issue;
-  assert.equal(storedIssue.meetingsPassed, 3);
-  assert.equal(storedIssue.escalationState, 'scheduled');
-  assert.ok(storedIssue.escalationDueAt);
+
+  assert.equal(issueRecord.meetingsPassed, 4);
+  assert.equal(issueRecord.meetingBand, 'red');
+  assert.equal(issueRecord.escalationState, 'escalated');
+  assert.equal(issueRecord.escalationDueAt, undefined);
+  assert.equal(nonIdsRecord.meetingsPassed, 4);
+  assert.equal(state.notifications.filter((notification) => notification.type === 'issue-escalation' && notification.issueId === issue.id).length, 1);
 });
 
 test('off-track Scorecard results convert to one provenance-linked Issue', async () => {
@@ -389,10 +398,83 @@ test('meeting action summary counts solved Issues and their follow-up To-Do', as
 
   const repositoryWithSolve = new MemoryWorkspaceRepository();
   const solveIssue = await repositoryWithSolve.createIssue({ teamId: 'leadership', title: 'Solved decision', raisedById: 'ava-khan', ownerId: 'ava-khan' }, 'ava-khan');
-  await repositoryWithSolve.startIssue(solveIssue.id, 'ava-khan', solveIssue.version);
-  await repositoryWithSolve.solveIssue(solveIssue.id, 'ava-khan', solveIssue.version + 1);
+  const startedIssue = await repositoryWithSolve.startIssue(solveIssue.id, 'ava-khan', solveIssue.version);
+  await repositoryWithSolve.solveIssue(solveIssue.id, { createFollowUpTodo: true }, 'ava-khan', startedIssue.version);
   const beforeClose = await repositoryWithSolve.getTeamWorkspace('leadership', 'ava-khan');
   const solvedMeeting = await repositoryWithSolve.closeMeeting('leadership', beforeClose.meetings[0].id, 'Solved and followed up.', 10, 'ava-khan', beforeClose.meetings[0].version);
   assert.deepEqual(solvedMeeting.actionSummary, { todosCreated: 1, issuesReviewedInIds: 1, issuesAddedToIds: 1, issuesSolved: 1 });
   assert.match(solvedMeeting.recap, /Created To-Dos: Follow up on the solution: Solved decision/);
+});
+
+test('embedded To-Do checklists default to the owner, validate Supporters, and use parent versions', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const before = (await repository.getTeamWorkspace('projects', 'marcus-lee')).todos.find((todo) => todo.id === 'todo-project-kickoff')!;
+  const added = await repository.addTodoChecklistItem(before.id, 'Confirm the handoff owner', undefined, 'marcus-lee', before.version);
+  assert.deepEqual(added.checklist[0], { ...added.checklist[0], text: 'Confirm the handoff owner', completed: false, supporterId: 'marcus-lee' });
+  assert.equal(added.version, before.version + 1);
+
+  const completed = await repository.updateTodoChecklistItem(before.id, added.checklist[0].id, { completed: true }, 'marcus-lee', added.version);
+  assert.equal(completed.checklist[0].completed, true);
+  assert.equal(completed.status, before.status);
+  const assigned = await repository.updateTodoChecklistItem(before.id, added.checklist[0].id, { supporterId: 'maya-green' }, 'marcus-lee', completed.version);
+  assert.equal(assigned.checklist[0].supporterId, 'maya-green');
+  await rejectsWithCode(repository.updateTodoChecklistItem(before.id, added.checklist[0].id, { supporterId: 'priya-shah' }, 'marcus-lee', assigned.version), 'VALIDATION');
+  await rejectsWithCode(repository.deleteTodoChecklistItem(before.id, added.checklist[0].id, 'marcus-lee', assigned.version - 1), 'CONFLICT');
+  const deleted = await repository.deleteTodoChecklistItem(before.id, added.checklist[0].id, 'marcus-lee', assigned.version);
+  assert.equal(deleted.checklist.length, 0);
+});
+
+test('To-Do notes accept the small rich-text subset and safely convert legacy text', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const todo = await repository.createTodo({ teamId: 'projects', title: 'Rich notes', ownerId: 'marcus-lee', dueDate: ' 2026-09-10 ', notes: '<p><strong>Owner</strong></p><script>alert(1)</script><a href="javascript:bad">unsafe</a>' }, 'marcus-lee');
+  assert.match(todo.notes, /<strong>Owner<\/strong>/);
+  assert.doesNotMatch(todo.notes, /script|javascript|<a/i);
+  const legacy = await repository.updateTodo(todo.id, { notes: 'First line\nSecond line' }, 'marcus-lee', todo.version);
+  assert.equal(legacy.notes, '<p>First line<br />Second line</p>');
+  assert.equal(todo.dueDate, '2026-09-10');
+  assert.doesNotMatch(sanitizeTodoNotes('<p>ok</p><img src=x onerror=alert(1)>'), /img|onerror/i);
+});
+
+test('Issue resolution records the follow-up choice, source link, and idempotent history', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const noTodo = await repository.getIssue('issue-project-scope', 'marcus-lee');
+  const solvedWithoutTodo = await repository.solveIssue(noTodo.id, { createFollowUpTodo: false, resolutionNote: 'Closed in the customer review; no commitment required.' }, 'marcus-lee', noTodo.version);
+  assert.equal(solvedWithoutTodo.status, 'solved');
+  assert.match(solvedWithoutTodo.idsNote ?? '', /Follow-up To-Do not created/);
+  assert.match(solvedWithoutTodo.idsNote ?? '', /no commitment required/);
+  const repeated = await repository.solveIssue(noTodo.id, { createFollowUpTodo: true, resolutionNote: 'Must not be appended twice.' }, 'marcus-lee', noTodo.version);
+  assert.equal(repeated.version, solvedWithoutTodo.version);
+  assert.doesNotMatch(repeated.idsNote ?? '', /Must not be appended twice/);
+
+  const withTodo = await repository.getIssue('issue-cyber-owners', 'priya-shah');
+  const solvedWithTodo = await repository.solveIssue(withTodo.id, { createFollowUpTodo: true }, 'priya-shah', withTodo.version);
+  const workspace = await repository.getTeamWorkspace('cybersecurity', 'priya-shah');
+  const followUp = workspace.todos.find((todo) => todo.sourceIssueId === withTodo.id);
+  assert.equal(followUp?.ownerId, 'priya-shah');
+  assert.equal(solvedWithTodo.status, 'solved');
+  assert.match(solvedWithTodo.idsNote ?? '', /Follow-up To-Do created/);
+});
+
+test('Issue meeting health bands and close-time boundaries are based on total meetings', async () => {
+  assert.deepEqual([0, 1, 2, 3, 4, 5].map((count) => issueMeetingBand(count, 'open')), ['neutral', 'green', 'yellow', 'orange', 'red', 'red']);
+  assert.equal(issueMeetingBand(4, 'solved'), 'neutral');
+
+  const repository = new MemoryWorkspaceRepository();
+  const preExisting = await repository.createIssue({ teamId: 'leadership', title: 'Pre-existing outside IDS', raisedById: 'ava-khan', ownerId: 'ava-khan' }, 'ava-khan');
+  const solvedDuring = await repository.createIssue({ teamId: 'leadership', title: 'Solved during meeting', raisedById: 'ava-khan', ownerId: 'ava-khan' }, 'ava-khan');
+  const state = repository as unknown as { issues: Array<{ id: string; createdAt: string; meetingsPassed: number; status: 'open' | 'in-ids' | 'solved'; version: number }>; meetings: Array<{ id: string; teamId: string; status: 'upcoming' | 'in-progress' | 'closed'; version: number }> };
+  const meeting = state.meetings.find((candidate) => candidate.teamId === 'leadership')!;
+  const old = new Date(Date.now() - 60_000).toISOString();
+  state.issues.find((issue) => issue.id === preExisting.id)!.createdAt = old;
+  state.issues.find((issue) => issue.id === solvedDuring.id)!.createdAt = old;
+  const started = await repository.startMeeting('leadership', meeting.id, 'ava-khan', meeting.version);
+  const createdDuring = await repository.createIssue({ teamId: 'leadership', title: 'Created during meeting', raisedById: 'ava-khan', ownerId: 'ava-khan' }, 'ava-khan');
+  const createdRecord = state.issues.find((issue) => issue.id === createdDuring.id)!;
+  createdRecord.createdAt = new Date(new Date(started.startedAt!).getTime() + 1_000).toISOString();
+  await repository.solveIssue(solvedDuring.id, { createFollowUpTodo: false }, 'ava-khan', state.issues.find((issue) => issue.id === solvedDuring.id)!.version);
+  await repository.closeMeeting('leadership', meeting.id, 'Boundary test.', 8, 'ava-khan', state.meetings.find((candidate) => candidate.id === meeting.id)!.version);
+
+  assert.equal(state.issues.find((issue) => issue.id === preExisting.id)!.meetingsPassed, 1);
+  assert.equal(state.issues.find((issue) => issue.id === solvedDuring.id)!.meetingsPassed, 0);
+  assert.equal(state.issues.find((issue) => issue.id === createdDuring.id)!.meetingsPassed, 0);
 });

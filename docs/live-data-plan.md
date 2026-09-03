@@ -79,8 +79,11 @@ operational work has been resolved or moved.
   never treated as proof of access.
 - Important mutations produce immutable audit events and use version/ETag
   checks for optimistic concurrency.
-- Rock, Issue, and To-Do detail edits are versioned. IDS notes are stored both on
-  the meeting note record and as an append-only labeled entry on the Issue.
+- Rock, Issue, and To-Do detail edits are versioned. IDS notes and resolution
+  decisions are stored both on the meeting note record and as append-only
+  labeled entries with a canonical UTC datestamp on the Issue. The editable
+  Historical Context field tolerates legacy values, while automatic additions
+  always append.
 - Scorecard measurable definitions (`scorecardMetric`) and weekly results
   (`scorecardResult`) are team-scoped records in the owning `team:{teamId}`
   partition. Definitions keep the fixed target, unit, and accountable owner;
@@ -93,10 +96,14 @@ operational work has been resolved or moved.
   visibility can read them but cannot write them. Grouping-only nodes cannot
   own scorecard measurables.
 - A To-Do due-date edit is the rollover action: when incomplete work receives a
-  later date, the API increments `carryForwardCount`, reopens it, synchronizes
-  any linked Rock Task, and flags/converts it once on the fourth rollover. An
-  unchanged or earlier date is an ordinary edit, and completed To-Dos never
-  accrue rollovers. The original To-Do remains visible for provenance.
+  later `YYYY-MM-DD` date, the API increments `carryForwardCount`, reopens it,
+  synchronizes any linked Rock Task, and flags/converts it once on the fourth
+  rollover. An unchanged or earlier date is an ordinary edit, and completed
+  To-Dos never accrue rollovers. The original To-Do remains visible for
+  provenance. Embedded checklist items stay in the same team record and use
+  the parent version; new items default to the owner and supporters must be
+  active members of that team. To-Do notes are sanitized HTML from the small
+  rich-text allowlist, with legacy plain text converted on read.
 - Meetings carry an ISO Monday-start `weekStartDate`. New meetings set it at
   creation; legacy records receive a non-destructive current-week fallback
   during normalization. L10 Scorecard content and meeting recaps use only the
@@ -106,10 +113,22 @@ operational work has been resolved or moved.
   `scheduledDate` and `scheduledTime`. The current open occurrence can be
   rescheduled as a versioned, audited mutation without changing the team’s
   recurring cadence; closed occurrences cannot be rescheduled.
-- An Issue counted in IDS for three closed meetings is scheduled to escalate in
-  seven days. At the due point it routes through the team’s configured hierarchy
-  and notifies the current recipient; an unresolved next level can be routed
-  after the next seven-day interval.
+- Issue health is meeting-based: an unresolved Issue is neutral at 0 meetings,
+  green at 1, yellow at 2, orange at 3, and red at 4 or more. When a meeting
+  closes, every unresolved active Issue in that team that existed before the
+  meeting’s `startedAt` is counted, whether or not it was on the IDS list.
+  Issues solved during the meeting and Issues created during it do not count
+  for that occurrence. The first transition to four meetings sets the Issue to
+  escalated and notifies the configured recipient once. Legacy age fields and
+  settings remain readable for compatibility, but age is no longer used for
+  highlighting, filtering, or escalation.
+- Issue-created To-Dos retain `sourceIssueId`. The solve operation records
+  whether a follow-up To-Do was created and any resolution note in the Issue’s
+  Historical Context atomically and is idempotent when repeated.
+- At Segue, the active L10 shows incoming team messages whose status is not
+  `converted`, including both read and unread messages. Reading or opening a
+  message does not mark it read automatically; the existing explicit message
+  actions remain available.
 
 The partitioning and transactional design follows the Cosmos DB guidance for
 [partition keys](https://learn.microsoft.com/en-us/azure/cosmos-db/partitioning)
@@ -155,7 +174,19 @@ The Functions API exposes typed server contracts for:
     Monday-start weekly actual and selected status, using `If-Match` for
     existing result versions.
 - To-Do due-date rollover is handled by `PATCH /api/todos/{todoId}`; there is
-  no separate move-forward endpoint or control.
+  no separate move-forward endpoint or control. The route also accepts the
+  sanitized rich-text `notes` field and strict dates.
+- To-Do checklist routes use the parent To-Do version and return the updated
+  parent: `POST /api/todos/{todoId}/checklist`,
+  `PATCH /api/todos/{todoId}/checklist/{itemId}`, and
+  `DELETE /api/todos/{todoId}/checklist/{itemId}`. The patch route supports
+  text, completion, and Supporter assignment.
+- `POST /api/issues/{issueId}/solve` records the follow-up choice and optional
+  resolution note when solving an Issue; Issue-created To-Dos expose their
+  linked Issue context as read-only in the web dialog.
+- `POST /api/teams/{teamId}/meetings/{meetingId}/start` records the meeting
+  boundary used by meeting-health accounting. The close route then counts all
+  eligible unresolved Issues that predate that boundary.
 - Issue transfer request, accept, reject, and cancel routes.
 - Platform administration routes for teams, users, memberships, aging settings,
   L10 section configuration, and escalation hierarchies.
@@ -192,8 +223,9 @@ authorization source of truth.
 ## Rollout sequence
 
 1. Validate the local hierarchy, role matrix, transfer and messaging workflows,
-   aging/escalation behavior, task/To-Do synchronization, meeting recap/IDS
-   notes, and readable responsive layouts.
+  meeting-health escalation behavior, checklist/rich-text To-Dos,
+  task/To-Do synchronization, meeting recap/IDS notes, pending Segue messages,
+  and readable responsive layouts.
 2. Provision the two workspace databases/containers and the `EnvironmentAccess`
    Azure Table, then configure the Cosmos and storage connection strings before
    running `bootstrap:environments` with the initial OrgAdmin and approved Test

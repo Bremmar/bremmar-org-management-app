@@ -72,8 +72,26 @@ meeting records cannot be rescheduled.
 
 Changing an incomplete To-Do’s due date to a later date automatically reopens it,
 increments its rollover count, synchronizes a linked Rock Task, and creates the
-linked IDS Issue on the fourth rollover. Completed, unchanged, and earlier-date
-edits do not count. There is no separate move-forward endpoint or button.
+linked IDS Issue on the fourth rollover. Dates are validated and stored as
+`YYYY-MM-DD`; completed, unchanged, and earlier-date edits do not count. There
+is no separate move-forward endpoint or button.
+
+To-Dos can contain embedded checklists. New checklist items default to the
+To-Do owner, while assignment is limited to active members of the owning team;
+checklist changes use the parent To-Do version for optimistic concurrency and do
+not change the parent To-Do status. Notes use a sanitized compact rich-text
+format (bold, italic, bulleted lists, and numbered lists), with legacy plain
+text converted safely when loaded. To-Dos solved from an Issue retain a
+`sourceIssueId` and show the linked Issue’s context read-only in the To-Do
+dialog.
+
+Issue health is based on total meetings passed, not age: neutral at 0, green at
+1, yellow at 2, orange at 3, and red/escalated at 4 or more. At meeting close,
+all unresolved Issues that predate the meeting start are counted, including
+Issues not placed on the IDS list. Issues solved during the meeting and Issues
+created during it are excluded. `ageInDays` remains visible as neutral reference
+text for compatibility. Incoming, unconverted team messages are shown at the
+start of Segue, with explicit Open, Mark read, and Create Issue actions.
 
 ## Validation
 

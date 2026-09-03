@@ -68,5 +68,12 @@ export function expectedVersion(request: HttpRequest) {
 }
 
 export function responseWithEtag(jsonBody: unknown, etag: string, status = 200): HttpResponseInit {
-  return { status, headers: { ETag: etag, 'Content-Type': 'application/json' }, jsonBody };
+  const withoutLegacyCategory = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(withoutLegacyCategory);
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'category').map(([key, item]) => [key, withoutLegacyCategory(item)]));
+    }
+    return value;
+  };
+  return { status, headers: { ETag: etag, 'Content-Type': 'application/json' }, jsonBody: withoutLegacyCategory(jsonBody) };
 }

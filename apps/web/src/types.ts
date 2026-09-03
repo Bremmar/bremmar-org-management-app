@@ -7,6 +7,7 @@ export type IssueStatus = 'open' | 'in-ids' | 'solved';
 export type IssueHorizon = 'short-term' | 'long-term';
 export type IssueAssignmentState = 'assigned' | 'pending-transfer' | 'unassigned' | 'redirected';
 export type IssueAgeBand = 'fresh' | 'aging' | 'stale' | 'critical';
+export type IssueMeetingBand = 'neutral' | 'green' | 'yellow' | 'orange' | 'red';
 export type MeetingStatus = 'upcoming' | 'in-progress' | 'closed';
 export type MetricStatus = 'on-track' | 'off-track';
 export type ScorecardTrend = 'up' | 'down' | 'flat';
@@ -17,6 +18,14 @@ export type MessageStatus = 'unread' | 'read' | 'converted';
 export type EscalationState = 'not-scheduled' | 'scheduled' | 'due' | 'escalated';
 export type EnvironmentId = 'live' | 'test';
 export type MeetingCadence = 'weekly' | 'monthly';
+
+export function issueMeetingBand(meetingsPassed: number, status: IssueStatus): IssueMeetingBand {
+  if (status === 'solved' || meetingsPassed <= 0) return 'neutral';
+  if (meetingsPassed >= 4) return 'red';
+  if (meetingsPassed === 3) return 'orange';
+  if (meetingsPassed === 2) return 'yellow';
+  return 'green';
+}
 
 export interface EnvironmentSummary {
   id: EnvironmentId;
@@ -150,6 +159,8 @@ export interface Todo {
   status: TodoStatus;
   origin: string;
   linkedRockTaskId?: string;
+  sourceIssueId?: string;
+  checklist: TodoChecklistItem[];
   createdAt: string;
   updatedAt: string;
   version: number;
@@ -159,6 +170,15 @@ export interface Todo {
   convertedIssueId?: string;
 }
 
+export interface TodoChecklistItem {
+  id: string;
+  text: string;
+  completed: boolean;
+  supporterId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Issue {
   id: string;
   teamId: string;
@@ -166,7 +186,6 @@ export interface Issue {
   currentTeamId: string | null;
   title: string;
   detail: string;
-  category: string;
   priority: number;
   status: IssueStatus;
   horizon: IssueHorizon;
@@ -178,6 +197,7 @@ export interface Issue {
   solvedAt?: string;
   ageInDays: number;
   ageBand: IssueAgeBand;
+  meetingBand: IssueMeetingBand;
   linkedRockId?: string;
   linkedScorecardMetricId?: string;
   linkedScorecardWeekStartDate?: string;
@@ -480,7 +500,7 @@ export interface TeamRollup {
   direct: {
     rocks: { total: number; onTrack: number; offTrack: number; complete: number };
     todos: { total: number; open: number; done: number; notDone: number };
-    issues: { total: number; open: number; inIds: number; solved: number; aging: number; stale: number; critical: number };
+    issues: { total: number; open: number; inIds: number; solved: number; neutral: number; green: number; yellow: number; orange: number; red: number };
   };
   descendants: {
     rocks: number;

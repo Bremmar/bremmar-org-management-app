@@ -1,4 +1,4 @@
-import { defaultMeetingSections, meetingDateFor, meetingDateLabel, scorecardTrendFor, weekStartDateFor } from './types';
+import { defaultMeetingSections, issueMeetingBand, meetingDateFor, meetingDateLabel, scorecardTrendFor, weekStartDateFor } from './types';
 import type {
   AuditEvent,
   Headline,
@@ -164,36 +164,37 @@ const rocks: Rock[] = [
 
 const todos: Todo[] = [
   {
-    id: 'todo-brief', teamId: 'leadership', title: 'Share the revised Q4 planning brief with leadership', notes: '', ownerId: 'ava-khan', dueDate: '2026-09-05', status: 'open', origin: 'Rock · Client onboarding playbook', linkedRockTaskId: 'task-playbook-outline', createdAt: daysAgo(4), updatedAt: daysAgo(1), version: 2, isMine: true, carryForwardCount: 0, flagged: false,
+    id: 'todo-brief', teamId: 'leadership', title: 'Share the revised Q4 planning brief with leadership', notes: '', ownerId: 'ava-khan', dueDate: '2026-09-05', status: 'open', origin: 'Rock · Client onboarding playbook', linkedRockTaskId: 'task-playbook-outline', checklist: [], createdAt: daysAgo(4), updatedAt: daysAgo(1), version: 2, isMine: true, carryForwardCount: 0, flagged: false,
   },
   {
-    id: 'todo-handoff', teamId: 'leadership', title: 'Schedule the customer success / delivery handoff', notes: '', ownerId: 'ava-khan', dueDate: '2026-09-03', status: 'open', origin: 'Issue · Onboarding handoffs', createdAt: daysAgo(2), updatedAt: daysAgo(1), version: 1, isMine: true, carryForwardCount: 0, flagged: false,
+    id: 'todo-handoff', teamId: 'leadership', title: 'Schedule the customer success / delivery handoff', notes: '', ownerId: 'ava-khan', dueDate: '2026-09-03', status: 'open', origin: 'Issue · Onboarding handoffs', checklist: [], createdAt: daysAgo(2), updatedAt: daysAgo(1), version: 1, isMine: true, carryForwardCount: 0, flagged: false,
   },
   {
-    id: 'todo-alerts', teamId: 'leadership', title: 'Confirm cost alerts with the service teams', notes: '', ownerId: 'daniel-cho', dueDate: '2026-08-31', status: 'done', origin: 'Leadership L10 · Aug 24', createdAt: daysAgo(9), updatedAt: daysAgo(1), version: 2, carryForwardCount: 0, flagged: false,
+    id: 'todo-alerts', teamId: 'leadership', title: 'Confirm cost alerts with the service teams', notes: '', ownerId: 'daniel-cho', dueDate: '2026-08-31', status: 'done', origin: 'Leadership L10 · Aug 24', checklist: [], createdAt: daysAgo(9), updatedAt: daysAgo(1), version: 2, carryForwardCount: 0, flagged: false,
   },
   {
-    id: 'todo-project-kickoff', teamId: 'projects', title: 'Pilot the new implementation kickoff checklist', notes: '', ownerId: 'maya-green', dueDate: '2026-09-10', status: 'open', origin: 'Rock · Standardise the implementation kickoff', linkedRockTaskId: 'task-project-template', createdAt: daysAgo(3), updatedAt: daysAgo(2), version: 1, carryForwardCount: 0, flagged: false,
+    id: 'todo-project-kickoff', teamId: 'projects', title: 'Pilot the new implementation kickoff checklist', notes: '', ownerId: 'maya-green', dueDate: '2026-09-10', status: 'open', origin: 'Rock · Standardise the implementation kickoff', linkedRockTaskId: 'task-project-template', checklist: [], createdAt: daysAgo(3), updatedAt: daysAgo(2), version: 1, carryForwardCount: 0, flagged: false,
   },
   {
-    id: 'todo-evidence', teamId: 'cybersecurity', title: 'Confirm the evidence owner matrix', notes: '', ownerId: 'priya-shah', dueDate: '2026-09-06', status: 'not-done', origin: 'Rock · Close the security evidence gaps', linkedRockTaskId: 'task-cyber-evidence', createdAt: daysAgo(8), updatedAt: daysAgo(4), version: 2, carryForwardCount: 2, flagged: false,
+    id: 'todo-evidence', teamId: 'cybersecurity', title: 'Confirm the evidence owner matrix', notes: '', ownerId: 'priya-shah', dueDate: '2026-09-06', status: 'not-done', origin: 'Rock · Close the security evidence gaps', linkedRockTaskId: 'task-cyber-evidence', checklist: [], createdAt: daysAgo(8), updatedAt: daysAgo(4), version: 2, carryForwardCount: 2, flagged: false,
   },
   {
-    id: 'todo-catalogue', teamId: 'managed-services', title: 'Review the catalogue language with delivery', notes: '', ownerId: 'jon-bell', dueDate: '2026-09-08', status: 'open', origin: 'Rock · Publish the managed services catalogue', linkedRockTaskId: 'task-catalogue-review', createdAt: daysAgo(3), updatedAt: daysAgo(2), version: 1, carryForwardCount: 0, flagged: false,
+    id: 'todo-catalogue', teamId: 'managed-services', title: 'Review the catalogue language with delivery', notes: '', ownerId: 'jon-bell', dueDate: '2026-09-08', status: 'open', origin: 'Rock · Publish the managed services catalogue', linkedRockTaskId: 'task-catalogue-review', checklist: [], createdAt: daysAgo(3), updatedAt: daysAgo(2), version: 1, carryForwardCount: 0, flagged: false,
   },
   {
-    id: 'todo-health', teamId: 'service-development', title: 'Draft the service health review template', notes: '', ownerId: 'maria-ortiz', dueDate: '2026-09-15', status: 'open', origin: 'Rock · Release the service health playbook', linkedRockTaskId: 'task-health-playbook', createdAt: daysAgo(4), updatedAt: daysAgo(3), version: 1, carryForwardCount: 0, flagged: false,
+    id: 'todo-health', teamId: 'service-development', title: 'Draft the service health review template', notes: '', ownerId: 'maria-ortiz', dueDate: '2026-09-15', status: 'open', origin: 'Rock · Release the service health playbook', linkedRockTaskId: 'task-health-playbook', checklist: [], createdAt: daysAgo(4), updatedAt: daysAgo(3), version: 1, carryForwardCount: 0, flagged: false,
   },
   {
-    id: 'todo-response', teamId: 'service-delivery', title: 'Review the first-response standard after one week', notes: '', ownerId: 'jon-bell', dueDate: '2026-09-04', status: 'done', origin: 'Rock · Improve first-response consistency', linkedRockTaskId: 'task-first-response', createdAt: daysAgo(10), updatedAt: daysAgo(5), version: 2, carryForwardCount: 0, flagged: false,
+    id: 'todo-response', teamId: 'service-delivery', title: 'Review the first-response standard after one week', notes: '', ownerId: 'jon-bell', dueDate: '2026-09-04', status: 'done', origin: 'Rock · Improve first-response consistency', linkedRockTaskId: 'task-first-response', checklist: [], createdAt: daysAgo(10), updatedAt: daysAgo(5), version: 2, carryForwardCount: 0, flagged: false,
   },
 ];
 
-const makeIssue = (issue: Omit<Issue, 'createdAt' | 'updatedAt' | 'ageInDays' | 'ageBand' | 'version' | 'meetingsPassed' | 'escalationState' | 'escalationDueAt' | 'escalationLevel' | 'escalatedToUserId'> & { ageInDays: number }): Issue => ({
+const makeIssue = (issue: Omit<Issue, 'createdAt' | 'updatedAt' | 'ageInDays' | 'ageBand' | 'meetingBand' | 'version' | 'meetingsPassed' | 'escalationState' | 'escalationDueAt' | 'escalationLevel' | 'escalatedToUserId'> & { ageInDays: number }): Issue => ({
   ...issue,
   createdAt: daysAgo(issue.ageInDays),
   updatedAt: daysAgo(Math.min(issue.ageInDays, 1)),
   ageBand: defaultAgeBand(issue.ageInDays),
+  meetingBand: issueMeetingBand(0, issue.status),
   version: 1,
   meetingsPassed: 0,
   escalationState: 'not-scheduled',
@@ -203,35 +204,35 @@ const makeIssue = (issue: Omit<Issue, 'createdAt' | 'updatedAt' | 'ageInDays' | 
 const issues: Issue[] = [
   makeIssue({
     id: 'issue-handoffs', teamId: 'leadership', sourceTeamId: 'leadership', currentTeamId: 'leadership', title: 'Onboarding handoffs still rely on tribal knowledge',
-    detail: 'The team is solving the same handoff questions in three different places. We need one owner, one checklist, and one visible path.', category: 'Process', priority: 1, status: 'open', horizon: 'short-term', assignmentState: 'assigned', raisedById: 'ava-khan', ownerId: 'ava-khan', ageInDays: 14, linkedRockId: 'rock-playbook', idsNote: 'Identify the exact moment the handoff becomes ambiguous, then decide who owns the customer-facing transition.',
+    detail: 'The team is solving the same handoff questions in three different places. We need one owner, one checklist, and one visible path.', priority: 1, status: 'open', horizon: 'short-term', assignmentState: 'assigned', raisedById: 'ava-khan', ownerId: 'ava-khan', ageInDays: 14, linkedRockId: 'rock-playbook', idsNote: 'Identify the exact moment the handoff becomes ambiguous, then decide who owns the customer-facing transition.',
   }),
   makeIssue({
     id: 'issue-planning', teamId: 'leadership', sourceTeamId: 'leadership', currentTeamId: 'leadership', title: 'The quarterly planning template arrives too late for team leads',
-    detail: 'Teams are committing to Rocks before they can see the company-level constraints and focus areas.', category: 'Alignment', priority: 2, status: 'open', horizon: 'long-term', assignmentState: 'assigned', raisedById: 'marcus-lee', ownerId: 'marcus-lee', ageInDays: 5, idsNote: 'Decide what information must be available before each team starts quarterly planning.',
+    detail: 'Teams are committing to Rocks before they can see the company-level constraints and focus areas.', priority: 2, status: 'open', horizon: 'long-term', assignmentState: 'assigned', raisedById: 'marcus-lee', ownerId: 'marcus-lee', ageInDays: 5, idsNote: 'Decide what information must be available before each team starts quarterly planning.',
   }),
   makeIssue({
     id: 'issue-escalation', teamId: 'leadership', sourceTeamId: 'leadership', currentTeamId: 'leadership', title: 'Customer escalation path is unclear after hours',
-    detail: 'A recent customer concern sat overnight because nobody knew who had the next call.', category: 'Customer', priority: 3, status: 'in-ids', horizon: 'short-term', assignmentState: 'assigned', raisedById: 'priya-shah', ownerId: 'priya-shah', ageInDays: 3, idsNote: 'The first-response owner is clear. Decide who acts as backup and where the rota lives.',
+    detail: 'A recent customer concern sat overnight because nobody knew who had the next call.', priority: 3, status: 'in-ids', horizon: 'short-term', assignmentState: 'assigned', raisedById: 'priya-shah', ownerId: 'priya-shah', ageInDays: 3, idsNote: 'The first-response owner is clear. Decide who acts as backup and where the rota lives.',
   }),
   makeIssue({
     id: 'issue-project-scope', teamId: 'projects', sourceTeamId: 'projects', currentTeamId: 'projects', title: 'Implementation scope changes are not visible early enough',
-    detail: 'The Projects team needs a consistent signal when a project starts to drift from the agreed scope.', category: 'Delivery', priority: 1, status: 'open', horizon: 'short-term', assignmentState: 'assigned', raisedById: 'maya-green', ownerId: 'marcus-lee', ageInDays: 8, linkedRockId: 'rock-project-kickoff', idsNote: 'Agree the earliest reliable signal and who raises it with the customer.',
+    detail: 'The Projects team needs a consistent signal when a project starts to drift from the agreed scope.', priority: 1, status: 'open', horizon: 'short-term', assignmentState: 'assigned', raisedById: 'maya-green', ownerId: 'marcus-lee', ageInDays: 8, linkedRockId: 'rock-project-kickoff', idsNote: 'Agree the earliest reliable signal and who raises it with the customer.',
   }),
   makeIssue({
     id: 'issue-cyber-owners', teamId: 'cybersecurity', sourceTeamId: 'cybersecurity', currentTeamId: null, title: 'Evidence ownership is unclear across service teams',
-    detail: 'The evidence request is still valid, but the first team declined the handoff and left the item without an owner.', category: 'Security', priority: 1, status: 'open', horizon: 'short-term', assignmentState: 'unassigned', raisedById: 'priya-shah', ownerId: undefined, ageInDays: 18, linkedRockId: 'rock-cyber-readiness', idsNote: 'Select the team that can make the ownership decision this week.',
+    detail: 'The evidence request is still valid, but the first team declined the handoff and left the item without an owner.', priority: 1, status: 'open', horizon: 'short-term', assignmentState: 'unassigned', raisedById: 'priya-shah', ownerId: undefined, ageInDays: 18, linkedRockId: 'rock-cyber-readiness', idsNote: 'Select the team that can make the ownership decision this week.',
   }),
   makeIssue({
     id: 'issue-service-health', teamId: 'service-development', sourceTeamId: 'service-development', currentTeamId: 'service-development', title: 'The service health review lacks a shared definition',
-    detail: 'Different teams are using different signals to decide whether a managed service is healthy.', category: 'Alignment', priority: 2, status: 'open', horizon: 'long-term', assignmentState: 'assigned', raisedById: 'maria-ortiz', ownerId: 'maria-ortiz', ageInDays: 4, linkedRockId: 'rock-service-development', idsNote: 'Agree the small set of signals every service must report.',
+    detail: 'Different teams are using different signals to decide whether a managed service is healthy.', priority: 2, status: 'open', horizon: 'long-term', assignmentState: 'assigned', raisedById: 'maria-ortiz', ownerId: 'maria-ortiz', ageInDays: 4, linkedRockId: 'rock-service-development', idsNote: 'Agree the small set of signals every service must report.',
   }),
   makeIssue({
     id: 'issue-transfer-pending', teamId: 'projects', sourceTeamId: 'projects', currentTeamId: 'projects', title: 'The customer kickoff needs a cybersecurity review',
-    detail: 'Projects has identified a security dependency and sent this Issue to Leadership for the right team to accept and resolve.', category: 'Cross-team', priority: 2, status: 'open', horizon: 'short-term', assignmentState: 'pending-transfer', raisedById: 'marcus-lee', ownerId: 'marcus-lee', ageInDays: 22, linkedRockId: 'rock-project-kickoff', idsNote: 'Confirm who owns the review and when the customer can expect an answer.',
+    detail: 'Projects has identified a security dependency and sent this Issue to Leadership for the right team to accept and resolve.', priority: 2, status: 'open', horizon: 'short-term', assignmentState: 'pending-transfer', raisedById: 'marcus-lee', ownerId: 'marcus-lee', ageInDays: 22, linkedRockId: 'rock-project-kickoff', idsNote: 'Confirm who owns the review and when the customer can expect an answer.',
   }),
   makeIssue({
     id: 'issue-solved', teamId: 'service-delivery', sourceTeamId: 'service-delivery', currentTeamId: 'service-delivery', title: 'First-response ownership was unclear',
-    detail: 'The team agreed a response standard and published the rota.', category: 'Operations', priority: 4, status: 'solved', horizon: 'short-term', assignmentState: 'assigned', raisedById: 'jon-bell', ownerId: 'jon-bell', ageInDays: 9, idsNote: 'Decision preserved in the meeting history.',
+    detail: 'The team agreed a response standard and published the rota.', priority: 4, status: 'solved', horizon: 'short-term', assignmentState: 'assigned', raisedById: 'jon-bell', ownerId: 'jon-bell', ageInDays: 9, idsNote: 'Decision preserved in the meeting history.',
   }),
 ];
 

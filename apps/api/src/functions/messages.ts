@@ -45,8 +45,8 @@ async function createIssueFromMessageHandler(request: HttpRequest, _context: Inv
   const messageId = request.params.messageId;
   if (!messageId) return { status: 422, jsonBody: { error: 'messageId is required', code: 'VALIDATION' } };
   try {
-    const body = await requestJson<Partial<Pick<IssueRecord, 'title' | 'detail' | 'category' | 'priority' | 'horizon' | 'ownerId'>>> (request);
-    const issue = await repository.createIssueFromMessage({ messageId, title: body.title ?? '', detail: body.detail ?? '', category: body.category, priority: body.priority, horizon: body.horizon, ownerId: body.ownerId }, principal.userId);
+    const body = await requestJson<Partial<Pick<IssueRecord, 'title' | 'detail' | 'priority' | 'horizon' | 'ownerId'>>> (request);
+    const issue = await repository.createIssueFromMessage({ messageId, title: body.title ?? '', detail: body.detail ?? '', priority: body.priority, horizon: body.horizon, ownerId: body.ownerId }, principal.userId);
     return responseWithEtag(issue, `W/\"${issue.version}\"`, 201);
   } catch (error) {
     return repositoryErrorResponse(error);

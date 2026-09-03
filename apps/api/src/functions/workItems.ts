@@ -69,8 +69,8 @@ async function createTodoHandler(request: HttpRequest, _context: InvocationConte
   const teamId = request.params.teamId;
   if (!teamId) return { status: 422, jsonBody: { error: 'teamId is required', code: 'VALIDATION' } };
   try {
-    const body = await requestJson<Partial<Pick<TodoRecord, 'title' | 'notes' | 'ownerId' | 'dueDate' | 'linkedRockTaskId'>>>(request);
-    const todo = await repository.createTodo({ teamId, title: body.title ?? '', notes: body.notes, ownerId: body.ownerId ?? principal.userId, dueDate: body.dueDate ?? new Date().toISOString().slice(0, 10), linkedRockTaskId: body.linkedRockTaskId }, principal.userId);
+    const body = await requestJson<Partial<Pick<TodoRecord, 'title' | 'notes' | 'ownerId' | 'dueDate' | 'linkedRockTaskId' | 'sourceIssueId'>>>(request);
+    const todo = await repository.createTodo({ teamId, title: body.title ?? '', notes: body.notes, ownerId: body.ownerId ?? principal.userId, dueDate: body.dueDate ?? new Date().toISOString().slice(0, 10), linkedRockTaskId: body.linkedRockTaskId, sourceIssueId: body.sourceIssueId }, principal.userId);
     return responseWithEtag(todo, `W/\"${todo.version}\"`, 201);
   } catch (error) {
     return repositoryErrorResponse(error);
@@ -108,6 +108,57 @@ async function updateTodoHandler(request: HttpRequest, _context: InvocationConte
   }
 }
 
+async function addTodoChecklistItemHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
+  const scope = await requestScope(request);
+  if (isResponse(scope)) return scope;
+  const { principal, repository } = scope;
+  const todoId = request.params.todoId;
+  if (!todoId) return { status: 422, jsonBody: { error: 'todoId is required', code: 'VALIDATION' } };
+  try {
+    const body = await requestJson<{ text?: unknown; supporterId?: unknown }>(request);
+    if (typeof body.text !== 'string') return { status: 422, jsonBody: { error: 'Checklist item text is required', code: 'VALIDATION' } };
+    if (body.supporterId !== undefined && typeof body.supporterId !== 'string') return { status: 422, jsonBody: { error: 'supporterId must be a string', code: 'VALIDATION' } };
+    const todo = await repository.addTodoChecklistItem(todoId, body.text, body.supporterId as string | undefined, principal.userId, expectedVersion(request));
+    return responseWithEtag(todo, `W/\"${todo.version}\"`);
+  } catch (error) {
+    return repositoryErrorResponse(error);
+  }
+}
+
+async function updateTodoChecklistItemHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
+  const scope = await requestScope(request);
+  if (isResponse(scope)) return scope;
+  const { principal, repository } = scope;
+  const todoId = request.params.todoId;
+  const itemId = request.params.itemId;
+  if (!todoId || !itemId) return { status: 422, jsonBody: { error: 'todoId and itemId are required', code: 'VALIDATION' } };
+  try {
+    const body = await requestJson<{ text?: unknown; completed?: unknown; supporterId?: unknown }>(request);
+    if (body.text !== undefined && typeof body.text !== 'string') return { status: 422, jsonBody: { error: 'text must be a string', code: 'VALIDATION' } };
+    if (body.completed !== undefined && typeof body.completed !== 'boolean') return { status: 422, jsonBody: { error: 'completed must be a boolean', code: 'VALIDATION' } };
+    if (body.supporterId !== undefined && typeof body.supporterId !== 'string') return { status: 422, jsonBody: { error: 'supporterId must be a string', code: 'VALIDATION' } };
+    const todo = await repository.updateTodoChecklistItem(todoId, itemId, { text: body.text as string | undefined, completed: body.completed as boolean | undefined, supporterId: body.supporterId as string | undefined }, principal.userId, expectedVersion(request));
+    return responseWithEtag(todo, `W/\"${todo.version}\"`);
+  } catch (error) {
+    return repositoryErrorResponse(error);
+  }
+}
+
+async function deleteTodoChecklistItemHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
+  const scope = await requestScope(request);
+  if (isResponse(scope)) return scope;
+  const { principal, repository } = scope;
+  const todoId = request.params.todoId;
+  const itemId = request.params.itemId;
+  if (!todoId || !itemId) return { status: 422, jsonBody: { error: 'todoId and itemId are required', code: 'VALIDATION' } };
+  try {
+    const todo = await repository.deleteTodoChecklistItem(todoId, itemId, principal.userId, expectedVersion(request));
+    return responseWithEtag(todo, `W/\"${todo.version}\"`);
+  } catch (error) {
+    return repositoryErrorResponse(error);
+  }
+}
+
 async function createIssueHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
   const scope = await requestScope(request);
   if (isResponse(scope)) return scope;
@@ -115,8 +166,8 @@ async function createIssueHandler(request: HttpRequest, _context: InvocationCont
   const teamId = request.params.teamId;
   if (!teamId) return { status: 422, jsonBody: { error: 'teamId is required', code: 'VALIDATION' } };
   try {
-    const body = await requestJson<{ title?: string; detail?: string; category?: string; priority?: number; horizon?: 'short-term' | 'long-term'; ownerId?: string; linkedRockId?: string; linkedScorecardMetricId?: string; linkedScorecardWeekStartDate?: string; idsNote?: string }>(request);
-    const issue = await repository.createIssue({ teamId, title: body.title ?? '', detail: body.detail, category: body.category, priority: body.priority, horizon: body.horizon, ownerId: body.ownerId, linkedRockId: body.linkedRockId, linkedScorecardMetricId: body.linkedScorecardMetricId, linkedScorecardWeekStartDate: body.linkedScorecardWeekStartDate, idsNote: body.idsNote, raisedById: principal.userId }, principal.userId);
+    const body = await requestJson<{ title?: string; detail?: string; priority?: number; horizon?: 'short-term' | 'long-term'; ownerId?: string; linkedRockId?: string; linkedScorecardMetricId?: string; linkedScorecardWeekStartDate?: string; idsNote?: string }>(request);
+    const issue = await repository.createIssue({ teamId, title: body.title ?? '', detail: body.detail, priority: body.priority, horizon: body.horizon, ownerId: body.ownerId, linkedRockId: body.linkedRockId, linkedScorecardMetricId: body.linkedScorecardMetricId, linkedScorecardWeekStartDate: body.linkedScorecardWeekStartDate, idsNote: body.idsNote, raisedById: principal.userId }, principal.userId);
     return responseWithEtag(issue, `W/\"${issue.version}\"`, 201);
   } catch (error) {
     return repositoryErrorResponse(error);
@@ -130,7 +181,7 @@ async function updateIssueHandler(request: HttpRequest, _context: InvocationCont
   const issueId = request.params.issueId;
   if (!issueId) return { status: 422, jsonBody: { error: 'issueId is required', code: 'VALIDATION' } };
   try {
-    const body = await requestJson<Partial<Pick<IssueRecord, 'title' | 'detail' | 'category' | 'priority' | 'horizon' | 'ownerId' | 'idsNote'>>>(request);
+    const body = await requestJson<Partial<Pick<IssueRecord, 'title' | 'detail' | 'priority' | 'horizon' | 'ownerId' | 'idsNote'>>>(request);
     const issue = await repository.updateIssue(issueId, body, principal.userId, expectedVersion(request));
     return responseWithEtag(issue, `W/\"${issue.version}\"`);
   } catch (error) {
@@ -145,7 +196,16 @@ async function issueActionHandler(request: HttpRequest, _context: InvocationCont
   const issueId = request.params.issueId;
   if (!issueId) return { status: 422, jsonBody: { error: 'issueId is required', code: 'VALIDATION' } };
   try {
-    const issue = action === 'start' ? await repository.startIssue(issueId, principal.userId, expectedVersion(request)) : await repository.solveIssue(issueId, principal.userId, expectedVersion(request));
+    let issue;
+    if (action === 'start') {
+      issue = await repository.startIssue(issueId, principal.userId, expectedVersion(request));
+    } else {
+      const body = await requestJson<{ createFollowUpTodo?: unknown; resolutionNote?: unknown }>(request);
+      const createFollowUpTodo = body.createFollowUpTodo === undefined ? true : body.createFollowUpTodo;
+      if (typeof createFollowUpTodo !== 'boolean') return { status: 422, jsonBody: { error: 'createFollowUpTodo must be a boolean', code: 'VALIDATION' } };
+      if (body.resolutionNote !== undefined && typeof body.resolutionNote !== 'string') return { status: 422, jsonBody: { error: 'resolutionNote must be a string', code: 'VALIDATION' } };
+      issue = await repository.solveIssue(issueId, { createFollowUpTodo, resolutionNote: body.resolutionNote as string | undefined }, principal.userId, expectedVersion(request));
+    }
     return responseWithEtag(issue, `W/\"${issue.version}\"`);
   } catch (error) {
     return repositoryErrorResponse(error);
@@ -204,6 +264,9 @@ app.http('createIssueFromRock', { methods: ['POST'], authLevel: 'anonymous', rou
 app.http('createTodo', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/todos', handler: createTodoHandler });
 app.http('updateTodo', { methods: ['PATCH'], authLevel: 'anonymous', route: 'todos/{todoId}', handler: updateTodoHandler });
 app.http('updateTodoStatus', { methods: ['PATCH'], authLevel: 'anonymous', route: 'todos/{todoId}/status', handler: updateTodoStatusHandler });
+app.http('addTodoChecklistItem', { methods: ['POST'], authLevel: 'anonymous', route: 'todos/{todoId}/checklist', handler: addTodoChecklistItemHandler });
+app.http('updateTodoChecklistItem', { methods: ['PATCH'], authLevel: 'anonymous', route: 'todos/{todoId}/checklist/{itemId}', handler: updateTodoChecklistItemHandler });
+app.http('deleteTodoChecklistItem', { methods: ['DELETE'], authLevel: 'anonymous', route: 'todos/{todoId}/checklist/{itemId}', handler: deleteTodoChecklistItemHandler });
 app.http('createIssue', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/issues', handler: createIssueHandler });
 app.http('updateIssue', { methods: ['PATCH'], authLevel: 'anonymous', route: 'issues/{issueId}', handler: updateIssueHandler });
 app.http('startIssue', { methods: ['POST'], authLevel: 'anonymous', route: 'issues/{issueId}/ids', handler: (request, context) => issueActionHandler(request, context, 'start') });

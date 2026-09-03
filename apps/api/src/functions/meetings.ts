@@ -36,6 +36,21 @@ async function closeMeetingHandler(request: HttpRequest, _context: InvocationCon
   }
 }
 
+async function startMeetingHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
+  const scope = await requestScope(request);
+  if (isResponse(scope)) return scope;
+  const { principal, repository } = scope;
+  const teamId = request.params.teamId;
+  const meetingId = request.params.meetingId;
+  if (!teamId || !meetingId) return { status: 422, jsonBody: { error: 'teamId and meetingId are required', code: 'VALIDATION' } };
+  try {
+    const meeting = await repository.startMeeting(teamId, meetingId, principal.userId, expectedVersion(request));
+    return responseWithEtag(meeting, `W/\"${meeting.version}\"`);
+  } catch (error) {
+    return repositoryErrorResponse(error);
+  }
+}
+
 async function updateMeetingScheduleHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
   const scope = await requestScope(request);
   if (isResponse(scope)) return scope;
@@ -94,4 +109,5 @@ app.http('addMeetingIssueNote', { methods: ['POST'], authLevel: 'anonymous', rou
 app.http('updateMeetingSchedule', { methods: ['PATCH'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}', handler: updateMeetingScheduleHandler });
 app.http('updateMeetingSectionNote', { methods: ['PATCH'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/notes', handler: updateMeetingSectionNoteHandler });
 app.http('reorderMeetingIssues', { methods: ['PATCH'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/ids/order', handler: reorderMeetingIssuesHandler });
+app.http('startMeeting', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/start', handler: startMeetingHandler });
 app.http('closeMeeting', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/close', handler: closeMeetingHandler });
