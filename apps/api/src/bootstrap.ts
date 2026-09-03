@@ -3,8 +3,10 @@ import { TableClient } from '@azure/data-tables';
 import {
   DEFAULT_MEETING_SECTIONS,
   partitionFor,
+  weekStartDateFor,
   type EnvironmentId,
   type IssueAgeSettingsRecord,
+  type MeetingRecord,
   type TeamMembership,
   type TeamRecord,
   type UserProfile,
@@ -48,8 +50,20 @@ function bootstrapSettings(): IssueAgeSettingsRecord {
   return { ...recordBase('issue-age-settings', 'issueAgeSettings'), kind: 'issueAgeSettings', agingDays: 7, staleDays: 14, criticalDays: 30 };
 }
 
+function bootstrapMeeting(team: TeamRecord, attendeeId: string, environmentId: EnvironmentId): MeetingRecord {
+  const sections = (team.meetingSections?.length ? team.meetingSections : DEFAULT_MEETING_SECTIONS).filter((section) => section.enabled);
+  return {
+    ...recordBase(`meeting-${team.teamId}-current`, 'meeting', team.teamId, environmentId),
+    kind: 'meeting', teamId: team.teamId, label: `${team.shortName} L10`, dateLabel: `This week · ${team.meetingDay}`,
+    weekStartDate: weekStartDateFor(new Date()), status: 'upcoming', facilitatorId: attendeeId, attendeeIds: [attendeeId],
+    lastRating: 0, agendaProgress: 0, agendaTotal: sections.length, idsSolved: 0, idsTotal: 0, recap: '',
+    sectionNotes: {}, idsIssueIds: [], createdTodoIds: [], idsNotes: [],
+  };
+}
+
 function liveBootstrapRecords(userId: string, name: string, email: string): WorkspaceRecord[] {
-  return [adminUser(userId, name, email), bootstrapTeam(), bootstrapMembership(userId), bootstrapSettings()];
+  const team = bootstrapTeam();
+  return [adminUser(userId, name, email), team, bootstrapMembership(userId), bootstrapSettings(), bootstrapMeeting(team, userId, 'live')];
 }
 
 function addBootstrapAdmin(records: WorkspaceRecord[], userId: string, name: string, email: string, environmentId: EnvironmentId = 'live') {
@@ -80,6 +94,17 @@ async function writeRecords(container: Container, records: readonly WorkspaceRec
   }
 }
 
+async function ensureBootstrapMeetings(container: Container, records: readonly WorkspaceRecord[], attendeeId: string, environmentId: EnvironmentId) {
+  const teams = (records.filter((record) => record.kind === 'team') as TeamRecord[]).filter((team) => team.active && team.nodeType === 'operational');
+  for (const team of teams) {
+    const result = await container.items.query<{ id: string }>({
+      query: 'SELECT TOP 1 c.id FROM c WHERE c.pk = @pk AND c.kind = "meeting" AND c.teamId = @teamId AND c.status != "closed"',
+      parameters: [{ name: '@pk', value: partitionFor('team', team.teamId) }, { name: '@teamId', value: team.teamId }],
+    }, { partitionKey: partitionFor('team', team.teamId) }).fetchAll();
+    if (!result.resources.length) await writeRecords(container, [bootstrapMeeting(team, attendeeId, environmentId)]);
+  }
+}
+
 function requiredSetting(name: string) {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required for environment bootstrap.`);
@@ -105,12 +130,15 @@ export async function bootstrapEnvironments(options: { orgAdminObjectId: string;
   const initialTestAccessObjectIds = [...new Set(options.initialTestAccessObjectIds.map(stableIdentityId).filter(Boolean))];
 
   if (!await hasAnyWorkspaceRecords(live)) {
-    await writeRecords(live, liveBootstrapRecords(orgAdminObjectId, options.adminName, options.adminEmail));
+    const records = liveBootstrapRecords(orgAdminObjectId, options.adminName, options.adminEmail);
+    await writeRecords(live, records);
+    await ensureBootstrapMeetings(live, records, orgAdminObjectId, 'live');
   } else {
     const existing = await live.items.query<WorkspaceRecord>({ query: 'SELECT * FROM c WHERE c.pk = @pk', parameters: [{ name: '@pk', value: CONTROL_PARTITION }] }, { partitionKey: CONTROL_PARTITION }).fetchAll();
     const records = existing.resources;
     addBootstrapAdmin(records, orgAdminObjectId, options.adminName, options.adminEmail, 'live');
     await writeRecords(live, records.filter((record) => record.kind === 'user' || record.kind === 'teamMembership'));
+    await ensureBootstrapMeetings(live, records, orgAdminObjectId, 'live');
   }
 
   if (!await hasAnyWorkspaceRecords(test)) {
@@ -118,12 +146,14 @@ export async function bootstrapEnvironments(options: { orgAdminObjectId: string;
     addBootstrapAdmin(fixture, orgAdminObjectId, options.adminName, options.adminEmail, 'test');
     for (const userId of initialTestAccessObjectIds) addBootstrapAdmin(fixture, userId, options.adminName, options.adminEmail, 'test');
     await writeRecords(test, fixture);
+    await ensureBootstrapMeetings(test, fixture, orgAdminObjectId, 'test');
   } else {
     const existing = await test.items.query<WorkspaceRecord>({ query: 'SELECT * FROM c WHERE c.pk = @pk', parameters: [{ name: '@pk', value: CONTROL_PARTITION }] }, { partitionKey: CONTROL_PARTITION }).fetchAll();
     const records = existing.resources;
     addBootstrapAdmin(records, orgAdminObjectId, options.adminName, options.adminEmail, 'test');
     for (const userId of initialTestAccessObjectIds) addBootstrapAdmin(records, userId, options.adminName, options.adminEmail, 'test');
     await writeRecords(test, records.filter((record) => record.kind === 'user' || record.kind === 'teamMembership'));
+    await ensureBootstrapMeetings(test, records, orgAdminObjectId, 'test');
   }
 
   if (initialTestAccessObjectIds.length) await control.seedTestAccess(initialTestAccessObjectIds, orgAdminObjectId);

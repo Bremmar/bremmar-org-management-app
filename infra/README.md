@@ -45,8 +45,9 @@ not workspace synchronization.
 
 After deployment, run the API environment bootstrap with the initial Entra
 object IDs. Bootstrap is additive and idempotent: it creates control metadata
-in Azure Table Storage, initializes Live with configuration only, seeds Test
-from the dedicated sanitized fixture, and grants Test access only to the
+in Azure Table Storage, initializes Live with the organization configuration
+and an empty initial Leadership L10 shell, seeds Test from the dedicated
+sanitized fixture, and grants Test access only to the
 approved administrator IDs. It never copies Live records into Test.
 
 For an existing deployment, the old `eos-control` Cosmos database is no longer

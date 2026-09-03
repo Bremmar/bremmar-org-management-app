@@ -92,8 +92,9 @@ parameter, configure `COSMOS_CONNECTION_STRING`, `AZURE_STORAGE_CONNECTION_STRIN
 and `AZURE_STORAGE_TABLE_NAME` for a Static Web Apps managed API when
 applicable, and run
 `npm run bootstrap:environments --workspace @eos/api` after deployment with the
-initial Entra object IDs. Bootstrap initializes Live with configuration only,
-seeds Test from the dedicated sanitized fixture, and is additive/idempotent.
+initial Entra object IDs. Bootstrap initializes Live with the organization
+configuration and an empty initial Leadership L10 shell, seeds Test from the
+dedicated sanitized fixture, and is additive/idempotent.
 
 ### Entra identity mapping
 
