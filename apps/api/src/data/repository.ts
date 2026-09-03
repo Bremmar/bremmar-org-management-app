@@ -25,6 +25,7 @@ import {
   type IssueRecord,
   type IssueTransferRecord,
   type MeetingActionSummary,
+  type MeetingAttendeeRating,
   type MeetingAiSummary,
   type MeetingReviewPage,
   type MeetingReviewQuery,
@@ -169,9 +170,12 @@ export interface WorkspaceRepository {
   updateIssue(issueId: string, input: Partial<Pick<IssueRecord, 'title' | 'detail' | 'priority' | 'horizon' | 'ownerId' | 'idsNote'>>, actorId: string, expectedVersion?: number): Promise<IssueRecord>;
   addMeetingIssueNote(issueId: string, meetingId: string, note: string, actorId: string, expectedVersion?: number): Promise<{ issue: IssueRecord; meeting: MeetingRecord }>;
   updateMeetingSectionNote(teamId: string, meetingId: string, section: MeetingSection, note: string, actorId: string, expectedVersion?: number): Promise<MeetingRecord>;
+  setMeetingIssueSelection(teamId: string, meetingId: string, issueIds: string[], actorId: string, expectedVersion?: number): Promise<MeetingRecord>;
   reorderMeetingIssues(teamId: string, meetingId: string, issueIds: string[], actorId: string, expectedVersion?: number): Promise<MeetingRecord>;
-  startMeeting(teamId: string, meetingId: string, actorId: string, expectedVersion?: number): Promise<MeetingRecord>;
+  transitionMeetingSection(teamId: string, meetingId: string, fromSection: MeetingSection, toSection: MeetingSection, actorId: string, expectedVersion?: number): Promise<MeetingRecord>;
+  startMeeting(teamId: string, meetingId: string, actorId: string, expectedVersion?: number, facilitatorId?: string): Promise<MeetingRecord>;
   startIssue(issueId: string, actorId: string, expectedVersion?: number): Promise<IssueRecord>;
+  parkIssue(issueId: string, actorId: string, expectedVersion?: number): Promise<IssueRecord>;
   solveIssue(issueId: string, input: SolveIssueInput, actorId: string, expectedVersion?: number): Promise<IssueRecord>;
   createRock(input: { teamId: string; title: string; description?: string; notes?: string; ownerId: string; dueDate?: string; priority?: RockRecord['priority'] }, actorId: string): Promise<RockRecord>;
   createTodo(input: CreateTodoInput, actorId: string): Promise<TodoRecord>;
@@ -189,7 +193,7 @@ export interface WorkspaceRepository {
   createIssueFromMessage(input: { messageId: string; title: string; detail: string; priority?: number; horizon?: IssueRecord['horizon']; ownerId?: string }, actorId: string): Promise<IssueRecord>;
   updateMeetingSchedule(teamId: string, meetingId: string, input: { scheduledDate: string; scheduledTime: string }, actorId: string, expectedVersion?: number): Promise<MeetingRecord>;
   skipMeeting(teamId: string, meetingId: string, reason: MeetingSkipReason, note: string, actorId: string, expectedVersion?: number): Promise<MeetingRecord>;
-  closeMeeting(teamId: string, meetingId: string, recap: string, rating: number, actorId: string, expectedVersion?: number): Promise<MeetingRecord>;
+  closeMeeting(teamId: string, meetingId: string, recap: string, rating: number, actorId: string, expectedVersion?: number, attendeeRatings?: MeetingAttendeeRating[]): Promise<MeetingRecord>;
   getMeetingSummaryJob(teamId: string, meetingId: string, userId: string): Promise<MeetingSummaryJobRecord | null>;
   requestMeetingSummary(teamId: string, meetingId: string, actorId: string, expectedVersion?: number): Promise<MeetingRecord>;
   updateMeetingSummaryDispatch(jobId: string, status: 'generating' | 'failed', error: string | undefined, actorId: string): Promise<MeetingSummaryJobRecord>;
@@ -205,6 +209,7 @@ export interface WorkspaceRepository {
 }
 
 const DAY = 24 * 60 * 60 * 1000;
+const MAX_IDS_ISSUES = 5;
 const ORG_ID = process.env.BREMMAR_ORG_ID ?? 'bremmar';
 const nowIso = () => new Date().toISOString();
 const daysAgo = (days: number) => new Date(Date.now() - days * DAY).toISOString();
@@ -265,6 +270,24 @@ function etagFor(records: readonly WorkspaceRecord[]) {
 
 function assertExpectedVersion(actual: number, expectedVersion?: number) {
   if (expectedVersion !== undefined && actual !== expectedVersion) throw new RepositoryError('CONFLICT', 'The record changed elsewhere. Refresh and try again.');
+}
+
+function elapsedSeconds(startedAt: string | undefined, endedAt: string) {
+  if (!startedAt) return 0;
+  const start = new Date(startedAt).getTime();
+  const end = new Date(endedAt).getTime();
+  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, Math.floor((end - start) / 1000)) : 0;
+}
+
+function finalizeMeetingTiming(meeting: MeetingRecord, endedAt: string) {
+  const section = meeting.activeSection;
+  const sectionStartedAt = meeting.activeSectionStartedAt ?? meeting.startedAt;
+  if (section && sectionStartedAt) {
+    const duration = elapsedSeconds(sectionStartedAt, endedAt);
+    meeting.sectionDurations = { ...(meeting.sectionDurations ?? {}), [section]: (meeting.sectionDurations?.[section] ?? 0) + duration };
+  }
+  meeting.durationSeconds = elapsedSeconds(meeting.startedAt, endedAt);
+  meeting.activeSectionStartedAt = undefined;
 }
 
 function assertText(value: string, field: string) {
@@ -343,6 +366,8 @@ function normalizedMeeting(team: TeamRecord | undefined, meeting: MeetingRecord)
     dateLabel: meetingDateLabel(scheduledDate),
     weekStartDate: weekStartDateFor(scheduledDate),
     sectionNotes: meeting.sectionNotes ?? {},
+    sectionDurations: meeting.sectionDurations ?? {},
+    attendeeRatings: meeting.attendeeRatings ?? [],
     idsIssueIds: meeting.idsIssueIds ?? [],
     idsAddedIssueIds: meeting.idsAddedIssueIds ?? [],
     createdTodoIds: meeting.createdTodoIds ?? [],
@@ -370,6 +395,10 @@ function milestoneCountsFor(rockId: string, tasks: RockTaskRecord[]) {
 function meetingRecap(team: TeamRecord, meeting: MeetingRecord, rocks: RockRecord[], tasks: RockTaskRecord[], todos: TodoRecord[], issues: IssueRecord[], manualNotes: string, metrics: ScorecardMetricRecord[] = [], results: ScorecardResultRecord[] = []) {
   const ids = meeting.idsIssueIds.map((id) => issues.find((issue) => issue.id === id)).filter((issue): issue is IssueRecord => Boolean(issue));
   const lines = [`${team.name} L10 recap · ${meeting.dateLabel} · week of ${meeting.weekStartDate}`, ''];
+  lines.push(`Facilitator ID: ${meeting.facilitatorId}`);
+  if (meeting.durationSeconds !== undefined) lines.push(`Meeting duration: ${Math.floor(meeting.durationSeconds / 60)}m ${meeting.durationSeconds % 60}s`);
+  if (meeting.attendeeRatings?.length) lines.push(`Attendee ratings: ${meeting.attendeeRatings.map((entry) => `${entry.attendeeId} ${entry.rating}/10`).join('; ')}`);
+  lines.push('');
   for (const [section, note] of Object.entries(meeting.sectionNotes)) {
     if (note?.trim()) lines.push(`${section}: ${note.trim()}`);
   }
@@ -397,9 +426,13 @@ function meetingSummaryContext(team: TeamRecord, meeting: MeetingRecord, rocks: 
     label: meeting.label,
     scheduledDate: meeting.scheduledDate,
     scheduledTime: meeting.scheduledTime,
+    facilitatorId: meeting.facilitatorId,
     startedAt: meeting.startedAt,
     closedAt: meeting.closedAt ?? meeting.updatedAt,
+    durationSeconds: meeting.durationSeconds,
+    sectionDurations: clone(meeting.sectionDurations ?? {}),
     attendeeIds: [...meeting.attendeeIds],
+    attendeeRatings: meeting.attendeeRatings ? clone(meeting.attendeeRatings) : undefined,
     recap: meeting.recap,
     sectionNotes: clone(meeting.sectionNotes),
     idsNotes: clone(meeting.idsNotes),
@@ -1296,6 +1329,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     this.requireWrite(issue.teamId, actorId);
     assertExpectedVersion(issue.version, expectedVersion);
     if (meeting.status === 'closed') throw new RepositoryError('CONFLICT', 'Closed meetings cannot receive new IDS notes.');
+    if (!meeting.idsIssueIds.includes(issueId) && meeting.idsIssueIds.length >= MAX_IDS_ISSUES) throw new RepositoryError('VALIDATION', `Select no more than ${MAX_IDS_ISSUES} Issues for an L10.`);
     const timestamp = nowIso();
     const entry: MeetingIssueNoteRecord = { id: generatedId('meeting-note'), meetingId, issueId, authorId: actorId, note: note.trim(), createdAt: timestamp };
     meeting.idsNotes.push(entry);
@@ -1338,6 +1372,44 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     return clone(meeting);
   }
 
+  async setMeetingIssueSelection(teamId: string, meetingId: string, issueIds: string[], actorId: string, expectedVersion?: number) {
+    this.requireWrite(teamId, actorId);
+    const team = this.team(teamId);
+    const meeting = this.meetings.find((item) => item.id === meetingId && item.teamId === teamId);
+    if (!team || !meeting) throw new RepositoryError('NOT_FOUND', 'Meeting not found.');
+    assertExpectedVersion(meeting.version, expectedVersion);
+    if (meeting.status === 'closed' || meeting.status === 'skipped') throw new RepositoryError('CONFLICT', 'Closed meetings cannot change their IDS selection.');
+    if (!Array.isArray(issueIds) || issueIds.some((issueId) => typeof issueId !== 'string')) throw new RepositoryError('VALIDATION', 'IDS selection must be a list of Issue IDs.');
+    if (issueIds.length > MAX_IDS_ISSUES) throw new RepositoryError('VALIDATION', `Select no more than ${MAX_IDS_ISSUES} Issues for an L10.`);
+    const requested = new Set<string>();
+    for (const issueId of issueIds) {
+      if (requested.has(issueId)) throw new RepositoryError('VALIDATION', 'IDS selection cannot contain duplicates.');
+      requested.add(issueId);
+      const issue = this.activeIssue(issueId);
+      if (!issue || issue.teamId !== teamId || issue.horizon !== 'short-term' || issue.status === 'solved') throw new RepositoryError('VALIDATION', 'Every selected Issue must be an active short-term Issue for this team.');
+    }
+    if (issueIds.length === meeting.idsIssueIds.length && issueIds.every((issueId, index) => issueId === meeting.idsIssueIds[index])) return clone(meeting);
+    const timestamp = nowIso();
+    const previous = new Set(meeting.idsIssueIds);
+    meeting.idsIssueIds = [...issueIds];
+    meeting.idsAddedIssueIds = [...new Set([...meeting.idsAddedIssueIds, ...issueIds.filter((issueId) => !previous.has(issueId))])];
+    meeting.idsTotal = issueIds.length;
+    meeting.updatedAt = timestamp;
+    meeting.updatedBy = actorId;
+    meeting.version += 1;
+    for (const issueId of issueIds) {
+      const issue = this.activeIssue(issueId);
+      if (issue && issue.status !== 'in-ids') {
+        issue.status = 'in-ids';
+        issue.updatedAt = timestamp;
+        issue.updatedBy = actorId;
+        issue.version += 1;
+      }
+    }
+    this.recordAudit(actorId, 'Selected IDS Issues', meeting.id, `${team.name} selected ${issueIds.length} Issues for IDS.`, 'meeting');
+    return clone(meeting);
+  }
+
   async reorderMeetingIssues(teamId: string, meetingId: string, issueIds: string[], actorId: string, expectedVersion?: number) {
     this.requireWrite(teamId, actorId);
     const team = this.team(teamId);
@@ -1347,6 +1419,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     assertExpectedVersion(meeting.version, expectedVersion);
     if (meeting.status === 'closed') throw new RepositoryError('CONFLICT', 'Closed meetings cannot reorder Issues.');
     if (!Array.isArray(issueIds) || issueIds.some((issueId) => typeof issueId !== 'string')) throw new RepositoryError('VALIDATION', 'Issue order must be a list of Issue IDs.');
+    if (issueIds.length > MAX_IDS_ISSUES) throw new RepositoryError('VALIDATION', `Select no more than ${MAX_IDS_ISSUES} Issues for an L10.`);
     const requested = new Set<string>();
     for (const issueId of issueIds) {
       if (requested.has(issueId)) throw new RepositoryError('VALIDATION', 'Issue order cannot contain duplicates.');
@@ -1367,6 +1440,59 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     return clone(meeting);
   }
 
+  async transitionMeetingSection(teamId: string, meetingId: string, fromSection: MeetingSection, toSection: MeetingSection, actorId: string, expectedVersion?: number) {
+    this.requireWrite(teamId, actorId);
+    const team = this.team(teamId);
+    const meeting = this.meetings.find((item) => item.id === meetingId && item.teamId === teamId);
+    if (!team || !meeting) throw new RepositoryError('NOT_FOUND', 'Meeting not found.');
+    assertExpectedVersion(meeting.version, expectedVersion);
+    if (meeting.status !== 'in-progress') throw new RepositoryError('CONFLICT', 'Start the meeting before moving between timed sections.');
+    const sections = meetingSectionsFor(team);
+    if (!sections.some((section) => section.id === fromSection) || !sections.some((section) => section.id === toSection)) throw new RepositoryError('VALIDATION', 'Choose valid sections for this meeting.');
+    if (fromSection === toSection) return clone(meeting);
+    const timestamp = nowIso();
+    const activeSection = meeting.activeSection ?? fromSection;
+    const sectionStartedAt = meeting.activeSectionStartedAt ?? meeting.startedAt;
+    const duration = activeSection && sectionStartedAt ? elapsedSeconds(sectionStartedAt, timestamp) : 0;
+    meeting.sectionDurations = { ...(meeting.sectionDurations ?? {}), [activeSection]: (meeting.sectionDurations?.[activeSection] ?? 0) + duration };
+    meeting.activeSection = toSection;
+    meeting.activeSectionStartedAt = timestamp;
+    const nextIndex = sections.findIndex((section) => section.id === toSection);
+    meeting.agendaProgress = nextIndex >= 0 ? nextIndex + 1 : meeting.agendaProgress;
+    meeting.updatedAt = timestamp;
+    meeting.updatedBy = actorId;
+    meeting.version += 1;
+    this.recordAudit(actorId, 'Moved L10 section', meeting.id, `${fromSection} → ${toSection}.`, 'meeting');
+    return clone(meeting);
+  }
+
+  async parkIssue(issueId: string, actorId: string, expectedVersion?: number) {
+    const issue = this.activeIssue(issueId);
+    if (!issue) throw new RepositoryError('NOT_FOUND', 'Issue not found.');
+    this.requireWrite(issue.teamId, actorId);
+    assertExpectedVersion(issue.version, expectedVersion);
+    if (issue.status === 'solved') return clone(issueAge(issue, this.settings));
+    if (issue.horizon !== 'short-term') throw new RepositoryError('VALIDATION', 'Long-term Issues do not enter the weekly IDS queue.');
+    const meeting = this.meetings.find((item) => item.teamId === issue.teamId && item.status !== 'closed' && item.status !== 'skipped');
+    if (meeting && !meeting.idsIssueIds.includes(issue.id) && meeting.idsIssueIds.length >= MAX_IDS_ISSUES) throw new RepositoryError('VALIDATION', `Select no more than ${MAX_IDS_ISSUES} Issues for an L10.`);
+    const timestamp = nowIso();
+    issue.status = 'parked';
+    issue.idsNote = appendHistoricalNote(issue.idsNote, timestamp, 'Parked for a future IDS conversation.');
+    issue.updatedAt = timestamp;
+    issue.updatedBy = actorId;
+    issue.version += 1;
+    if (meeting && !meeting.idsIssueIds.includes(issue.id)) {
+      meeting.idsIssueIds.push(issue.id);
+      if (!meeting.idsAddedIssueIds.includes(issue.id)) meeting.idsAddedIssueIds.push(issue.id);
+      meeting.idsTotal = meeting.idsIssueIds.length;
+      meeting.updatedAt = timestamp;
+      meeting.updatedBy = actorId;
+      meeting.version += 1;
+    }
+    this.recordAudit(actorId, 'Parked Issue', issue.id, `Parked ${issue.title} for a future IDS conversation.`, 'issue');
+    return clone(issueAge(issue, this.settings));
+  }
+
   async startIssue(issueId: string, actorId: string, expectedVersion?: number) {
     const issue = this.activeIssue(issueId);
     if (!issue) throw new RepositoryError('NOT_FOUND', 'Issue not found.');
@@ -1374,10 +1500,12 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     assertExpectedVersion(issue.version, expectedVersion);
     if (issue.horizon !== 'short-term') throw new RepositoryError('VALIDATION', 'Long-term Issues do not enter the weekly IDS queue.');
     if (issue.assignmentState === 'pending-transfer') throw new RepositoryError('CONFLICT', 'A pending transfer must be decided before IDS starts.');
+    const meeting = this.meetings.find((item) => item.teamId === issue.teamId && item.status !== 'closed' && item.status !== 'skipped');
+    if (meeting && !meeting.idsIssueIds.includes(issue.id) && meeting.idsIssueIds.length >= MAX_IDS_ISSUES) throw new RepositoryError('VALIDATION', `Select no more than ${MAX_IDS_ISSUES} Issues for an L10.`);
     issue.status = 'in-ids';
     issue.updatedAt = nowIso();
     issue.updatedBy = actorId;
-    const meeting = this.meetings.find((item) => item.teamId === issue.teamId && item.status !== 'closed');
+    issue.version += 1;
     if (meeting && !meeting.idsIssueIds.includes(issue.id)) {
       meeting.idsIssueIds.push(issue.id);
       if (!meeting.idsAddedIssueIds.includes(issue.id)) meeting.idsAddedIssueIds.push(issue.id);
@@ -1399,12 +1527,13 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     if (issue.assignmentState === 'pending-transfer') throw new RepositoryError('CONFLICT', 'A pending transfer must be decided before the Issue is solved.');
     if (typeof input.createFollowUpTodo !== 'boolean') throw new RepositoryError('VALIDATION', 'Choose whether to create a follow-up To-Do.');
     if (input.resolutionNote !== undefined && typeof input.resolutionNote !== 'string') throw new RepositoryError('VALIDATION', 'Resolution note must be a string.');
+    const meeting = this.meetings.find((item) => item.teamId === issue.teamId && item.status !== 'closed' && item.status !== 'skipped');
+    if (meeting && !meeting.idsIssueIds.includes(issue.id) && meeting.idsIssueIds.length >= MAX_IDS_ISSUES) throw new RepositoryError('VALIDATION', `Select no more than ${MAX_IDS_ISSUES} Issues for an L10.`);
     const timestamp = nowIso();
     issue.status = 'solved';
     issue.solvedAt = timestamp;
     issue.updatedAt = issue.solvedAt;
     issue.updatedBy = actorId;
-    const meeting = this.meetings.find((item) => item.teamId === issue.teamId && item.status !== 'closed');
     if (meeting && !meeting.idsIssueIds.includes(issue.id)) {
       meeting.idsIssueIds.push(issue.id);
       if (!meeting.idsAddedIssueIds.includes(issue.id)) meeting.idsAddedIssueIds.push(issue.id);
@@ -1785,7 +1914,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     }
   }
 
-  async startMeeting(teamId: string, meetingId: string, actorId: string, expectedVersion?: number) {
+  async startMeeting(teamId: string, meetingId: string, actorId: string, expectedVersion?: number, facilitatorId?: string) {
     this.requireWrite(teamId, actorId);
     const team = this.team(teamId);
     if (!team) throw new RepositoryError('NOT_FOUND', 'Team not found.');
@@ -1793,10 +1922,29 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     if (!meeting) throw new RepositoryError('NOT_FOUND', 'Meeting not found.');
     assertExpectedVersion(meeting.version, expectedVersion);
     if (meeting.status === 'closed' || meeting.status === 'skipped') throw new RepositoryError('CONFLICT', 'Closed or skipped meetings cannot be started.');
-    if (meeting.status === 'in-progress') return clone(meeting);
+    const selectedFacilitatorId = facilitatorId ?? meeting.facilitatorId ?? actorId;
+    const isTeamMember = this.memberships.some((membership) => membership.teamId === teamId && membership.userId === selectedFacilitatorId && membership.active);
+    if (!this.user(selectedFacilitatorId) || !isTeamMember) throw new RepositoryError('VALIDATION', 'The facilitator must be an active member of this team.');
+    if (meeting.status === 'in-progress') {
+      if (!meeting.facilitatorId) {
+        const timestamp = nowIso();
+        meeting.facilitatorId = selectedFacilitatorId;
+        if (!meeting.attendeeIds.includes(selectedFacilitatorId)) meeting.attendeeIds = [...meeting.attendeeIds, selectedFacilitatorId];
+        meeting.updatedAt = timestamp;
+        meeting.updatedBy = actorId;
+        meeting.version += 1;
+        this.recordAudit(actorId, 'Recorded L10 facilitator', meeting.id, `${selectedFacilitatorId} recorded as facilitator.`, 'meeting');
+      }
+      return clone(meeting);
+    }
     const timestamp = nowIso();
     meeting.status = 'in-progress';
     meeting.startedAt = meeting.startedAt ?? timestamp;
+    meeting.facilitatorId = selectedFacilitatorId;
+    if (!meeting.attendeeIds.includes(selectedFacilitatorId)) meeting.attendeeIds = [...meeting.attendeeIds, selectedFacilitatorId];
+    meeting.activeSection = meeting.activeSection ?? 'segue';
+    meeting.activeSectionStartedAt = meeting.activeSectionStartedAt ?? timestamp;
+    meeting.sectionDurations = meeting.sectionDurations ?? {};
     meeting.updatedAt = timestamp;
     meeting.updatedBy = actorId;
     meeting.version += 1;
@@ -1831,7 +1979,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     return clone(meeting);
   }
 
-  async closeMeeting(teamId: string, meetingId: string, recap: string, rating: number, actorId: string, expectedVersion?: number) {
+  async closeMeeting(teamId: string, meetingId: string, recap: string, rating: number, actorId: string, expectedVersion?: number, attendeeRatings?: MeetingAttendeeRating[]) {
     this.requireWrite(teamId, actorId);
     const team = this.team(teamId);
     if (!team) throw new RepositoryError('NOT_FOUND', 'Team not found.');
@@ -1846,6 +1994,13 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     const teamTasks = this.tasks.filter((task) => task.teamId === teamId);
     const teamTodos = this.todos.filter((todo) => todo.teamId === teamId);
     const teamIssues = this.issues.filter((issue) => issue.teamId === teamId && issue.assignmentState !== 'redirected');
+    const ratings = attendeeRatings ?? [];
+    if (attendeeRatings !== undefined && (!Array.isArray(attendeeRatings) || ratings.some((entry) => !entry || typeof entry.attendeeId !== 'string' || !Number.isInteger(entry.rating) || entry.rating < 1 || entry.rating > 10))) throw new RepositoryError('VALIDATION', 'Each attendee rating must be a whole number from 1 to 10.');
+    if (attendeeRatings !== undefined && ratings.length !== meeting.attendeeIds.length) throw new RepositoryError('VALIDATION', 'Enter a rating for each recorded attendee before closing the meeting.');
+    if (attendeeRatings !== undefined && actorId !== meeting.facilitatorId) throw new RepositoryError('FORBIDDEN', 'Only the meeting facilitator can submit attendee ratings.');
+    const attendeeIds = new Set(meeting.attendeeIds);
+    if (new Set(ratings.map((entry) => entry.attendeeId)).size !== ratings.length || ratings.some((entry) => !attendeeIds.has(entry.attendeeId))) throw new RepositoryError('VALIDATION', 'Ratings must be supplied once for each recorded attendee.');
+    finalizeMeetingTiming(meeting, timestamp);
     meeting.status = 'closed';
     meeting.closedAt = timestamp;
     meeting.agendaProgress = sections.length;
@@ -1853,6 +2008,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     meeting.idsTotal = meeting.idsIssueIds.length;
     meeting.idsSolved = meeting.idsIssueIds.filter((issueId) => teamIssues.find((issue) => issue.id === issueId)?.status === 'solved').length;
     meeting.lastRating = Math.min(10, Math.max(0, rating));
+    if (attendeeRatings !== undefined) meeting.attendeeRatings = ratings.map((entry) => ({ ...entry }));
     meeting.actionSummary = meetingActionSummary(meeting, teamIssues);
     meeting.recap = meetingRecap(team, meeting, teamRocks, teamTasks, teamTodos, teamIssues, recap, this.metrics, this.scorecardResults);
     meeting.aiSummaryStatus = 'queued';
@@ -1903,7 +2059,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     if (!team || !meeting) throw new RepositoryError('NOT_FOUND', 'Meeting not found.');
     assertExpectedVersion(meeting.version, expectedVersion);
     if (meeting.status !== 'closed') throw new RepositoryError('CONFLICT', 'AI summaries are available after a meeting is closed.');
-    if (meeting.aiSummaryStatus === 'ready' || meeting.aiSummaryStatus === 'queued' || meeting.aiSummaryStatus === 'generating') return clone(meeting);
+    if (meeting.aiSummaryStatus === 'queued' || meeting.aiSummaryStatus === 'generating') return clone(meeting);
     const timestamp = nowIso();
     const existingJob = this.summaryJobs.find((job) => job.id === meeting.aiSummaryJobId);
     const source = existingJob?.source ?? meeting.aiSummarySource ?? (meeting.aiSummaryRequestedAt ? 'close' : 'legacy');
@@ -2568,14 +2724,17 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
   async updateIssue(issueId: string, input: Partial<Pick<IssueRecord, 'title' | 'detail' | 'priority' | 'horizon' | 'ownerId' | 'idsNote'>>, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateIssue(issueId, input, actorId, expectedVersion)); }
   async addMeetingIssueNote(issueId: string, meetingId: string, note: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.addMeetingIssueNote(issueId, meetingId, note, actorId, expectedVersion)); }
   async updateMeetingSectionNote(teamId: string, meetingId: string, section: MeetingSection, note: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateMeetingSectionNote(teamId, meetingId, section, note, actorId, expectedVersion)); }
+  async setMeetingIssueSelection(teamId: string, meetingId: string, issueIds: string[], actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.setMeetingIssueSelection(teamId, meetingId, issueIds, actorId, expectedVersion)); }
   async reorderMeetingIssues(teamId: string, meetingId: string, issueIds: string[], actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.reorderMeetingIssues(teamId, meetingId, issueIds, actorId, expectedVersion)); }
-  async startMeeting(teamId: string, meetingId: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.startMeeting(teamId, meetingId, actorId, expectedVersion)); }
+  async transitionMeetingSection(teamId: string, meetingId: string, fromSection: MeetingSection, toSection: MeetingSection, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.transitionMeetingSection(teamId, meetingId, fromSection, toSection, actorId, expectedVersion)); }
+  async startMeeting(teamId: string, meetingId: string, actorId: string, expectedVersion?: number, facilitatorId?: string) { return this.withMutation(actorId, () => super.startMeeting(teamId, meetingId, actorId, expectedVersion, facilitatorId)); }
   async updateMeetingSchedule(teamId: string, meetingId: string, input: { scheduledDate: string; scheduledTime: string }, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateMeetingSchedule(teamId, meetingId, input, actorId, expectedVersion)); }
   async skipMeeting(teamId: string, meetingId: string, reason: MeetingSkipReason, note: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.skipMeeting(teamId, meetingId, reason, note, actorId, expectedVersion)); }
   async requestMeetingSummary(teamId: string, meetingId: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.requestMeetingSummary(teamId, meetingId, actorId, expectedVersion)); }
   async updateMeetingSummaryDispatch(jobId: string, status: 'generating' | 'failed', error: string | undefined, actorId: string) { return this.withMutation(actorId, () => super.updateMeetingSummaryDispatch(jobId, status, error, actorId)); }
   async completeMeetingSummary(jobId: string, status: 'ready' | 'failed', summary: MeetingAiSummary | undefined, error: string | undefined, attempt?: number) { return this.withMutation('ai-worker', () => super.completeMeetingSummary(jobId, status, summary, error, attempt)); }
   async startIssue(issueId: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.startIssue(issueId, actorId, expectedVersion)); }
+  async parkIssue(issueId: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.parkIssue(issueId, actorId, expectedVersion)); }
   async solveIssue(issueId: string, input: SolveIssueInput, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.solveIssue(issueId, input, actorId, expectedVersion)); }
   async createRock(input: { teamId: string; title: string; description?: string; notes?: string; ownerId: string; dueDate?: string; priority?: RockRecord['priority'] }, actorId: string) { return this.withMutation(actorId, () => super.createRock(input, actorId)); }
   async createTodo(input: CreateTodoInput, actorId: string) { return this.withMutation(actorId, () => super.createTodo(input, actorId)); }
@@ -2600,7 +2759,7 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
   async sendTeamMessage(input: { fromTeamId: string; toTeamId: string; subject: string; body: string; senderId: string }) { return this.withMutation(input.senderId, () => super.sendTeamMessage(input)); }
   async markMessageRead(messageId: string, userId: string, expectedVersion?: number) { return this.withMutation(userId, () => super.markMessageRead(messageId, userId, expectedVersion)); }
   async createIssueFromMessage(input: { messageId: string; title: string; detail: string; priority?: number; horizon?: IssueRecord['horizon']; ownerId?: string }, actorId: string) { return this.withMutation(actorId, () => super.createIssueFromMessage(input, actorId)); }
-  async closeMeeting(teamId: string, meetingId: string, recap: string, rating: number, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.closeMeeting(teamId, meetingId, recap, rating, actorId, expectedVersion)); }
+  async closeMeeting(teamId: string, meetingId: string, recap: string, rating: number, actorId: string, expectedVersion?: number, attendeeRatings?: MeetingAttendeeRating[]) { return this.withMutation(actorId, () => super.closeMeeting(teamId, meetingId, recap, rating, actorId, expectedVersion, attendeeRatings)); }
   async getAdminSnapshot(actorId: string): Promise<AdminSnapshot> {
     const actor = await this.getUser(actorId);
     if (!actor) throw new RepositoryError('FORBIDDEN', 'The user is not active in this organization.');

@@ -15,6 +15,7 @@ import type {
   IssueTransferStatus,
   IssueStatus,
   MeetingActionSummary,
+  MeetingAttendeeRating,
   MeetingAiSummary,
   MeetingReviewItem,
   MeetingReviewQuery,
@@ -42,7 +43,9 @@ import type {
 } from './types';
 
 const DAY = 24 * 60 * 60 * 1000;
+const MAX_IDS_ISSUES = 5;
 const weekdayNames = new Set(['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']);
+const meetingSectionIds = new Set<MeetingSection>(['segue', 'scorecard', 'rock-review', 'headlines', 'todo-review', 'ids', 'conclude']);
 
 export class WorkspaceApiError extends Error {
   constructor(public readonly code: 'NOT_FOUND' | 'FORBIDDEN' | 'CONFLICT' | 'VALIDATION' | 'UNAVAILABLE', message: string) {
@@ -81,13 +84,16 @@ export interface WorkspaceApi {
   upsertScorecardResult(metricId: string, weekStartDate: string, input: Pick<ScorecardResult, 'actual' | 'status'>, expectedVersion?: number): Promise<Workspace>;
   createIssueFromScorecard(metricId: string, weekStartDate: string, expectedVersion?: number): Promise<Workspace>;
   createIssueFromRock(rockId: string, expectedVersion?: number): Promise<Workspace>;
-  startIssue(issueId: string): Promise<Workspace>;
+  startIssue(issueId: string, expectedVersion?: number): Promise<Workspace>;
+  parkIssue(issueId: string, expectedVersion?: number): Promise<Workspace>;
   solveIssue(issueId: string, input: SolveIssueInput, expectedVersion?: number): Promise<Workspace>;
   addIssue(input: Pick<Issue, 'title' | 'detail' | 'teamId' | 'raisedById'> & { horizon?: IssueHorizon; priority?: number; ownerId?: string; linkedRockId?: string; linkedScorecardMetricId?: string; linkedScorecardWeekStartDate?: string; idsNote?: string }): Promise<Workspace>;
   updateIssue(issueId: string, input: Partial<Pick<Issue, 'title' | 'detail' | 'priority' | 'horizon' | 'ownerId' | 'idsNote'>>, expectedVersion?: number): Promise<Workspace>;
   addMeetingIssueNote(issueId: string, meetingId: string, note: string, expectedVersion?: number): Promise<Workspace>;
   updateMeetingSectionNote(teamId: string, meetingId: string, section: MeetingSection, note: string, expectedVersion?: number): Promise<Workspace>;
+  setMeetingIssueSelection(teamId: string, meetingId: string, issueIds: string[], expectedVersion?: number): Promise<Workspace>;
   reorderMeetingIssues(teamId: string, meetingId: string, issueIds: string[], expectedVersion?: number): Promise<Workspace>;
+  transitionMeetingSection(teamId: string, meetingId: string, fromSection: MeetingSection, toSection: MeetingSection, expectedVersion?: number): Promise<Workspace>;
   requestIssueTransfer(issueId: string, destinationTeamId: string, note?: string, expectedVersion?: number): Promise<Workspace>;
   acceptIssueTransfer(transferId: string, expectedVersion?: number): Promise<Workspace>;
   rejectIssueTransfer(transferId: string, message: string, expectedVersion?: number): Promise<Workspace>;
@@ -98,14 +104,14 @@ export interface WorkspaceApi {
   markNotificationRead(notificationId: string): Promise<Workspace>;
   updateProfile(input: Pick<Partial<User>, 'name' | 'email' | 'avatarDataUrl'>): Promise<Workspace>;
   updateMeetingSchedule(teamId: string, meetingId: string, input: { scheduledDate: string; scheduledTime: string }, expectedVersion?: number): Promise<Workspace>;
-  startMeeting(teamId: string, meetingId: string, expectedVersion?: number): Promise<Workspace>;
+  startMeeting(teamId: string, meetingId: string, expectedVersion?: number, facilitatorId?: string): Promise<Workspace>;
   createTeam(input: Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials'> & { meetingSections?: MeetingSectionConfig[]; escalationUserIds?: string[] }): Promise<Workspace>;
   updateTeam(teamId: string, input: Partial<Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds'>>): Promise<Workspace>;
   createUser(input: Pick<User, 'name' | 'email' | 'accent'> & { platformAdmin?: boolean }): Promise<Workspace>;
   updateUser(userId: string, input: Partial<Pick<User, 'name' | 'email'>> & { platformAdmin?: boolean }, expectedVersion?: number): Promise<Workspace>;
   upsertMembership(input: Pick<TeamMembership, 'userId' | 'teamId' | 'role'>): Promise<Workspace>;
   updateAgeSettings(settings: IssueAgeSettings): Promise<Workspace>;
-  closeMeeting(teamId: string, recap: string, rating: number, meetingId?: string): Promise<Workspace>;
+  closeMeeting(teamId: string, recap: string, rating: number, meetingId?: string, attendeeRatings?: MeetingAttendeeRating[]): Promise<Workspace>;
   getMeetingReview(query?: MeetingReviewQuery): Promise<MeetingReviewPage>;
   getMeeting(teamId: string, meetingId: string): Promise<Workspace['meetings'][number]>;
   skipMeeting(teamId: string, meetingId: string, reason: MeetingSkipReason, note?: string, expectedVersion?: number): Promise<Workspace>;
@@ -171,6 +177,24 @@ function activeIssues(issues: Issue[]) {
   return issues.filter((issue) => issue.assignmentState !== 'redirected');
 }
 
+function meetingElapsedSeconds(startedAt: string | undefined, endedAt: string) {
+  if (!startedAt) return 0;
+  const start = new Date(startedAt).getTime();
+  const end = new Date(endedAt).getTime();
+  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, Math.floor((end - start) / 1000)) : 0;
+}
+
+function finalizeMeetingTiming(meeting: Workspace['meetings'][number], endedAt: string) {
+  const section = meeting.activeSection;
+  const sectionStartedAt = meeting.activeSectionStartedAt ?? meeting.startedAt;
+  if (section && sectionStartedAt) {
+    const elapsed = meetingElapsedSeconds(sectionStartedAt, endedAt);
+    meeting.sectionDurations = { ...(meeting.sectionDurations ?? {}), [section]: (meeting.sectionDurations?.[section] ?? 0) + elapsed };
+  }
+  meeting.durationSeconds = meetingElapsedSeconds(meeting.startedAt, endedAt);
+  meeting.activeSectionStartedAt = undefined;
+}
+
 function validateMeetingConfiguration(cadence: Team['meetingCadence'], meetingDay: string, meetingTime: string) {
   if (!meetingDay.trim()) throw new WorkspaceApiError('VALIDATION', cadence === 'monthly' ? 'Meeting date is required.' : 'Meeting day is required.');
   if (!meetingTime.trim()) throw new WorkspaceApiError('VALIDATION', 'Meeting time is required.');
@@ -206,6 +230,11 @@ function meetingRecap(workspace: Workspace, team: Team, meeting: Workspace['meet
   const issues = workspace.issues.filter((issue) => issue.teamId === team.id && issue.assignmentState !== 'redirected');
   const ids = meeting.idsIssueIds.map((id) => issues.find((issue) => issue.id === id)).filter((issue): issue is Issue => Boolean(issue));
   const lines = [`${team.name} L10 recap · ${meeting.dateLabel} · week of ${meeting.weekStartDate ?? weekStartDateFor(new Date())}`, ''];
+  const facilitator = workspace.users.find((user) => user.id === meeting.facilitatorId)?.name ?? meeting.facilitatorId;
+  lines.push(`Facilitator: ${facilitator}`);
+  if (meeting.durationSeconds !== undefined) lines.push(`Meeting duration: ${Math.floor(meeting.durationSeconds / 60)}m ${meeting.durationSeconds % 60}s`);
+  if (meeting.attendeeRatings?.length) lines.push(`Attendee ratings: ${meeting.attendeeRatings.map((entry) => `${workspace.users.find((user) => user.id === entry.attendeeId)?.name ?? entry.attendeeId} ${entry.rating}/10`).join('; ')}`);
+  lines.push('');
   for (const section of sections) {
     const note = meeting.sectionNotes[section.id]?.trim();
     if (note) lines.push(`${section.label}: ${note}`);
@@ -420,7 +449,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     this.workspace.meetings = this.workspace.meetings.map((meeting) => {
       const team = this.workspace.teams.find((candidate) => candidate.id === meeting.teamId);
       const sections = team ? meetingSectionsFor(team) : meetingSectionsFor({ meetingSections: [] });
-      return normalizeMeeting({ ...meeting, agendaTotal: sections.length, sectionNotes: meeting.sectionNotes ?? {}, idsIssueIds: meeting.idsIssueIds ?? [], idsAddedIssueIds: meeting.idsAddedIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: meeting.idsNotes ?? [], aiSummaryStatus: meeting.aiSummaryStatus ?? (meeting.status === 'closed' ? 'not-generated' : undefined), aiSummarySource: meeting.aiSummarySource }, team);
+      return normalizeMeeting({ ...meeting, agendaTotal: sections.length, sectionNotes: meeting.sectionNotes ?? {}, sectionDurations: meeting.sectionDurations ?? {}, attendeeRatings: meeting.attendeeRatings ?? [], idsIssueIds: meeting.idsIssueIds ?? [], idsAddedIssueIds: meeting.idsAddedIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: meeting.idsNotes ?? [], aiSummaryStatus: meeting.aiSummaryStatus ?? (meeting.status === 'closed' ? 'not-generated' : undefined), aiSummarySource: meeting.aiSummarySource }, team);
     });
   }
 
@@ -991,15 +1020,17 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     return this.result();
   }
 
-  async startIssue(issueId: string) {
+  async startIssue(issueId: string, expectedVersion?: number) {
     const issue = this.issue(issueId);
     this.requireWrite(issue.teamId);
     if (issue.horizon === 'long-term') throw new WorkspaceApiError('VALIDATION', 'Long-term Issues do not enter the weekly IDS queue.');
+    this.requireVersion(issue.version, expectedVersion);
+    const meeting = this.workspace.meetings.find((item) => item.teamId === issue.teamId && item.status !== 'closed' && item.status !== 'skipped');
+    if (meeting && !meeting.idsIssueIds.includes(issue.id) && meeting.idsIssueIds.length >= MAX_IDS_ISSUES) throw new WorkspaceApiError('VALIDATION', `Select no more than ${MAX_IDS_ISSUES} Issues for an L10.`);
     const timestamp = nowIso();
     issue.status = 'in-ids';
     issue.updatedAt = timestamp;
     issue.version += 1;
-    const meeting = this.workspace.meetings.find((item) => item.teamId === issue.teamId && item.status !== 'closed');
     if (meeting && !meeting.idsIssueIds.includes(issue.id)) {
       meeting.idsIssueIds.push(issue.id);
       if (!meeting.idsAddedIssueIds.includes(issue.id)) meeting.idsAddedIssueIds.push(issue.id);
@@ -1011,6 +1042,30 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     return this.result();
   }
 
+  async parkIssue(issueId: string, expectedVersion?: number) {
+    const issue = this.issue(issueId);
+    this.requireWrite(issue.teamId);
+    if (issue.horizon === 'long-term') throw new WorkspaceApiError('VALIDATION', 'Long-term Issues do not enter the weekly IDS queue.');
+    if (issue.status === 'solved') return this.result();
+    this.requireVersion(issue.version, expectedVersion);
+    const timestamp = nowIso();
+    const meeting = this.workspace.meetings.find((item) => item.teamId === issue.teamId && item.status !== 'closed' && item.status !== 'skipped');
+    if (meeting && !meeting.idsIssueIds.includes(issue.id) && meeting.idsIssueIds.length >= MAX_IDS_ISSUES) throw new WorkspaceApiError('VALIDATION', `Select no more than ${MAX_IDS_ISSUES} Issues for an L10.`);
+    issue.status = 'parked';
+    issue.idsNote = appendHistoricalNote(issue.idsNote, timestamp, 'Parked for a future IDS conversation.');
+    issue.updatedAt = timestamp;
+    issue.version += 1;
+    if (meeting && !meeting.idsIssueIds.includes(issue.id)) {
+      meeting.idsIssueIds.push(issue.id);
+      if (!meeting.idsAddedIssueIds.includes(issue.id)) meeting.idsAddedIssueIds.push(issue.id);
+      meeting.idsTotal = meeting.idsIssueIds.length;
+      meeting.updatedAt = timestamp;
+      meeting.version = (meeting.version ?? 1) + 1;
+    }
+    this.audit('Parked Issue', issue.id, issue.title, 'issue');
+    return this.result();
+  }
+
   async solveIssue(issueId: string, input: SolveIssueInput, expectedVersion?: number) {
     const issue = this.issue(issueId);
     this.requireWrite(issue.teamId);
@@ -1018,11 +1073,12 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     this.requireVersion(issue.version, expectedVersion);
     if (typeof input.createFollowUpTodo !== 'boolean') throw new WorkspaceApiError('VALIDATION', 'Choose whether to create a follow-up To-Do.');
     if (input.resolutionNote !== undefined && typeof input.resolutionNote !== 'string') throw new WorkspaceApiError('VALIDATION', 'Resolution note must be a string.');
+    const meeting = this.workspace.meetings.find((item) => item.teamId === issue.teamId && item.status !== 'closed' && item.status !== 'skipped');
+    if (meeting && !meeting.idsIssueIds.includes(issue.id) && meeting.idsIssueIds.length >= MAX_IDS_ISSUES) throw new WorkspaceApiError('VALIDATION', `Select no more than ${MAX_IDS_ISSUES} Issues for an L10.`);
     const timestamp = nowIso();
     issue.status = 'solved';
     issue.solvedAt = timestamp;
     issue.updatedAt = issue.solvedAt;
-    const meeting = this.workspace.meetings.find((item) => item.teamId === issue.teamId && item.status !== 'closed');
     if (meeting && !meeting.idsIssueIds.includes(issue.id)) {
       meeting.idsIssueIds.push(issue.id);
       if (!meeting.idsAddedIssueIds.includes(issue.id)) meeting.idsAddedIssueIds.push(issue.id);
@@ -1082,6 +1138,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const meeting = this.workspace.meetings.find((item) => item.id === meetingId && item.teamId === issue.teamId);
     if (!meeting) throw new WorkspaceApiError('NOT_FOUND', 'Meeting record not found.');
     if (meeting.status === 'closed') throw new WorkspaceApiError('CONFLICT', 'Closed meetings cannot receive new IDS notes.');
+    if (!meeting.idsIssueIds.includes(issue.id) && meeting.idsIssueIds.length >= MAX_IDS_ISSUES) throw new WorkspaceApiError('VALIDATION', `Select no more than ${MAX_IDS_ISSUES} Issues for an L10.`);
     const timestamp = nowIso();
     const entry = { id: `meeting-note-${Date.now()}`, meetingId, issueId, authorId: this.workspace.currentUser.id, note: note.trim(), createdAt: timestamp };
     meeting.idsNotes.push(entry);
@@ -1119,6 +1176,41 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     return this.result();
   }
 
+  async setMeetingIssueSelection(teamId: string, meetingId: string, issueIds: string[], expectedVersion?: number) {
+    this.requireWrite(teamId);
+    const meeting = this.workspace.meetings.find((item) => item.id === meetingId && item.teamId === teamId);
+    if (!meeting) throw new WorkspaceApiError('NOT_FOUND', 'Meeting record not found.');
+    this.requireVersion(meeting.version ?? 1, expectedVersion);
+    if (meeting.status === 'closed' || meeting.status === 'skipped') throw new WorkspaceApiError('CONFLICT', 'Closed meetings cannot change their IDS selection.');
+    if (!Array.isArray(issueIds) || issueIds.some((issueId) => typeof issueId !== 'string')) throw new WorkspaceApiError('VALIDATION', 'IDS selection must be a list of Issue IDs.');
+    if (issueIds.length > MAX_IDS_ISSUES) throw new WorkspaceApiError('VALIDATION', `Select no more than ${MAX_IDS_ISSUES} Issues for an L10.`);
+    const unique = new Set<string>();
+    for (const issueId of issueIds) {
+      if (unique.has(issueId)) throw new WorkspaceApiError('VALIDATION', 'IDS selection cannot contain duplicates.');
+      unique.add(issueId);
+      const issue = this.workspace.issues.find((candidate) => candidate.id === issueId && candidate.assignmentState !== 'redirected');
+      if (!issue || issue.teamId !== teamId || issue.horizon !== 'short-term' || issue.status === 'solved') throw new WorkspaceApiError('VALIDATION', 'Every selected Issue must be an active short-term Issue for this team.');
+    }
+    if (issueIds.every((issueId, index) => issueId === meeting.idsIssueIds[index]) && issueIds.length === meeting.idsIssueIds.length) return this.result();
+    const timestamp = nowIso();
+    const previous = new Set(meeting.idsIssueIds);
+    meeting.idsIssueIds = [...issueIds];
+    meeting.idsAddedIssueIds = [...new Set([...meeting.idsAddedIssueIds, ...issueIds.filter((issueId) => !previous.has(issueId))])];
+    meeting.idsTotal = issueIds.length;
+    meeting.updatedAt = timestamp;
+    meeting.version = (meeting.version ?? 1) + 1;
+    for (const issueId of issueIds) {
+      const issue = this.workspace.issues.find((candidate) => candidate.id === issueId);
+      if (issue && issue.status !== 'in-ids') {
+        issue.status = 'in-ids';
+        issue.updatedAt = timestamp;
+        issue.version += 1;
+      }
+    }
+    this.audit('Selected IDS Issues', meeting.id, `${teamId} selected ${issueIds.length} Issues for IDS.`, 'meeting');
+    return this.result();
+  }
+
   async reorderMeetingIssues(teamId: string, meetingId: string, issueIds: string[], expectedVersion?: number) {
     this.requireWrite(teamId);
     const meeting = this.workspace.meetings.find((item) => item.id === meetingId && item.teamId === teamId);
@@ -1126,6 +1218,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     this.requireVersion(meeting.version ?? 1, expectedVersion);
     if (meeting.status === 'closed') throw new WorkspaceApiError('CONFLICT', 'Closed meetings cannot reorder Issues.');
     if (!Array.isArray(issueIds) || issueIds.some((issueId) => typeof issueId !== 'string')) throw new WorkspaceApiError('VALIDATION', 'Issue order must be a list of Issue IDs.');
+    if (issueIds.length > MAX_IDS_ISSUES) throw new WorkspaceApiError('VALIDATION', `Select no more than ${MAX_IDS_ISSUES} Issues for an L10.`);
     const requested = new Set<string>();
     for (const issueId of issueIds) {
       if (requested.has(issueId)) throw new WorkspaceApiError('VALIDATION', 'Issue order cannot contain duplicates.');
@@ -1144,16 +1237,58 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     return this.result();
   }
 
-  async startMeeting(teamId: string, meetingId: string, expectedVersion?: number) {
+  async transitionMeetingSection(teamId: string, meetingId: string, fromSection: MeetingSection, toSection: MeetingSection, expectedVersion?: number) {
+    this.requireWrite(teamId);
+    const meeting = this.workspace.meetings.find((item) => item.id === meetingId && item.teamId === teamId);
+    const team = this.workspace.teams.find((item) => item.id === teamId);
+    if (!meeting || !team) throw new WorkspaceApiError('NOT_FOUND', 'Meeting record not found.');
+    this.requireVersion(meeting.version ?? 1, expectedVersion);
+    if (meeting.status !== 'in-progress') throw new WorkspaceApiError('CONFLICT', 'Start the meeting before moving between timed sections.');
+    if (!meetingSectionIds.has(fromSection) || !meetingSectionIds.has(toSection) || !meetingSectionsFor(team).some((section) => section.id === fromSection) || !meetingSectionsFor(team).some((section) => section.id === toSection)) throw new WorkspaceApiError('VALIDATION', 'Choose valid sections for this meeting.');
+    if (fromSection === toSection) return this.result();
+    const timestamp = nowIso();
+    const activeSection = meeting.activeSection ?? fromSection;
+    const sectionStartedAt = meeting.activeSectionStartedAt ?? meeting.startedAt;
+    const elapsed = activeSection && sectionStartedAt ? meetingElapsedSeconds(sectionStartedAt, timestamp) : 0;
+    meeting.sectionDurations = { ...(meeting.sectionDurations ?? {}), [activeSection]: (meeting.sectionDurations?.[activeSection] ?? 0) + elapsed };
+    meeting.activeSection = toSection;
+    meeting.activeSectionStartedAt = timestamp;
+    const nextIndex = meetingSectionsFor(team).findIndex((section) => section.id === toSection);
+    meeting.agendaProgress = nextIndex >= 0 ? nextIndex + 1 : meeting.agendaProgress;
+    meeting.updatedAt = timestamp;
+    meeting.version = (meeting.version ?? 1) + 1;
+    this.audit('Moved L10 section', meeting.id, `${fromSection} → ${toSection}.`, 'meeting');
+    return this.result();
+  }
+
+  async startMeeting(teamId: string, meetingId: string, expectedVersion?: number, facilitatorId?: string) {
     this.requireWrite(teamId);
     const meeting = this.workspace.meetings.find((item) => item.id === meetingId && item.teamId === teamId);
     if (!meeting) throw new WorkspaceApiError('NOT_FOUND', 'Meeting record not found.');
     this.requireVersion(meeting.version ?? 1, expectedVersion);
     if (meeting.status === 'closed' || meeting.status === 'skipped') throw new WorkspaceApiError('CONFLICT', 'Closed or skipped meetings cannot be started.');
-    if (meeting.status === 'in-progress') return this.result();
+    const teamMemberIds = new Set(this.workspace.memberships.filter((membership) => membership.teamId === teamId && membership.active).map((membership) => membership.userId));
+    const selectedFacilitatorId = facilitatorId ?? meeting.facilitatorId ?? this.workspace.currentUser.id;
+    if (!this.workspace.users.some((user) => user.id === selectedFacilitatorId && user.active) || !teamMemberIds.has(selectedFacilitatorId)) throw new WorkspaceApiError('VALIDATION', 'The facilitator must be an active member of this team.');
+    if (meeting.status === 'in-progress') {
+      if (!meeting.facilitatorId) {
+        const timestamp = nowIso();
+        meeting.facilitatorId = selectedFacilitatorId;
+        if (!meeting.attendeeIds.includes(selectedFacilitatorId)) meeting.attendeeIds = [...meeting.attendeeIds, selectedFacilitatorId];
+        meeting.updatedAt = timestamp;
+        meeting.version = (meeting.version ?? 1) + 1;
+        this.audit('Recorded L10 facilitator', meeting.id, `${selectedFacilitatorId} recorded as facilitator.`, 'meeting');
+      }
+      return this.result();
+    }
     const timestamp = nowIso();
     meeting.status = 'in-progress';
     meeting.startedAt = meeting.startedAt ?? timestamp;
+    meeting.facilitatorId = selectedFacilitatorId;
+    if (!meeting.attendeeIds.includes(selectedFacilitatorId)) meeting.attendeeIds = [...meeting.attendeeIds, selectedFacilitatorId];
+    meeting.activeSection = meeting.activeSection ?? 'segue';
+    meeting.activeSectionStartedAt = meeting.activeSectionStartedAt ?? timestamp;
+    meeting.sectionDurations = meeting.sectionDurations ?? {};
     meeting.updatedAt = timestamp;
     meeting.version = (meeting.version ?? 1) + 1;
     this.audit('Started L10 meeting', meeting.id, `${this.workspace.teams.find((team) => team.id === teamId)?.name ?? teamId} L10 started.`, 'meeting');
@@ -1482,7 +1617,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     if (!meeting || !team) throw new WorkspaceApiError('NOT_FOUND', 'Meeting not found.');
     this.requireVersion(meeting.version ?? 1, expectedVersion);
     if (meeting.status !== 'closed') throw new WorkspaceApiError('CONFLICT', 'AI summaries are available after a meeting is closed.');
-    if (meeting.aiSummaryStatus === 'ready' || meeting.aiSummaryStatus === 'queued' || meeting.aiSummaryStatus === 'generating') return this.result();
+    if (meeting.aiSummaryStatus === 'queued' || meeting.aiSummaryStatus === 'generating') return this.result();
     const timestamp = nowIso();
     const source = meeting.aiSummaryRequestedAt ? 'close' : 'legacy';
     const sourceWorkspace = cloneWorkspace(this.workspace);
@@ -1562,7 +1697,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     return this.result();
   }
 
-  async closeMeeting(teamId: string, recap: string, rating: number, meetingId?: string) {
+  async closeMeeting(teamId: string, recap: string, rating: number, meetingId?: string, attendeeRatings?: MeetingAttendeeRating[]) {
     this.requireWrite(teamId);
     const meeting = this.workspace.meetings.find((item) => item.teamId === teamId && (meetingId ? item.id === meetingId : true) && (item.status === 'upcoming' || item.status === 'in-progress'));
     if (!meeting) throw new WorkspaceApiError('NOT_FOUND', 'Meeting not found.');
@@ -1570,6 +1705,13 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     if (!activeTeam) throw new WorkspaceApiError('NOT_FOUND', 'Team not found.');
     const timestamp = nowIso();
     const sections = meetingSectionsFor(activeTeam);
+    const ratings = attendeeRatings ?? [];
+    if (attendeeRatings !== undefined && (!Array.isArray(attendeeRatings) || attendeeRatings.some((entry) => !entry || typeof entry.attendeeId !== 'string' || !Number.isInteger(entry.rating) || entry.rating < 1 || entry.rating > 10))) throw new WorkspaceApiError('VALIDATION', 'Each attendee rating must be a whole number from 1 to 10.');
+    if (attendeeRatings !== undefined && ratings.length !== meeting.attendeeIds.length) throw new WorkspaceApiError('VALIDATION', 'Enter a rating for each recorded attendee before closing the meeting.');
+    if (attendeeRatings !== undefined && this.workspace.currentUser.id !== meeting.facilitatorId) throw new WorkspaceApiError('FORBIDDEN', 'Only the meeting facilitator can submit attendee ratings.');
+    const attendeeIds = new Set(meeting.attendeeIds);
+    if (new Set(ratings.map((entry) => entry.attendeeId)).size !== ratings.length || ratings.some((entry) => !attendeeIds.has(entry.attendeeId))) throw new WorkspaceApiError('VALIDATION', 'Ratings must be supplied once for each recorded attendee.');
+    finalizeMeetingTiming(meeting, timestamp);
     meeting.status = 'closed';
     meeting.closedAt = timestamp;
     meeting.updatedAt = timestamp;
@@ -1577,6 +1719,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     meeting.agendaProgress = sections.length;
     meeting.agendaTotal = sections.length;
     meeting.lastRating = Math.min(10, Math.max(0, rating));
+    if (attendeeRatings !== undefined) meeting.attendeeRatings = ratings.map((entry) => ({ ...entry }));
     meeting.idsTotal = meeting.idsIssueIds.length;
     meeting.idsSolved = meeting.idsIssueIds.filter((issueId) => this.workspace.issues.find((issue) => issue.id === issueId)?.status === 'solved').length;
     meeting.actionSummary = meetingActionSummary(this.workspace, meeting);
@@ -1859,7 +2002,8 @@ export class HttpWorkspaceApi implements WorkspaceApi {
   async upsertScorecardResult(metricId: string, weekStartDate: string, input: Pick<ScorecardResult, 'actual' | 'status'>, expectedVersion?: number) { return this.mutate(`/scorecard/metrics/${metricId}/weeks/${weekStartDate}`, 'PUT', input, expectedVersion); }
   async createIssueFromScorecard(metricId: string, weekStartDate: string, expectedVersion?: number) { return this.mutate(`/scorecard/metrics/${metricId}/weeks/${weekStartDate}/issue`, 'POST', undefined, expectedVersion); }
   async createIssueFromRock(rockId: string, expectedVersion?: number) { return this.mutate(`/rocks/${rockId}/issue`, 'POST', undefined, expectedVersion); }
-  async startIssue(issueId: string) { return this.mutate(`/issues/${issueId}/ids`, 'POST', undefined, undefined, { refresh: true }); }
+  async startIssue(issueId: string, expectedVersion?: number) { return this.mutate(`/issues/${issueId}/ids`, 'POST', undefined, expectedVersion, { refresh: true }); }
+  async parkIssue(issueId: string, expectedVersion?: number) { return this.mutate(`/issues/${issueId}/park`, 'POST', undefined, expectedVersion, { refresh: true }); }
   async solveIssue(issueId: string, input: SolveIssueInput, expectedVersion?: number) { return this.mutate(`/issues/${issueId}/solve`, 'POST', input, expectedVersion, { refresh: true }); }
   async addIssue(input: Pick<Issue, 'title' | 'detail' | 'teamId' | 'raisedById'> & { horizon?: IssueHorizon; priority?: number; ownerId?: string; linkedRockId?: string; linkedScorecardMetricId?: string; linkedScorecardWeekStartDate?: string; idsNote?: string }) { return this.mutate(`/teams/${input.teamId}/issues`, 'POST', input); }
   async updateIssue(issueId: string, input: Partial<Pick<Issue, 'title' | 'detail' | 'priority' | 'horizon' | 'ownerId' | 'idsNote'>>, expectedVersion?: number) { return this.mutate(`/issues/${issueId}`, 'PATCH', input, expectedVersion); }
@@ -1870,14 +2014,16 @@ export class HttpWorkspaceApi implements WorkspaceApi {
     return this.mutate(`/teams/${issue.teamId}/meetings/${meetingId}/issues/${issueId}/notes`, 'POST', { note }, expectedVersion);
   }
   async updateMeetingSectionNote(teamId: string, meetingId: string, section: MeetingSection, note: string, expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/notes`, 'PATCH', { section, note }, expectedVersion); }
+  async setMeetingIssueSelection(teamId: string, meetingId: string, issueIds: string[], expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/ids/selection`, 'PATCH', { issueIds }, expectedVersion, { refresh: true }); }
   async reorderMeetingIssues(teamId: string, meetingId: string, issueIds: string[], expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/ids/order`, 'PATCH', { issueIds }, expectedVersion); }
+  async transitionMeetingSection(teamId: string, meetingId: string, fromSection: MeetingSection, toSection: MeetingSection, expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/section`, 'PATCH', { fromSection, toSection }, expectedVersion); }
   async getMeetingReview(query: MeetingReviewQuery = {}) {
     const params = new URLSearchParams();
     for (const [key, value] of Object.entries(query)) if (value) params.set(key, value);
     return this.request<MeetingReviewPage>(`/meetings/review${params.toString() ? `?${params.toString()}` : ''}`);
   }
   async getMeeting(teamId: string, meetingId: string) { return this.request<Workspace['meetings'][number]>(`/teams/${teamId}/meetings/${meetingId}`); }
-  async startMeeting(teamId: string, meetingId: string, expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/start`, 'POST', undefined, expectedVersion, { refresh: true }); }
+  async startMeeting(teamId: string, meetingId: string, expectedVersion?: number, facilitatorId?: string) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/start`, 'POST', facilitatorId ? { facilitatorId } : undefined, expectedVersion, { refresh: true }); }
   async updateMeetingSchedule(teamId: string, meetingId: string, input: { scheduledDate: string; scheduledTime: string }, expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}`, 'PATCH', input, expectedVersion); }
   async skipMeeting(teamId: string, meetingId: string, reason: MeetingSkipReason, note = '', expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/skip`, 'POST', { reason, note }, expectedVersion, { refresh: true }); }
   async requestMeetingSummary(teamId: string, meetingId: string, expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/ai-summary/retry`, 'POST', undefined, expectedVersion, { refresh: true }); }
@@ -1896,11 +2042,11 @@ export class HttpWorkspaceApi implements WorkspaceApi {
   async updateUser(userId: string, input: Partial<Pick<User, 'name' | 'email'>> & { platformAdmin?: boolean }, expectedVersion?: number) { return this.mutate(`/platform-admin/users/${encodeURIComponent(userId)}`, 'PATCH', input, expectedVersion); }
   async upsertMembership(input: Pick<TeamMembership, 'userId' | 'teamId' | 'role'>) { return this.mutate('/platform-admin/memberships', 'PUT', input); }
   async updateAgeSettings(settings: IssueAgeSettings) { return this.mutate('/platform-admin/settings/aging', 'PUT', settings); }
-  async closeMeeting(teamId: string, recap: string, rating: number, meetingId?: string) {
+  async closeMeeting(teamId: string, recap: string, rating: number, meetingId?: string, attendeeRatings?: MeetingAttendeeRating[]) {
     const workspace = this.cachedWorkspace ?? await this.getWorkspace();
     const meeting = workspace.meetings.find((candidate) => candidate.teamId === teamId && (meetingId ? candidate.id === meetingId : true) && (candidate.status === 'upcoming' || candidate.status === 'in-progress'));
     if (!meeting) throw new WorkspaceApiError('NOT_FOUND', 'Meeting not found.');
-    return this.mutate(`/teams/${teamId}/meetings/${meeting.id}/close`, 'POST', { recap, rating }, meeting.version, { refresh: true });
+    return this.mutate(`/teams/${teamId}/meetings/${meeting.id}/close`, 'POST', { recap, rating, ...(attendeeRatings !== undefined ? { attendeeRatings } : {}) }, meeting.version, { refresh: true });
   }
 }
 

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Container } from '@azure/cosmos';
 import { CosmosWorkspaceRepository, MemoryWorkspaceRepository, RepositoryError } from './repository.js';
-import { DEFAULT_MEETING_SECTIONS, issueMeetingBand, meetingScheduledAt, type MeetingAiSummary, type MeetingSkipReason, type WorkspaceRecord } from '../domain.js';
+import { DEFAULT_MEETING_SECTIONS, issueMeetingBand, meetingScheduledAt, type MeetingAiSummary, type MeetingRecord, type MeetingSkipReason, type WorkspaceRecord } from '../domain.js';
 import { sanitizeTodoNotes } from '../richText.js';
 
 async function rejectsWithCode(operation: Promise<unknown>, code: RepositoryError['code']) {
@@ -546,6 +546,63 @@ test('meeting occurrences record immutable starts, skip reasons, audit events, a
   assert.equal((await repository.getMeetingReview('ava-khan', { status: 'skipped', teamId: 'leadership' })).items.some((item) => item.meeting.id === skipped.id), true);
 });
 
+test('L10 starts store the facilitator, record section and overall timing, and retain attendee ratings', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  await repository.upsertMembership({ userId: 'marcus-lee', teamId: 'leadership', role: 'Member' }, 'ava-khan');
+  let workspace = await repository.getTeamWorkspace('leadership', 'ava-khan');
+  const meeting = workspace.meetings.find((candidate) => candidate.status === 'upcoming')!;
+  const started = await repository.startMeeting('leadership', meeting.id, 'ava-khan', meeting.version, 'marcus-lee');
+  assert.equal(started.facilitatorId, 'marcus-lee');
+  assert.equal(started.attendeeIds.includes('marcus-lee'), true);
+
+  const state = repository as unknown as { meetings: MeetingRecord[] };
+  const stored = state.meetings.find((candidate) => candidate.id === meeting.id)!;
+  const startedAt = new Date(Date.now() - 120_000).toISOString();
+  stored.startedAt = startedAt;
+  stored.activeSectionStartedAt = startedAt;
+  const transitioned = await repository.transitionMeetingSection('leadership', meeting.id, 'segue', 'scorecard', 'ava-khan', started.version);
+  stored.activeSectionStartedAt = new Date(Date.now() - 90_000).toISOString();
+  const ratings = transitioned.attendeeIds.map((attendeeId) => ({ attendeeId, rating: 9 }));
+
+  await rejectsWithCode(repository.closeMeeting('leadership', meeting.id, 'Facilitator-only ratings.', 8, 'ava-khan', transitioned.version, ratings), 'FORBIDDEN');
+  const closed = await repository.closeMeeting('leadership', meeting.id, 'The team left with clear owners.', 8, 'marcus-lee', transitioned.version, ratings);
+  assert.equal((closed.durationSeconds ?? 0) >= 110, true);
+  assert.equal((closed.sectionDurations?.segue ?? 0) >= 110, true);
+  assert.equal((closed.sectionDurations?.scorecard ?? 0) >= 80, true);
+  assert.deepEqual(closed.attendeeRatings, ratings);
+  assert.match(closed.recap, /Facilitator ID: marcus-lee/);
+
+  workspace = await repository.getTeamWorkspace('leadership', 'marcus-lee');
+  const job = await repository.getMeetingSummaryJob('leadership', meeting.id, 'marcus-lee');
+  assert.equal(job?.contextSnapshot.facilitatorId, 'marcus-lee');
+  assert.deepEqual(job?.contextSnapshot.attendeeRatings, ratings);
+  assert.equal(workspace.meetings.find((candidate) => candidate.id === meeting.id)?.status, 'closed');
+});
+
+test('IDS selection is capped at five and parked Issues carry into the next meeting', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const createdIds: string[] = [];
+  for (let index = 0; index < 6; index += 1) {
+    const issue = await repository.createIssue({ teamId: 'leadership', title: `Selection test ${index}`, detail: 'Keep the IDS selection focused.', raisedById: 'ava-khan', ownerId: 'ava-khan' }, 'ava-khan');
+    createdIds.push(issue.id);
+  }
+  let workspace = await repository.getTeamWorkspace('leadership', 'ava-khan');
+  const meeting = workspace.meetings.find((candidate) => candidate.status === 'upcoming')!;
+  await rejectsWithCode(repository.setMeetingIssueSelection('leadership', meeting.id, createdIds, 'ava-khan', meeting.version), 'VALIDATION');
+  await repository.setMeetingIssueSelection('leadership', meeting.id, createdIds.slice(0, 2), 'ava-khan', meeting.version);
+  const selected = (await repository.getTeamWorkspace('leadership', 'ava-khan')).issues.find((issue) => issue.id === createdIds[0])!;
+  const parked = await repository.parkIssue(selected.id, 'ava-khan', selected.version);
+  assert.equal(parked.status, 'parked');
+  assert.match(parked.idsNote ?? '', /Parked for a future IDS conversation/);
+
+  const afterPark = await repository.getTeamWorkspace('leadership', 'ava-khan');
+  const current = afterPark.meetings.find((candidate) => candidate.id === meeting.id)!;
+  await repository.closeMeeting('leadership', meeting.id, 'Parked for the next L10.', 8, 'ava-khan', current.version);
+  workspace = await repository.getTeamWorkspace('leadership', 'ava-khan');
+  const nextMeeting = workspace.meetings.find((candidate) => candidate.status === 'upcoming');
+  assert.equal(nextMeeting?.idsIssueIds.includes(selected.id), true);
+});
+
 test('one-off meeting rescheduling preserves the nominal cadence and checks future conflicts', async () => {
   const repository = new MemoryWorkspaceRepository();
   const workspace = await repository.getTeamWorkspace('leadership', 'ava-khan');
@@ -587,9 +644,15 @@ test('meeting close snapshots context and moves AI summaries through queued, gen
   assert.equal(ready.aiSummary?.executiveSummary, summary.executiveSummary);
   assert.deepEqual(ready.aiSummary?.decisions, summary.decisions);
   await rejectsWithCode(repository.completeMeetingSummary(queuedJob!.id, 'ready', summary, undefined, 1), 'CONFLICT');
+
+  const regenerated = await repository.requestMeetingSummary('projects', closed.id, 'marcus-lee', ready.version);
+  const regeneratedJob = await repository.getMeetingSummaryJob('projects', closed.id, 'marcus-lee');
+  assert.equal(regenerated.aiSummaryStatus, 'queued');
+  assert.equal(regenerated.version, ready.version + 1);
+  assert.deepEqual({ source: regeneratedJob?.source, attempt: regeneratedJob?.attempt, status: regeneratedJob?.status }, { source: 'close', attempt: 2, status: 'queued' });
 });
 
-test('failed summary retry requires a direct editor and legacy meetings can be generated from persisted data', async () => {
+test('summary retry and regeneration require a direct editor, while legacy meetings can be generated from persisted data', async () => {
   const repository = new MemoryWorkspaceRepository();
   const cyber = await repository.getTeamWorkspace('cybersecurity', 'priya-shah');
   const started = await repository.startMeeting('cybersecurity', cyber.meetings[0].id, 'priya-shah', cyber.meetings[0].version);

@@ -3,7 +3,7 @@ export type ViewId = 'overview' | 'company' | 'meeting' | 'meeting-history' | 'r
 export type RockStatus = 'on-track' | 'off-track' | 'complete';
 export type RockTaskStatus = 'open' | 'in-progress' | 'done';
 export type TodoStatus = 'open' | 'done' | 'not-done';
-export type IssueStatus = 'open' | 'in-ids' | 'solved';
+export type IssueStatus = 'open' | 'in-ids' | 'parked' | 'solved';
 export type IssueHorizon = 'short-term' | 'long-term';
 export type IssueAssignmentState = 'assigned' | 'pending-transfer' | 'unassigned' | 'redirected';
 export type IssueAgeBand = 'fresh' | 'aging' | 'stale' | 'critical';
@@ -281,6 +281,11 @@ export interface MeetingIssueNote {
   createdAt: string;
 }
 
+export interface MeetingAttendeeRating {
+  attendeeId: string;
+  rating: number;
+}
+
 export interface MeetingActionSummary {
   todosCreated: number;
   issuesReviewedInIds: number;
@@ -358,6 +363,14 @@ export interface MeetingInstance {
   recap: string;
   startedAt?: string;
   closedAt?: string;
+  /** Total wall-clock seconds from start to close. */
+  durationSeconds?: number;
+  /** Accumulated time by agenda section. */
+  sectionDurations?: Partial<Record<MeetingSection, number>>;
+  /** The section currently being timed while the meeting is in progress. */
+  activeSection?: MeetingSection;
+  activeSectionStartedAt?: string;
+  attendeeRatings?: MeetingAttendeeRating[];
   updatedAt?: string;
   sectionNotes: Partial<Record<MeetingSection, string>>;
   idsIssueIds: string[];
@@ -575,7 +588,7 @@ export function normalizeMeeting(meeting: MeetingInstance, team?: Pick<Team, 'me
     scheduledDate = meetingDateFor(fallbackTeam, meeting.weekStartDate ?? new Date());
   }
   const scheduledTime = meeting.scheduledTime?.trim() || fallbackTeam.meetingTime || '9:00 AM';
-  return { ...meeting, scheduledDate, scheduledTime, recurrenceDate: meeting.recurrenceDate ?? scheduledDate, dateLabel: meetingDateLabel(scheduledDate), weekStartDate: weekStartDateFor(scheduledDate), sectionNotes: meeting.sectionNotes ?? {}, idsIssueIds: meeting.idsIssueIds ?? [], idsAddedIssueIds: meeting.idsAddedIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: meeting.idsNotes ?? [], version: meeting.version ?? 1 };
+  return { ...meeting, scheduledDate, scheduledTime, recurrenceDate: meeting.recurrenceDate ?? scheduledDate, dateLabel: meetingDateLabel(scheduledDate), weekStartDate: weekStartDateFor(scheduledDate), sectionNotes: meeting.sectionNotes ?? {}, sectionDurations: meeting.sectionDurations ?? {}, attendeeRatings: meeting.attendeeRatings ?? [], idsIssueIds: meeting.idsIssueIds ?? [], idsAddedIssueIds: meeting.idsAddedIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: meeting.idsNotes ?? [], version: meeting.version ?? 1 };
 }
 
 export function scorecardTrendFor(actual: string, priorActual?: string): { trend: ScorecardTrend; trendLabel: string } {

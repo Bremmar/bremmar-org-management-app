@@ -396,6 +396,48 @@ describe('LocalWorkspaceApi', () => {
     expect((await api.getMeetingReview({ status: 'skipped', teamId: 'leadership' })).items.some((item) => item.meeting.id === skipped.id)).toBe(true);
   });
 
+  it('records facilitator-owned attendee ratings and section timing, and carries parked Issues forward', async () => {
+    const api = new LocalWorkspaceApi();
+    let workspace = await api.getWorkspace();
+    const meeting = workspace.meetings.find((candidate) => candidate.teamId === 'leadership' && candidate.status === 'upcoming')!;
+    workspace = await api.startMeeting('leadership', meeting.id, meeting.version, 'ava-khan');
+    let started = workspace.meetings.find((candidate) => candidate.id === meeting.id)!;
+    const state = api as unknown as { workspaces: Record<'live' | 'test', Workspace> };
+    const stored = state.workspaces.live.meetings.find((candidate) => candidate.id === meeting.id)!;
+    const startedAt = new Date(Date.now() - 120_000).toISOString();
+    stored.startedAt = startedAt;
+    stored.activeSectionStartedAt = startedAt;
+    workspace = await api.transitionMeetingSection('leadership', meeting.id, 'segue', 'scorecard', started.version);
+    started = workspace.meetings.find((candidate) => candidate.id === meeting.id)!;
+    const transitionedStored = state.workspaces.live.meetings.find((candidate) => candidate.id === meeting.id)!;
+    transitionedStored.activeSectionStartedAt = new Date(Date.now() - 90_000).toISOString();
+    const ratings = started.attendeeIds.map((attendeeId) => ({ attendeeId, rating: 9 }));
+    workspace = await api.closeMeeting('leadership', 'The team left with clear owners.', 8, meeting.id, ratings);
+    const closed = workspace.meetings.find((candidate) => candidate.id === meeting.id)!;
+
+    expect(closed.facilitatorId).toBe('ava-khan');
+    expect(closed.durationSeconds).toBeGreaterThanOrEqual(110);
+    expect(closed.sectionDurations?.segue).toBeGreaterThanOrEqual(110);
+    expect(closed.sectionDurations?.scorecard).toBeGreaterThanOrEqual(80);
+    expect(closed.attendeeRatings).toEqual(ratings);
+    expect(closed.recap).toContain('Facilitator: Ava Khan');
+
+    const issueWorkspace = await api.getWorkspace();
+    const issueIds = issueWorkspace.issues.filter((issue) => issue.teamId === 'leadership').slice(0, 1).map((issue) => issue.id);
+    const newIssues = await Promise.all(Array.from({ length: 6 }, (_, index) => api.addIssue({ title: `Park test ${index}`, detail: 'Test issue.', teamId: 'leadership', raisedById: 'ava-khan' })));
+    const ids = newIssues.map((next) => next.issues[0].id);
+    const nextMeeting = (await api.getWorkspace()).meetings.find((candidate) => candidate.teamId === 'leadership' && candidate.status === 'upcoming')!;
+    await expect(api.setMeetingIssueSelection('leadership', nextMeeting.id, [...ids, ...issueIds], nextMeeting.version)).rejects.toMatchObject({ code: 'VALIDATION' });
+    workspace = await api.setMeetingIssueSelection('leadership', nextMeeting.id, ids.slice(0, 2), nextMeeting.version);
+    const selected = workspace.issues.find((issue) => issue.id === ids[0])!;
+    workspace = await api.parkIssue(selected.id, selected.version);
+    const parked = workspace.issues.find((issue) => issue.id === selected.id)!;
+    expect(parked.status).toBe('parked');
+    workspace = await api.closeMeeting('leadership', 'Parked for the next conversation.', 8, nextMeeting.id);
+    const carried = workspace.meetings.find((candidate) => candidate.teamId === 'leadership' && candidate.status === 'upcoming');
+    expect(carried?.idsIssueIds).toContain(selected.id);
+  });
+
   it('keeps descendant meeting summary retries read-only for parent reviewers', async () => {
     const seed = structuredClone(initialWorkspace);
     seed.currentUser = seed.users.find((user) => user.id === 'marcus-lee')!;
@@ -425,6 +467,14 @@ describe('LocalWorkspaceApi', () => {
     expect(ready.aiSummary?.executiveSummary).toContain('owner matrix');
     expect(ready.aiSummary?.decisions.length).toBeGreaterThan(0);
     expect((await api.getMeetingReview({ filter: 'completed', teamId: 'leadership' })).items.some((item) => item.meeting.id === meeting.id && item.meeting.aiSummaryStatus === 'ready')).toBe(true);
+
+    workspace = await api.requestMeetingSummary('leadership', meeting.id, ready.version);
+    const regenerated = workspace.meetings.find((candidate) => candidate.id === meeting.id)!;
+    expect(regenerated).toMatchObject({ status: 'closed', aiSummaryStatus: 'queued', aiSummarySource: 'close' });
+    expect(regenerated.version).toBe((ready.version ?? 1) + 1);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    workspace = await api.getWorkspace();
+    expect(workspace.meetings.find((candidate) => candidate.id === meeting.id)?.aiSummaryStatus).toBe('ready');
   });
 
   it('saves meeting notes, converts off-track work once, and keeps IDS order separate from priority', async () => {

@@ -15,6 +15,7 @@ import type {
   IssueHorizon,
   IssueTransfer,
   MeetingSection,
+  MeetingAttendeeRating,
   MeetingSkipReason,
   Rock,
   RockStatus,
@@ -57,7 +58,7 @@ const isPlatformAdmin = (workspace: Workspace) => workspace.currentUser.platform
 const canManageMeetingSummary = (workspace: Workspace, teamId: string) => canWrite(workspace, teamId);
 
 function statusLabel(status: string) {
-  return ({ 'on-track': 'On track', 'off-track': 'Off track', complete: 'Complete', open: 'Open', done: 'Done', 'not-done': 'Not done', 'in-ids': 'In IDS', solved: 'Solved', 'in-progress': 'In progress', upcoming: 'Upcoming', closed: 'Completed', skipped: 'Skipped', missed: 'Missed', overdue: 'Overdue' } as Record<string, string>)[status] ?? status;
+  return ({ 'on-track': 'On track', 'off-track': 'Off track', complete: 'Complete', open: 'Open', done: 'Done', 'not-done': 'Not done', 'in-ids': 'In IDS', parked: 'Parked', solved: 'Solved', 'in-progress': 'In progress', upcoming: 'Upcoming', closed: 'Completed', skipped: 'Skipped', missed: 'Missed', overdue: 'Overdue' } as Record<string, string>)[status] ?? status;
 }
 
 function cadenceLabel(cadence: Team['meetingCadence']) {
@@ -77,6 +78,22 @@ function formatDate(value: string) {
 function formatTime(value: string) {
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+
+function formatDuration(totalSeconds: number) {
+  const seconds = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(seconds / 3600).toString().padStart(2, '0');
+  const minutes = Math.floor((seconds % 3600) / 60).toString().padStart(2, '0');
+  const remainder = (seconds % 60).toString().padStart(2, '0');
+  return `${hours}:${minutes}:${remainder}`;
+}
+
+function elapsedSecondsSince(startedAt: string | undefined, endAt: number | string) {
+  if (!startedAt) return 0;
+  const start = new Date(startedAt).getTime();
+  const end = typeof endAt === 'number' ? endAt : new Date(endAt).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return 0;
+  return Math.max(0, Math.floor((end - start) / 1000));
 }
 
 function meetingDateTimeLabel(meeting: Workspace['meetings'][number]) {
@@ -186,7 +203,7 @@ function App() {
   const [recapMeetingId, setRecapMeetingId] = useState<string | null>(null);
   const [scorecardWeekStartDate, setScorecardWeekStartDate] = useState('');
   const [scorecardContext, setScorecardContext] = useState('');
-  const [secondsLeft, setSecondsLeft] = useState(300);
+  const [clockNow, setClockNow] = useState(() => Date.now());
   const [companyOverview, setCompanyOverview] = useState<CompanyOverview | null>(null);
   const environmentGeneration = useRef(0);
 
@@ -269,18 +286,12 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!meetingRunning) return undefined;
-    const interval = window.setInterval(() => {
-      setSecondsLeft((current) => {
-        if (current <= 1) {
-          setMeetingRunning(false);
-          return 0;
-        }
-        return current - 1;
-      });
-    }, 1000);
+    const active = currentMeeting?.status === 'in-progress' && !meetingClosed;
+    setClockNow(Date.now());
+    if (!active) return undefined;
+    const interval = window.setInterval(() => setClockNow(Date.now()), 1000);
     return () => window.clearInterval(interval);
-  }, [meetingRunning]);
+  }, [currentMeeting?.id, currentMeeting?.status, meetingClosed]);
 
   useEffect(() => {
     if (activeView !== 'company' || !hasCompanyRead(workspace)) return;
@@ -306,16 +317,16 @@ function App() {
       setMeetingSection(activeAgenda[0].id);
       return;
     }
-    if (section && !meetingRunning) setSecondsLeft(section.duration * 60);
-  }, [activeAgenda, meetingSection, meetingRunning]);
+  }, [activeAgenda, meetingSection]);
 
   useEffect(() => {
     if (activeView === 'scorecard' && !activeAgenda.some((section) => section.id === 'scorecard')) setActiveView('overview');
   }, [activeAgenda, activeView]);
 
   useEffect(() => {
-    if (currentMeeting?.id) setMeetingSection('segue');
-  }, [currentMeeting?.id]);
+    if (!currentMeeting?.id) return;
+    setMeetingSection(currentMeeting.status === 'in-progress' ? currentMeeting.activeSection ?? 'segue' : 'segue');
+  }, [currentMeeting?.id, currentMeeting?.status, currentMeeting?.activeSection]);
 
   useEffect(() => {
     if (currentMeeting?.status === 'closed') setMeetingRunning(false);
@@ -350,7 +361,7 @@ function App() {
     setSelectedMeetingId(null);
     setRecapMeetingId(null);
     setMeetingSection('segue');
-    setSecondsLeft(300);
+    setClockNow(Date.now());
     setScorecardContext('');
     setScorecardWeekStartDate('');
     try {
@@ -430,11 +441,15 @@ function App() {
   };
 
   const startIssue = async (issue: Issue) => {
-    const saved = await refresh(workspaceApi.startIssue(issue.id), `${issue.title} is ready for IDS.`);
+    const saved = await refresh(workspaceApi.startIssue(issue.id, issue.version), `${issue.title} is ready for IDS.`);
     if (saved) {
       setMeetingSection('ids');
       navigate('meeting');
     }
+  };
+
+  const parkIssue = async (issue: Issue) => {
+    await refresh(workspaceApi.parkIssue(issue.id, issue.version), `${issue.title} is parked for a future IDS conversation.`);
   };
 
   const solveIssue = (issue: Issue) => {
@@ -480,8 +495,25 @@ function App() {
   };
 
   const reorderMeetingIssues = (issueIds: string[]) => {
-    if (!currentMeeting) return;
-    void refresh(workspaceApi.reorderMeetingIssues(activeTeam.id, currentMeeting.id, issueIds, currentMeeting.version), 'IDS order saved.');
+    if (!currentMeeting) return Promise.resolve(false);
+    return refresh(workspaceApi.reorderMeetingIssues(activeTeam.id, currentMeeting.id, issueIds, currentMeeting.version), 'IDS order saved.');
+  };
+
+  const selectMeetingIssues = (issueIds: string[]) => {
+    if (!currentMeeting) return Promise.resolve(false);
+    return refresh(workspaceApi.setMeetingIssueSelection(activeTeam.id, currentMeeting.id, issueIds, currentMeeting.version), 'IDS issues selected.');
+  };
+
+  const saveMeetingIssueNote = (issueId: string, note: string) => {
+    if (!currentMeeting) return Promise.resolve(false);
+    const issue = workspace.issues.find((candidate) => candidate.id === issueId);
+    if (!issue) return Promise.resolve(false);
+    return refresh(workspaceApi.addMeetingIssueNote(issueId, currentMeeting.id, note, issue.version), 'IDS notes saved.');
+  };
+
+  const transitionMeetingSection = (fromSection: MeetingSection, toSection: MeetingSection) => {
+    if (!currentMeeting || currentMeeting.status !== 'in-progress') return Promise.resolve(true);
+    return refresh(workspaceApi.transitionMeetingSection(activeTeam.id, currentMeeting.id, fromSection, toSection, currentMeeting.version), 'Section time recorded.');
   };
 
   const createScorecardMetric = async (input: Pick<ScorecardMetric, 'teamId' | 'label' | 'target' | 'unit' | 'ownerId'>) => {
@@ -498,10 +530,10 @@ function App() {
     if (await refresh(workspaceApi.upsertScorecardResult(metricId, weekStartDate, input, result?.version), 'Weekly result saved.')) setModal(null);
   };
 
-  const closeMeeting = async (recap: string, rating: number) => {
+  const closeMeeting = async (recap: string, rating: number, attendeeRatings: MeetingAttendeeRating[]) => {
     if (!currentMeeting) return;
     const closedMeetingId = currentMeeting.id;
-    const saved = await refresh(workspaceApi.closeMeeting(activeTeam.id, recap, rating, closedMeetingId), 'Meeting closed. Your recap is saved to history.');
+    const saved = await refresh(workspaceApi.closeMeeting(activeTeam.id, recap, rating, closedMeetingId, attendeeRatings), 'Meeting closed. Your recap is saved to history.');
     if (saved) {
       setMeetingRunning(false);
       setMeetingClosed(true);
@@ -511,20 +543,17 @@ function App() {
   };
 
   const toggleMeetingRunning = async () => {
-    if (meetingRunning) {
-      setMeetingRunning(false);
-      return;
-    }
+    if (meetingRunning) return;
     if (readOnly || !currentMeeting || currentMeeting.status === 'closed' || currentMeeting.status === 'skipped') return;
-    const saved = await refresh(workspaceApi.startMeeting(activeTeam.id, currentMeeting.id, currentMeeting.version), 'Meeting started.');
-    if (saved) setMeetingRunning(true);
+    setModal({ type: 'meeting-start', meetingId: currentMeeting.id });
   };
 
   const selectMeetingOccurrence = (meetingId: string) => {
+    const selected = workspace.meetings.find((meeting) => meeting.id === meetingId);
     setSelectedMeetingId(meetingId);
     setMeetingClosed(false);
     setRecapMeetingId(null);
-    setMeetingSection('segue');
+    setMeetingSection(selected?.status === 'in-progress' ? selected.activeSection ?? 'segue' : 'segue');
   };
 
   const startMeetingOccurrence = async (meeting: Workspace['meetings'][number]) => {
@@ -532,8 +561,19 @@ function App() {
     setMeetingClosed(false);
     setRecapMeetingId(null);
     if (readOnly || !['upcoming', 'in-progress'].includes(meeting.status)) return;
-    const saved = await refresh(workspaceApi.startMeeting(activeTeam.id, meeting.id, meeting.version), 'Meeting started.');
-    if (saved) setMeetingRunning(true);
+    setMeetingSection(meeting.status === 'in-progress' ? meeting.activeSection ?? 'segue' : 'segue');
+    setModal({ type: 'meeting-start', meetingId: meeting.id });
+  };
+
+  const submitStartMeeting = async (meetingId: string, facilitatorId: string) => {
+    const meeting = workspace.meetings.find((candidate) => candidate.id === meetingId);
+    if (!meeting) return;
+    const saved = await refresh(workspaceApi.startMeeting(activeTeam.id, meetingId, meeting.version, facilitatorId), 'Meeting started.');
+    if (saved) {
+      setMeetingSection('segue');
+      setMeetingRunning(true);
+      setModal(null);
+    }
   };
 
   const submitSkipMeeting = async (meetingId: string, reason: MeetingSkipReason, note: string) => {
@@ -551,7 +591,7 @@ function App() {
     if (await refresh(workspaceApi.updateMeetingSchedule(activeTeam.id, meetingId, input, meeting.version), 'Meeting occurrence date and time updated.')) setModal(null);
   };
 
-  const requestMeetingSummary = (teamId: string, meetingId: string, expectedVersion?: number) => refresh(workspaceApi.requestMeetingSummary(teamId, meetingId, expectedVersion), 'AI summary generation queued.');
+  const requestMeetingSummary = (teamId: string, meetingId: string, expectedVersion?: number) => refresh(workspaceApi.requestMeetingSummary(teamId, meetingId, expectedVersion), 'AI recap queued.');
 
   const changeTeam = (teamId: string) => {
     if (!accessibleTeams.some((team) => team.id === teamId)) return;
@@ -626,7 +666,7 @@ function App() {
           return <MeetingSetupView team={activeTeam} readOnly={readOnly} onNavigate={navigate} />;
         }
         if (meetingClosed && currentMeeting.status === 'closed') return <MeetingRecapView workspace={workspace} team={activeTeam} meeting={currentMeeting} canRetry={canManageMeetingSummary(workspace, activeTeam.id)} onRequestSummary={() => requestMeetingSummary(activeTeam.id, currentMeeting.id, currentMeeting.version)} onBack={() => { setMeetingClosed(false); setRecapMeetingId(null); setSelectedMeetingId(null); navigate('meeting'); }} />;
-        return <MeetingViewV2 {...common} agenda={activeAgenda} rocks={activeRocks} todos={activeTodos} issues={activeIssues} metrics={activeMetrics} scorecardResults={activeScorecardResults} headlines={activeHeadlines} meeting={currentMeeting} occurrences={sortedTeamMeetings} selectedMeetingId={currentMeeting.id} section={meetingSection} secondsLeft={secondsLeft} running={meetingRunning} closed={meetingClosed || currentMeeting.status === 'closed' || currentMeeting.status === 'skipped'} pendingTransfers={pendingForTeam} pendingSourceTransfers={pendingFromTeam} pendingMessages={pendingTeamMessages} canManageSchedule={!readOnly} onSelectMeeting={selectMeetingOccurrence} onStartMeeting={startMeetingOccurrence} onSkipMeeting={(meeting) => setModal({ type: 'meeting-skip', meetingId: meeting.id })} onRescheduleMeeting={(meeting) => setModal({ type: 'meeting-schedule', meetingId: meeting.id })} onSelectSection={setMeetingSection} onToggleRunning={toggleMeetingRunning} onUpdateRock={updateRockStatus} onUpdateTodo={updateTodoStatus} onStartIssue={startIssue} onOpenIssue={(issueId, meetingReadOnly) => setModal({ type: 'issue-detail', issueId, meetingId: currentMeeting.id, readOnly: meetingReadOnly })} onOpenTodo={(todoId, meetingReadOnly) => setModal({ type: 'todo-detail', todoId, readOnly: meetingReadOnly })} onSolveIssue={solveIssue} onOpenMessage={openMessage} onMarkMessageRead={markMessageRead} onCreateIssueFromMessage={(messageId) => setModal({ type: 'message-issue', messageId })} onCreateIssueFromScorecard={createScorecardIssue} onCreateIssueFromRock={createRockIssue} onSaveSectionNote={saveMeetingSectionNote} onReorderIssues={reorderMeetingIssues} onAccept={acceptTransfer} onReject={(id) => setModal({ type: 'reject', transferId: id })} onCancel={cancelTransfer} onClose={closeMeeting} onEditSchedule={() => setModal({ type: 'meeting-schedule', meetingId: currentMeeting.id })} onNavigate={(view) => { if (view === 'scorecard') setScorecardWeekStartDate(meetingWeekStartDate); navigate(view); }} />;
+        return <MeetingViewV2 {...common} agenda={activeAgenda} rocks={activeRocks} todos={activeTodos} issues={activeIssues} metrics={activeMetrics} scorecardResults={activeScorecardResults} headlines={activeHeadlines} meeting={currentMeeting} occurrences={sortedTeamMeetings} selectedMeetingId={currentMeeting.id} section={meetingSection} clockNow={clockNow} running={meetingRunning} closed={meetingClosed || currentMeeting.status === 'closed' || currentMeeting.status === 'skipped'} pendingTransfers={pendingForTeam} pendingSourceTransfers={pendingFromTeam} pendingMessages={pendingTeamMessages} canManageSchedule={!readOnly} onSelectMeeting={selectMeetingOccurrence} onStartMeeting={startMeetingOccurrence} onSkipMeeting={(meeting) => setModal({ type: 'meeting-skip', meetingId: meeting.id })} onRescheduleMeeting={(meeting) => setModal({ type: 'meeting-schedule', meetingId: meeting.id })} onSelectSection={setMeetingSection} onTransitionSection={transitionMeetingSection} onToggleRunning={toggleMeetingRunning} onUpdateRock={updateRockStatus} onUpdateTodo={updateTodoStatus} onStartIssue={startIssue} onParkIssue={parkIssue} onOpenIssue={(issueId, meetingReadOnly) => setModal({ type: 'issue-detail', issueId, meetingId: currentMeeting.id, readOnly: meetingReadOnly })} onOpenTodo={(todoId, meetingReadOnly) => setModal({ type: 'todo-detail', todoId, readOnly: meetingReadOnly })} onSolveIssue={solveIssue} onOpenMessage={openMessage} onMarkMessageRead={markMessageRead} onCreateIssueFromMessage={(messageId) => setModal({ type: 'message-issue', messageId })} onCreateIssueFromScorecard={createScorecardIssue} onCreateIssueFromRock={createRockIssue} onSaveSectionNote={saveMeetingSectionNote} onSelectMeetingIssues={selectMeetingIssues} onSaveIssueNote={saveMeetingIssueNote} onReorderIssues={reorderMeetingIssues} onAccept={acceptTransfer} onReject={(id) => setModal({ type: 'reject', transferId: id })} onCancel={cancelTransfer} onClose={closeMeeting} onEditSchedule={() => setModal({ type: 'meeting-schedule', meetingId: currentMeeting.id })} onNavigate={(view) => { if (view === 'scorecard') setScorecardWeekStartDate(meetingWeekStartDate); navigate(view); }} />;
       case 'meeting-history':
         return <MeetingHistoryView workspace={workspace} teams={accessibleTeams} onRequestSummary={requestMeetingSummary} onOpenMeeting={(teamId, meetingId) => { const target = workspace.meetings.find((meeting) => meeting.teamId === teamId && meeting.id === meetingId); const closed = target?.status === 'closed'; setSelectedTeamId(teamId); setSelectedMeetingId(meetingId); setMeetingClosed(closed); setRecapMeetingId(closed ? meetingId : null); navigate('meeting'); }} />;
       case 'rocks':
@@ -693,6 +733,7 @@ function App() {
       {modal?.type === 'reject' && <RejectModal transfer={workspace.transfers.find((transfer) => transfer.id === modal.transferId)!} issue={workspace.issues.find((issue) => issue.id === workspace.transfers.find((transfer) => transfer.id === modal.transferId)?.issueId)} onClose={() => setModal(null)} onSubmit={async (message) => { const transfer = workspace.transfers.find((item) => item.id === modal.transferId); if (await refresh(workspaceApi.rejectIssueTransfer(modal.transferId, message, transfer?.version), 'Issue returned to the source team unassigned.')) setModal(null); }} />}
       {modal?.type === 'meeting-schedule' && <MeetingScheduleModal team={activeTeam} meeting={workspace.meetings.find((meeting) => meeting.id === modal.meetingId)!} onClose={() => setModal(null)} onSubmit={(input) => updateMeetingSchedule(modal.meetingId, input)} />}
       {modal?.type === 'meeting-skip' && <MeetingSkipModal meeting={workspace.meetings.find((meeting) => meeting.id === modal.meetingId)!} onClose={() => setModal(null)} onSubmit={(reason, note) => submitSkipMeeting(modal.meetingId, reason, note)} />}
+      {modal?.type === 'meeting-start' && <MeetingStartModal workspace={workspace} team={activeTeam} meeting={workspace.meetings.find((meeting) => meeting.id === modal.meetingId)!} onClose={() => setModal(null)} onSubmit={(facilitatorId) => submitStartMeeting(modal.meetingId, facilitatorId)} />}
       {modal?.type === 'team' && <TeamModal workspace={workspace} onClose={() => setModal(null)} onSubmit={async (input) => { if (await refresh(workspaceApi.createTeam(input), 'Team created.')) setModal(null); }} />}
       {modal?.type === 'edit-team' && <TeamEditModal workspace={workspace} team={workspace.teams.find((team) => team.id === modal.teamId)!} onClose={() => setModal(null)} onSubmit={async (input) => { if (await refresh(workspaceApi.updateTeam(modal.teamId, input), 'Team settings updated.')) setModal(null); }} />}
       {modal?.type === 'user' && <UserModal onClose={() => setModal(null)} onSubmit={async (input) => { if (await refresh(workspaceApi.createUser(input), isLocalPocBuild ? 'Local user created.' : 'Entra-linked user created.')) setModal(null); }} />}
@@ -720,6 +761,7 @@ type ModalState =
   | { type: 'reject'; transferId: string }
   | { type: 'meeting-schedule'; meetingId: string }
   | { type: 'meeting-skip'; meetingId: string }
+  | { type: 'meeting-start'; meetingId: string }
   | { type: 'message' }
   | { type: 'message-detail'; messageId: string }
   | { type: 'message-issue'; messageId: string }
@@ -815,7 +857,7 @@ function MeetingAiSummaryPanel({ meeting, canRetry, onRequestSummary }: { meetin
     await onRequestSummary();
     setRequesting(false);
   };
-  return <section className="meeting-ai-summary"><div className="recap-section-heading"><div><span className="section-kicker">AI RECAP</span><h2>Turn the record into a useful next step.</h2></div>{status && <StatusPill status={status} label={status === 'not-generated' ? 'Not generated' : status === 'generating' ? 'Generating' : status === 'queued' ? 'Queued' : status === 'ready' ? 'Ready' : 'Failed'} />}</div>{(status === 'queued' || status === 'generating') && <div className="ai-summary-state ai-summary-pending"><span className="ai-summary-orbit">✦</span><div><strong>AI summary is being generated</strong><p>The close-time meeting context has been queued. This page will update when the structured recap is ready.</p></div></div>}{status === 'failed' && <div className="ai-summary-state ai-summary-failed"><strong>AI summary could not be generated.</strong><p>{meeting.aiSummaryError ?? 'The AI worker reported an error. The manual recap remains available.'}</p>{canRetry && <Button onClick={() => void request()} disabled={requesting}>{requesting ? 'Retrying…' : 'Retry summary'}</Button>}</div>}{status === 'not-generated' && <div className="ai-summary-state"><strong>No AI summary has been generated yet.</strong><p>This older meeting can be sent through the summary worker once using its persisted meeting record.</p>{canRetry && <Button variant="secondary" onClick={() => void request()} disabled={requesting}>{requesting ? 'Queuing…' : 'Generate summary'}</Button>}</div>}{status === 'ready' && meeting.aiSummary && <div className="ai-summary-ready"><div className="ai-summary-executive"><span className="section-kicker">EXECUTIVE SUMMARY</span><p>{meeting.aiSummary.executiveSummary}</p></div><div className="ai-summary-grid"><SummaryList title="Decisions" items={meeting.aiSummary.decisions} /><SummaryList title="Commitments" items={meeting.aiSummary.commitments} /><SummaryList title="Risks" items={meeting.aiSummary.risks} /><SummaryList title="Next focus" items={meeting.aiSummary.nextFocus} /></div><small className="ai-summary-generated">Generated {meeting.aiSummaryGeneratedAt ? `${formatDate(meeting.aiSummaryGeneratedAt)} · ${formatTime(meeting.aiSummaryGeneratedAt)}` : 'from the meeting record'}.</small></div>}</section>;
+  return <section className="meeting-ai-summary"><div className="recap-section-heading"><div><span className="section-kicker">AI RECAP</span><h2>Turn the record into a useful next step.</h2></div>{status && <StatusPill status={status} label={status === 'not-generated' ? 'Not generated' : status === 'generating' ? 'Generating' : status === 'queued' ? 'Queued' : status === 'ready' ? 'Ready' : 'Failed'} />}</div>{(status === 'queued' || status === 'generating') && <div className="ai-summary-state ai-summary-pending"><span className="ai-summary-orbit">✦</span><div><strong>AI summary is being generated</strong><p>The close-time meeting context has been queued. This page will update when the structured recap is ready.</p></div></div>}{status === 'failed' && <div className="ai-summary-state ai-summary-failed"><strong>AI summary could not be generated.</strong><p>{meeting.aiSummaryError ?? 'The AI worker reported an error. The manual recap remains available.'}</p>{canRetry && <Button onClick={() => void request()} disabled={requesting}>{requesting ? 'Retrying…' : 'Retry summary'}</Button>}</div>}{status === 'not-generated' && <div className="ai-summary-state"><strong>No AI summary has been generated yet.</strong><p>This older meeting can be sent through the summary worker once using its persisted meeting record.</p>{canRetry && <Button variant="secondary" onClick={() => void request()} disabled={requesting}>{requesting ? 'Queuing…' : 'Generate summary'}</Button>}</div>}{status === 'ready' && meeting.aiSummary && <div className="ai-summary-ready"><div className="ai-summary-executive"><span className="section-kicker">EXECUTIVE SUMMARY</span><p>{meeting.aiSummary.executiveSummary}</p></div><div className="ai-summary-grid"><SummaryList title="Decisions" items={meeting.aiSummary.decisions} /><SummaryList title="Commitments" items={meeting.aiSummary.commitments} /><SummaryList title="Risks" items={meeting.aiSummary.risks} /><SummaryList title="Next focus" items={meeting.aiSummary.nextFocus} /></div><small className="ai-summary-generated">Generated {meeting.aiSummaryGeneratedAt ? `${formatDate(meeting.aiSummaryGeneratedAt)} · ${formatTime(meeting.aiSummaryGeneratedAt)}` : 'from the meeting record'}.</small>{canRetry && <div className="ai-summary-actions"><Button variant="secondary" onClick={() => void request()} disabled={requesting}>{requesting ? 'Queuing…' : 'Regenerate recap'}</Button></div>}</div>}</section>;
 }
 
 function SummaryList({ title, items }: { title: string; items: string[] }) {
@@ -824,13 +866,14 @@ function SummaryList({ title, items }: { title: string; items: string[] }) {
 
 function MeetingRecapView({ workspace, team, meeting, canRetry, onRequestSummary, onBack }: { workspace: Workspace; team: Team; meeting: Workspace['meetings'][number]; canRetry: boolean; onRequestSummary: () => Promise<boolean>; onBack: () => void }) {
   const actionSummary = meeting.actionSummary ?? { todosCreated: meeting.createdTodoIds.length, issuesReviewedInIds: meeting.idsIssueIds.length, issuesAddedToIds: meeting.idsAddedIssueIds.length, issuesSolved: meeting.idsSolved };
-  return <><PageHeader eyebrow={`${team.name.toUpperCase()} · MEETING RECAP`} title="Meeting complete." description="The manual recap is saved and the structured AI recap will stay with this meeting record." actions={<Button variant="secondary" onClick={onBack}>Back to Live L10</Button>} /><div className="recap-meta-strip card-surface"><div><span>Meeting</span><strong>{meetingDateTimeLabel(meeting)}</strong></div><div><span>Started</span><strong>{meeting.startedAt ? `${formatDate(meeting.startedAt)} · ${formatTime(meeting.startedAt)}` : 'Not recorded'}</strong></div><div><span>Closed</span><strong>{meeting.closedAt ? `${formatDate(meeting.closedAt)} · ${formatTime(meeting.closedAt)}` : '—'}</strong></div><div><span>Attendance</span><strong>{meeting.attendeeIds.length} invited</strong></div></div><div className="recap-layout"><section className="recap-manual card-surface"><div className="recap-section-heading"><div><span className="section-kicker">MANUAL RECAP</span><h2>What the team needs to remember</h2></div><StatusPill status="closed" label={`${meeting.lastRating || '—'}/10 rating`} /></div><p className="recap-copy">{meeting.recap || 'No written recap was entered.'}</p><div className="meeting-action-summary">{[['To-Dos created', actionSummary.todosCreated], ['Issues reviewed', actionSummary.issuesReviewedInIds], ['Added to IDS', actionSummary.issuesAddedToIds], ['Issues solved', actionSummary.issuesSolved]].map(([label, value]) => <div key={String(label)}><strong>{value}</strong><span>{label}</span></div>)}</div><div className="recap-attendees"><span className="section-kicker">ATTENDANCE</span><div><AvatarStack workspace={workspace} ids={meeting.attendeeIds} /><span>{meeting.attendeeIds.map((id) => userFor(workspace, id).name).join(', ') || 'No attendees recorded.'}</span></div></div></section><MeetingAiSummaryPanel meeting={meeting} canRetry={canRetry} onRequestSummary={onRequestSummary} /></div><MeetingRecordSections workspace={workspace} meeting={meeting} /></>;
+  return <><PageHeader eyebrow={`${team.name.toUpperCase()} · MEETING RECAP`} title="Meeting complete." description="The manual recap is saved and the structured AI recap will stay with this meeting record." actions={<Button variant="secondary" onClick={onBack}>Back to Live L10</Button>} /><div className="recap-meta-strip card-surface"><div><span>Meeting</span><strong>{meetingDateTimeLabel(meeting)}</strong></div><div><span>Facilitator</span><strong>{meeting.facilitatorId ? userFor(workspace, meeting.facilitatorId).name : 'Not recorded'}</strong></div><div><span>Started</span><strong>{meeting.startedAt ? `${formatDate(meeting.startedAt)} · ${formatTime(meeting.startedAt)}` : 'Not recorded'}</strong></div><div><span>Closed</span><strong>{meeting.closedAt ? `${formatDate(meeting.closedAt)} · ${formatTime(meeting.closedAt)}` : '—'}</strong></div><div><span>Duration</span><strong>{meeting.durationSeconds !== undefined ? formatDuration(meeting.durationSeconds) : 'Not recorded'}</strong></div><div><span>Attendance</span><strong>{meeting.attendeeIds.length} invited</strong></div></div><div className="recap-layout"><section className="recap-manual card-surface"><div className="recap-section-heading"><div><span className="section-kicker">MANUAL RECAP</span><h2>What the team needs to remember</h2></div><StatusPill status="closed" label={`${meeting.lastRating || '—'}/10 rating`} /></div><p className="recap-copy">{meeting.recap || 'No written recap was entered.'}</p><div className="meeting-action-summary">{[['To-Dos created', actionSummary.todosCreated], ['Issues reviewed', actionSummary.issuesReviewedInIds], ['Added to IDS', actionSummary.issuesAddedToIds], ['Issues solved', actionSummary.issuesSolved]].map(([label, value]) => <div key={String(label)}><strong>{value}</strong><span>{label}</span></div>)}</div><div className="recap-attendees"><span className="section-kicker">ATTENDANCE</span><div><AvatarStack workspace={workspace} ids={meeting.attendeeIds} /><span>{meeting.attendeeIds.map((id) => userFor(workspace, id).name).join(', ') || 'No attendees recorded.'}</span></div></div>{meeting.attendeeRatings && meeting.attendeeRatings.length > 0 && <div className="recap-attendee-ratings"><span className="section-kicker">INDIVIDUAL RATINGS</span>{meeting.attendeeRatings.map((entry) => <div key={entry.attendeeId}><span>{userFor(workspace, entry.attendeeId).name}</span><strong>{entry.rating}/10</strong></div>)}</div>}</section><MeetingAiSummaryPanel meeting={meeting} canRetry={canRetry} onRequestSummary={onRequestSummary} /></div><MeetingRecordSections workspace={workspace} meeting={meeting} /></>;
 }
 
 function MeetingRecordSections({ workspace, meeting }: { workspace: Workspace; meeting: Workspace['meetings'][number] }) {
   const agendaNotes = Object.entries(meeting.sectionNotes ?? {}).filter(([, note]) => Boolean(note?.trim()));
   const createdTodos = meeting.createdTodoIds.map((id) => workspace.todos.find((todo) => todo.id === id)?.title ?? id);
-  return <div className="meeting-record-sections"><section className="card-surface record-section"><div className="recap-section-heading"><div><span className="section-kicker">AGENDA NOTES</span><h2>Notes captured during the L10</h2></div></div>{agendaNotes.length ? agendaNotes.map(([section, note]) => <div className="record-note" key={section}><strong>{statusLabel(section)}</strong><p>{note}</p></div>) : <EmptyState title="No agenda notes" detail="The team did not add section notes to this meeting." />}</section><section className="card-surface record-section"><div className="recap-section-heading"><div><span className="section-kicker">IDS RECORD</span><h2>Decisions and created commitments</h2></div></div>{meeting.idsNotes.length ? meeting.idsNotes.map((note) => <div className="record-note" key={note.id}><strong>{userFor(workspace, note.authorId).name} · {formatDate(note.createdAt)}</strong><p>{note.note}</p></div>) : <p className="record-empty">No separate IDS notes were captured.</p>}{createdTodos.length > 0 && <div className="record-created-todos"><strong>Created To-Dos</strong><ul>{createdTodos.map((todo, index) => <li key={`${todo}-${index}`}>{todo}</li>)}</ul></div>}</section>{meeting.status === 'skipped' && <section className="card-surface record-section skip-detail"><div className="recap-section-heading"><div><span className="section-kicker">SKIP DETAILS</span><h2>Why this occurrence was skipped</h2></div></div><p><strong>{meeting.skipReason === 'public-holiday' ? 'Public holiday' : meeting.skipReason === 'annual-leave' ? 'Annual leave' : 'Other reason'}</strong>{meeting.skipNote ? ` · ${meeting.skipNote}` : ''}</p><small>{meeting.skippedAt ? `Recorded ${formatDate(meeting.skippedAt)} · ${formatTime(meeting.skippedAt)}` : 'Recorded in the meeting audit trail.'}</small></section>}</div>;
+  const sectionDurations = Object.entries(meeting.sectionDurations ?? {}).filter(([, seconds]) => seconds !== undefined);
+  return <div className="meeting-record-sections"><section className="card-surface record-section"><div className="recap-section-heading"><div><span className="section-kicker">MEETING TIMING</span><h2>Time spent in the room</h2></div></div><div className="timing-record-grid"><div><span>Overall meeting</span><strong>{meeting.durationSeconds !== undefined ? formatDuration(meeting.durationSeconds) : 'Not recorded'}</strong></div>{sectionDurations.map(([section, seconds]) => <div key={section}><span>{statusLabel(section)}</span><strong>{formatDuration(seconds ?? 0)}</strong></div>)}</div></section><section className="card-surface record-section"><div className="recap-section-heading"><div><span className="section-kicker">AGENDA NOTES</span><h2>Notes captured during the L10</h2></div></div>{agendaNotes.length ? agendaNotes.map(([section, note]) => <div className="record-note" key={section}><strong>{statusLabel(section)}</strong><p>{note}</p></div>) : <EmptyState title="No agenda notes" detail="The team did not add section notes to this meeting." />}</section><section className="card-surface record-section"><div className="recap-section-heading"><div><span className="section-kicker">IDS RECORD</span><h2>Decisions and created commitments</h2></div></div>{meeting.idsNotes.length ? meeting.idsNotes.map((note) => <div className="record-note" key={note.id}><strong>{userFor(workspace, note.authorId).name} · {formatDate(note.createdAt)}</strong><p>{note.note}</p></div>) : <p className="record-empty">No separate IDS notes were captured.</p>}{createdTodos.length > 0 && <div className="record-created-todos"><strong>Created To-Dos</strong><ul>{createdTodos.map((todo, index) => <li key={`${todo}-${index}`}>{todo}</li>)}</ul></div>}</section>{meeting.status === 'skipped' && <section className="card-surface record-section skip-detail"><div className="recap-section-heading"><div><span className="section-kicker">SKIP DETAILS</span><h2>Why this occurrence was skipped</h2></div></div><p><strong>{meeting.skipReason === 'public-holiday' ? 'Public holiday' : meeting.skipReason === 'annual-leave' ? 'Annual leave' : 'Other reason'}</strong>{meeting.skipNote ? ` · ${meeting.skipNote}` : ''}</p><small>{meeting.skippedAt ? `Recorded ${formatDate(meeting.skippedAt)} · ${formatTime(meeting.skippedAt)}` : 'Recorded in the meeting audit trail.'}</small></section>}</div>;
 }
 
 function MeetingHistoryView({ workspace, teams, onRequestSummary, onOpenMeeting }: { workspace: Workspace; teams: Team[]; onRequestSummary: (teamId: string, meetingId: string, expectedVersion?: number) => Promise<boolean>; onOpenMeeting: (teamId: string, meetingId: string) => void }) {
@@ -849,7 +892,24 @@ function MeetingHistoryView({ workspace, teams, onRequestSummary, onOpenMeeting 
 
 function MeetingHistoryDetail({ workspace, item, canRetry, onRequestSummary, onOpenMeeting }: { workspace: Workspace; item: { meeting: Workspace['meetings'][number]; team: Team; reviewStatus: string }; canRetry: boolean; onRequestSummary: () => Promise<boolean>; onOpenMeeting: () => void }) {
   const { meeting, team, reviewStatus } = item;
-  return <><div className="history-detail-head"><div><span className="section-kicker">{team.name.toUpperCase()}</span><h2>{meeting.label}</h2><p>{meetingDateTimeLabel(meeting)}</p></div><div><StatusPill status={reviewStatus} /><Button variant="secondary" onClick={onOpenMeeting}>Open record</Button></div></div><div className="history-detail-meta"><span><strong>Started</strong>{meeting.startedAt ? `${formatDate(meeting.startedAt)} · ${formatTime(meeting.startedAt)}` : 'Not started'}</span><span><strong>Closed</strong>{meeting.closedAt ? `${formatDate(meeting.closedAt)} · ${formatTime(meeting.closedAt)}` : 'Still open'}</span><span><strong>Attendance</strong>{meeting.attendeeIds.length} invited</span></div>{meeting.status === 'skipped' && <div className="history-skip-callout"><strong>Skipped: {meeting.skipReason === 'public-holiday' ? 'Public holiday' : meeting.skipReason === 'annual-leave' ? 'Annual leave' : 'Other'}</strong><span>{meeting.skipNote || 'No note was added.'}</span></div>}{meeting.status === 'closed' ? <><section className="history-manual-recap"><span className="section-kicker">MANUAL RECAP</span><h3>{meeting.lastRating || '—'}/10 rating</h3><p>{meeting.recap || 'No manual recap was entered.'}</p></section><MeetingAiSummaryPanel meeting={meeting} canRetry={canRetry} onRequestSummary={onRequestSummary} /></> : <div className="history-open-note"><strong>{reviewStatus === 'missed' ? 'This meeting was missed.' : reviewStatus === 'overdue' ? 'This meeting is overdue.' : 'This occurrence is not complete yet.'}</strong><p>Open Live L10 to resume the meeting or manage the occurrence.</p></div>}<MeetingRecordSections workspace={workspace} meeting={meeting} /></>;
+  return <><div className="history-detail-head"><div><span className="section-kicker">{team.name.toUpperCase()}</span><h2>{meeting.label}</h2><p>{meetingDateTimeLabel(meeting)}</p></div><div><StatusPill status={reviewStatus} /><Button variant="secondary" onClick={onOpenMeeting}>Open record</Button></div></div><div className="history-detail-meta"><span><strong>Facilitator</strong>{meeting.facilitatorId ? userFor(workspace, meeting.facilitatorId).name : 'Not recorded'}</span><span><strong>Started</strong>{meeting.startedAt ? `${formatDate(meeting.startedAt)} · ${formatTime(meeting.startedAt)}` : 'Not started'}</span><span><strong>Closed</strong>{meeting.closedAt ? `${formatDate(meeting.closedAt)} · ${formatTime(meeting.closedAt)}` : 'Still open'}</span><span><strong>Duration</strong>{meeting.durationSeconds !== undefined ? formatDuration(meeting.durationSeconds) : 'Not recorded'}</span><span><strong>Attendance</strong>{meeting.attendeeIds.length} invited</span></div>{meeting.status === 'skipped' && <div className="history-skip-callout"><strong>Skipped: {meeting.skipReason === 'public-holiday' ? 'Public holiday' : meeting.skipReason === 'annual-leave' ? 'Annual leave' : 'Other'}</strong><span>{meeting.skipNote || 'No note was added.'}</span></div>}{meeting.status === 'closed' ? <><section className="history-manual-recap"><span className="section-kicker">MANUAL RECAP</span><h3>{meeting.lastRating || '—'}/10 rating</h3><p>{meeting.recap || 'No manual recap was entered.'}</p>{meeting.attendeeRatings && meeting.attendeeRatings.length > 0 && <div className="history-attendee-ratings"><span className="section-kicker">INDIVIDUAL RATINGS</span>{meeting.attendeeRatings.map((entry) => <span key={entry.attendeeId}>{userFor(workspace, entry.attendeeId).name}: <strong>{entry.rating}/10</strong></span>)}</div>}</section><MeetingAiSummaryPanel meeting={meeting} canRetry={canRetry} onRequestSummary={onRequestSummary} /></> : <div className="history-open-note"><strong>{reviewStatus === 'missed' ? 'This meeting was missed.' : reviewStatus === 'overdue' ? 'This meeting is overdue.' : 'This occurrence is not complete yet.'}</strong><p>Open Live L10 to resume the meeting or manage the occurrence.</p></div>}<MeetingRecordSections workspace={workspace} meeting={meeting} /></>;
+}
+
+function MeetingStartModal({ workspace, team, meeting, onClose, onSubmit }: { workspace: Workspace; team: Team; meeting: Workspace['meetings'][number]; onClose: () => void; onSubmit: (facilitatorId: string) => void }) {
+  const teamUsers = workspace.memberships
+    .filter((membership) => membership.teamId === team.id && membership.active)
+    .map((membership) => workspace.users.find((user) => user.id === membership.userId))
+    .filter((user): user is User => Boolean(user && user.active));
+  const fallback = teamUsers.find((user) => user.id === meeting.facilitatorId)?.id ?? teamUsers.find((user) => user.id === workspace.currentUser.id)?.id ?? teamUsers[0]?.id ?? workspace.currentUser.id;
+  const [facilitatorId, setFacilitatorId] = useState(fallback);
+  return <ModalShell title="Start the L10" description="Choose the facilitator for this meeting. They will own the live flow, enter individual attendee ratings, and close the saved record." onClose={onClose}>
+    <form className="modal-form" onSubmit={(event) => { event.preventDefault(); if (facilitatorId) onSubmit(facilitatorId); }}>
+      <div className="meeting-start-preview"><span className="section-kicker">{team.name.toUpperCase()}</span><strong>{meeting.label}</strong><span>{meetingDateTimeLabel(meeting)}</span></div>
+      <label>Facilitator<select value={facilitatorId} onChange={(event) => setFacilitatorId(event.target.value)} required disabled={meeting.status === 'in-progress' && Boolean(meeting.facilitatorId)}>{teamUsers.map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
+      <small className="form-help">The facilitator is stored on the meeting and shown in the recap and meeting history. Attendees can be rated individually at Conclude.</small>
+      <ModalActions onClose={onClose} submitLabel={meeting.status === 'in-progress' ? 'Resume meeting' : 'Start meeting'} />
+    </form>
+  </ModalShell>;
 }
 
 function TransferNotice({ workspace, teamId, pendingTransfers, pendingSourceTransfers, editable, onAccept, onReject, onCancel }: { workspace: Workspace; teamId: string; pendingTransfers: IssueTransfer[]; pendingSourceTransfers: IssueTransfer[]; editable: boolean; onAccept: (transferId: string) => void; onReject: (transferId: string) => void; onCancel: (transferId: string) => void }) {
@@ -900,7 +960,7 @@ function CompanyView({ workspace, overview, onNavigate }: { workspace: Workspace
   const filteredIssues = overview.issues.filter((issue) => (teamFilter === 'all' || issue.teamId === teamFilter) && (ownerFilter === 'all' || issue.ownerId === ownerFilter) && (statusFilter === 'all' || issueStatusClass(issue) === statusFilter) && (meetingFilter === 'all' || issue.meetingBand === meetingFilter) && (priorityFilter === 'all' || String(issue.priority) === priorityFilter));
   const selectedTeam = selectedTeamId ? teamFor(workspace, selectedTeamId) : null;
   const selectedItems = selectedTeamId ? { issues: overview.issues.filter((issue) => issue.teamId === selectedTeamId), rocks: overview.rocks.filter((rock) => rock.teamId === selectedTeamId), todos: overview.todos.filter((todo) => todo.teamId === selectedTeamId) } : null;
-  return <><PageHeader eyebrow="LEADERSHIP · COMPANY VISIBILITY" title="See the whole operating system." description="Read-only rollups across every operational team, with direct-team and descendant totals kept separate." actions={<Button variant="secondary" onClick={() => onNavigate('issues')}>Open current team Issues →</Button>} /><div className="company-hero card-surface"><div><span className="section-kicker">COMPANY OVERVIEW</span><h2>{overview.issues.filter((issue) => issue.status !== 'solved').length} active Issues across {workspace.teams.length} workspaces.</h2><p>Use meeting health and status to see where a conversation needs to happen before the next L10.</p></div><div className="company-orbit"><strong>{overview.rocks.filter((rock) => rock.status !== 'off-track').length}</strong><span>Rocks on track</span></div></div><div className="company-rollup-grid">{workspace.teams.map((team) => { const rollup = overview.teams.find((item) => item.teamId === team.id); if (!rollup) return null; return <button key={team.id} className={`company-team-card card-surface ${selectedTeamId === team.id ? 'company-team-selected' : ''}`} onClick={() => setSelectedTeamId(team.id)}><div className="company-team-top"><span className="team-mark" style={{ backgroundColor: team.accent }}>{team.initials}</span><span className="node-type">{team.nodeType}</span></div><strong>{team.name}</strong><small>{teamPath(workspace, team.id)}</small><div className="company-team-stats"><span><b>{rollup.direct.issues.total}</b> direct Issues</span><span><b>{rollup.descendants.issues}</b> child Issues</span><span><b>{rollup.direct.rocks.offTrack}</b> off-track Rocks</span></div></button>; })}</div><div className="company-workbench card-surface"><div className="company-filters"><label>Team<select value={teamFilter} onChange={(event) => setTeamFilter(event.target.value)}><option value="all">All teams</option>{workspace.teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label><label>Owner<select value={ownerFilter} onChange={(event) => setOwnerFilter(event.target.value)}><option value="all">All owners</option>{workspace.users.map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label><label>Status<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="all">All statuses</option><option value="open">Open</option><option value="in-ids">In IDS</option><option value="unassigned">Unassigned</option><option value="solved">Solved</option></select></label><label>Meeting health<select value={meetingFilter} onChange={(event) => setMeetingFilter(event.target.value)}><option value="all">Any health</option><option value="neutral">Neutral · 0</option><option value="green">Green · 1</option><option value="yellow">Yellow · 2</option><option value="orange">Orange · 3</option><option value="red">Red · 4+</option></select></label><label>Priority<select value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value)}><option value="all">Any priority</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></label></div><div className="company-table-head"><div><span className="section-kicker">ISSUE HEALTH</span><h2>Company Issues</h2></div><span>{filteredIssues.length} visible</span></div><div className="company-table">{filteredIssues.map((issue) => <div className="company-table-row" key={`${issue.teamId}-${issue.id}`}><span className="issue-number">{issue.priority}</span><div><strong>{issue.title}</strong><small>{teamPath(workspace, issue.teamId)} · {issue.horizon === 'short-term' ? 'Short-term' : 'Long-term'} · {ageLabel(issue)} old</small></div><span><Avatar user={userFor(workspace, issue.ownerId)} size="sm" />{userFor(workspace, issue.ownerId).name}</span><AgePill issue={issue} /><StatusPill status={issueStatusClass(issue)} /></div>)}{filteredIssues.length === 0 && <EmptyState title="No Issues match these filters" detail="Try widening the status, owner, or meeting-health selection." />}</div></div>{selectedItems && selectedTeam && <div className="detail-drawer card-surface"><div className="detail-drawer-head"><div><span className="section-kicker">READ-ONLY TEAM DETAIL</span><h2>{selectedTeam.name}</h2><p>{teamPath(workspace, selectedTeam.id)}</p></div><button className="icon-button" onClick={() => setSelectedTeamId(null)} aria-label="Close detail">×</button></div><div className="detail-drawer-grid"><div><strong>{selectedItems.issues.length}</strong><span>Issues</span></div><div><strong>{selectedItems.rocks.length}</strong><span>Rocks</span></div><div><strong>{selectedItems.todos.length}</strong><span>To-Dos</span></div></div><div className="drawer-list">{selectedItems.issues.slice(0, 5).map((issue) => <div key={issue.id}><span>{issue.title}</span><AgePill issue={issue} /></div>)}</div></div>}</>;
+  return <><PageHeader eyebrow="LEADERSHIP · COMPANY VISIBILITY" title="See the whole operating system." description="Read-only rollups across every operational team, with direct-team and descendant totals kept separate." actions={<Button variant="secondary" onClick={() => onNavigate('issues')}>Open current team Issues →</Button>} /><div className="company-hero card-surface"><div><span className="section-kicker">COMPANY OVERVIEW</span><h2>{overview.issues.filter((issue) => issue.status !== 'solved').length} active Issues across {workspace.teams.length} workspaces.</h2><p>Use meeting health and status to see where a conversation needs to happen before the next L10.</p></div><div className="company-orbit"><strong>{overview.rocks.filter((rock) => rock.status !== 'off-track').length}</strong><span>Rocks on track</span></div></div><div className="company-rollup-grid">{workspace.teams.map((team) => { const rollup = overview.teams.find((item) => item.teamId === team.id); if (!rollup) return null; return <button key={team.id} className={`company-team-card card-surface ${selectedTeamId === team.id ? 'company-team-selected' : ''}`} onClick={() => setSelectedTeamId(team.id)}><div className="company-team-top"><span className="team-mark" style={{ backgroundColor: team.accent }}>{team.initials}</span><span className="node-type">{team.nodeType}</span></div><strong>{team.name}</strong><small>{teamPath(workspace, team.id)}</small><div className="company-team-stats"><span><b>{rollup.direct.issues.total}</b> direct Issues</span><span><b>{rollup.descendants.issues}</b> child Issues</span><span><b>{rollup.direct.rocks.offTrack}</b> off-track Rocks</span></div></button>; })}</div><div className="company-workbench card-surface"><div className="company-filters"><label>Team<select value={teamFilter} onChange={(event) => setTeamFilter(event.target.value)}><option value="all">All teams</option>{workspace.teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label><label>Owner<select value={ownerFilter} onChange={(event) => setOwnerFilter(event.target.value)}><option value="all">All owners</option>{workspace.users.map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label><label>Status<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="all">All statuses</option><option value="open">Open</option><option value="in-ids">In IDS</option><option value="parked">Parked</option><option value="unassigned">Unassigned</option><option value="solved">Solved</option></select></label><label>Meeting health<select value={meetingFilter} onChange={(event) => setMeetingFilter(event.target.value)}><option value="all">Any health</option><option value="neutral">Neutral · 0</option><option value="green">Green · 1</option><option value="yellow">Yellow · 2</option><option value="orange">Orange · 3</option><option value="red">Red · 4+</option></select></label><label>Priority<select value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value)}><option value="all">Any priority</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></label></div><div className="company-table-head"><div><span className="section-kicker">ISSUE HEALTH</span><h2>Company Issues</h2></div><span>{filteredIssues.length} visible</span></div><div className="company-table">{filteredIssues.map((issue) => <div className="company-table-row" key={`${issue.teamId}-${issue.id}`}><span className="issue-number">{issue.priority}</span><div><strong>{issue.title}</strong><small>{teamPath(workspace, issue.teamId)} · {issue.horizon === 'short-term' ? 'Short-term' : 'Long-term'} · {ageLabel(issue)} old</small></div><span><Avatar user={userFor(workspace, issue.ownerId)} size="sm" />{userFor(workspace, issue.ownerId).name}</span><AgePill issue={issue} /><StatusPill status={issueStatusClass(issue)} /></div>)}{filteredIssues.length === 0 && <EmptyState title="No Issues match these filters" detail="Try widening the status, owner, or meeting-health selection." />}</div></div>{selectedItems && selectedTeam && <div className="detail-drawer card-surface"><div className="detail-drawer-head"><div><span className="section-kicker">READ-ONLY TEAM DETAIL</span><h2>{selectedTeam.name}</h2><p>{teamPath(workspace, selectedTeam.id)}</p></div><button className="icon-button" onClick={() => setSelectedTeamId(null)} aria-label="Close detail">×</button></div><div className="detail-drawer-grid"><div><strong>{selectedItems.issues.length}</strong><span>Issues</span></div><div><strong>{selectedItems.rocks.length}</strong><span>Rocks</span></div><div><strong>{selectedItems.todos.length}</strong><span>To-Dos</span></div></div><div className="drawer-list">{selectedItems.issues.slice(0, 5).map((issue) => <div key={issue.id}><span>{issue.title}</span><AgePill issue={issue} /></div>)}</div></div>}</>;
 }
 
 function MeetingView({ workspace, team, readOnly, agenda, rocks, todos, issues, metrics, scorecardResults, headlines, meeting, section, secondsLeft, running, closed, pendingTransfers, pendingSourceTransfers, onSelectSection, onToggleRunning, onUpdateRock, onUpdateTodo, onOpenIssue, onStartIssue, onSolveIssue, onFlagMetric, onAccept, onReject, onCancel, onClose, onEditSchedule, onNavigate }: { workspace: Workspace; team: Team; readOnly: boolean; agenda: MeetingSectionConfig[]; rocks: Rock[]; todos: Todo[]; issues: Issue[]; metrics: ScorecardMetric[]; scorecardResults: ScorecardResult[]; headlines: Workspace['headlines']; meeting: Workspace['meetings'][number]; section: MeetingSection; secondsLeft: number; running: boolean; closed: boolean; pendingTransfers: IssueTransfer[]; pendingSourceTransfers: IssueTransfer[]; onSelectSection: (section: MeetingSection) => void; onToggleRunning: () => void; onUpdateRock: (rock: Rock) => void; onUpdateTodo: (todo: Todo, status?: TodoStatus) => void; onOpenIssue: (issueId: string) => void; onStartIssue: (issue: Issue) => void; onSolveIssue: (issue: Issue) => void; onFlagMetric: (metric: ScorecardMetric, result?: ScorecardResult) => void; onAccept: (id: string) => void; onReject: (id: string) => void; onCancel: (id: string) => void; onClose: (recap: string, rating: number) => void; onEditSchedule: () => void; onNavigate: (view: ViewId) => void }) {
@@ -919,7 +979,7 @@ function MeetingSectionContent({ section, workspace, team, rocks, todos, issues,
   if (section === 'scorecard') return <div className="meeting-section-content"><SectionIntro kicker={`SCORECARD · WEEK OF ${formatDate(meetingWeekStartDate)}`} title="Report the number, not the story." description="This is the saved result for the meeting’s Monday-start week. Manage values from the Scorecard screen." /><div className="meeting-metric-table">{metrics.map((metric) => { const result = scorecardResults.find((candidate) => candidate.metricId === metric.id && candidate.weekStartDate === meetingWeekStartDate); return <div className="metric-row" key={metric.id}><div className="metric-name"><span className={`metric-status-dot metric-${result?.status ?? 'missing'}`} /><strong>{metric.label}</strong><small><Avatar user={userFor(workspace, metric.ownerId)} size="sm" />{userFor(workspace, metric.ownerId).name}</small></div><div className="metric-values"><span>Target <b>{metric.target}</b> {metric.unit}</span><span>Actual <b>{result?.actual ?? 'Not entered'}</b>{result?.actual ? ` ${metric.unit}` : ''}</span></div><div className="metric-trend"><span className={`trend-arrow trend-${result?.trend ?? 'flat'}`}>{result?.trend === 'up' ? '↗' : result?.trend === 'down' ? '↘' : '→'}</span>{result?.trendLabel ?? 'No comparable prior result'}</div>{result ? <StatusPill status={result.status} /> : <span className="missing-result-pill">Not entered</span>}{result?.status === 'off-track' && !readOnly && <button className="row-action row-action-small" onClick={() => onFlagMetric(metric, result)}>Add to IDS</button>}</div>; })}</div><Button variant="secondary" onClick={() => onNavigate('scorecard')}>Open this week in Scorecard →</Button></div>;
   if (section === 'rock-review') return <div className="meeting-section-content"><SectionIntro kicker="ROCK REVIEW · 5 MINUTES" title="Are we on track?" description="Every Rock gets a clear status. Milestone counts show the work completed and remaining. Off-track Rocks can become Issues." /><div className="meeting-rock-list">{rocks.map((rock) => { const milestones = rockMilestoneCounts(rock); return <div className="meeting-rock-row" key={rock.id}><div className="meeting-rock-info"><strong>{rock.title}</strong><span><Avatar user={userFor(workspace, rock.ownerId)} size="sm" />{userFor(workspace, rock.ownerId).name} · due {formatDate(rock.dueDate)}</span></div><div className="meeting-rock-progress"><ProgressBar value={milestones.total ? milestones.completed / milestones.total * 100 : 0} tone={rock.status === 'off-track' ? 'coral' : 'teal'} /><span>{milestones.completed} completed · {milestones.remaining} remaining</span></div><button className={`quick-status-button ${rock.status}`} onClick={() => onUpdateRock(rock)} disabled={readOnly}><span className="status-dot" />{statusLabel(rock.status)}</button></div>; })}</div></div>;
   if (section === 'headlines') return <div className="meeting-section-content"><SectionIntro kicker="CUSTOMER & EMPLOYEE HEADLINES · 5 MINUTES" title="Share what changed." description="Wins, concerns, and context help the team see the whole picture before IDS." /><div className="headline-meeting-grid">{headlines.map((headline) => <article className="headline-meeting-card" key={headline.id}><div className="headline-card-label"><span>{headline.type === 'win' ? '↗' : '!'}</span>{headline.type === 'win' ? 'Win' : 'Concern'}<span className="headline-time">{formatDate(headline.createdAt)}</span></div><h3>{headline.title}</h3><p>{headline.detail}</p><span className="headline-author"><Avatar user={userFor(workspace, headline.authorId)} size="sm" />{userFor(workspace, headline.authorId).name}</span></article>)}</div></div>;
-  if (section === 'todo-review') return <div className="meeting-section-content"><SectionIntro kicker="TO-DO REVIEW · 5 MINUTES" title="Did we do what we said?" description="Mark commitments done or not done. To roll a commitment over, edit its due date; the rollover is recorded automatically." /><div className="meeting-todo-table">{todos.map((todo) => <div className="meeting-todo-row" key={todo.id}><button className={`todo-checkbox ${todo.status === 'done' ? 'checked' : ''}`} onClick={() => onUpdateTodo(todo)} disabled={readOnly}>{todo.status === 'done' ? '✓' : ''}</button><div className="meeting-todo-copy"><strong>{todo.title}</strong><span><Avatar user={userFor(workspace, todo.ownerId)} size="sm" />{userFor(workspace, todo.ownerId).name} · due {formatDate(todo.dueDate)} · rolled {todo.carryForwardCount}×</span></div><StatusPill status={todo.flagged ? 'not-done' : todo.status} label={todo.flagged ? 'Flagged' : undefined} /></div>)}</div></div>;
+  if (section === 'todo-review') return <div className="meeting-section-content"><SectionIntro kicker="TO-DO REVIEW · 5 MINUTES" title="Did we do what we said?" description="Mark commitments done or not done. To roll a commitment over, edit its due date; the rollover is recorded automatically." /><div className="meeting-todo-table">{todos.map((todo) => <div className="meeting-todo-row" key={todo.id}><button className={`todo-checkbox ${todo.status === 'done' ? 'checked' : ''}`} onClick={() => onUpdateTodo(todo)} disabled={readOnly}>{todo.status === 'done' ? '✓' : ''}</button><div className="meeting-todo-copy"><strong>{todo.title}</strong><span className="meeting-todo-meta">Due {formatDate(todo.dueDate)} · rolled {todo.carryForwardCount}×</span></div><div className="meeting-todo-owner"><Avatar user={userFor(workspace, todo.ownerId)} size="sm" /><span><small>OWNER</small><strong>{userFor(workspace, todo.ownerId).name}</strong></span></div><StatusPill status={todo.flagged ? 'not-done' : todo.status} label={todo.flagged ? 'Flagged' : undefined} /></div>)}</div></div>;
   if (section === 'ids') return <div className="meeting-section-content"><SectionIntro kicker="IDS · 60 MINUTES" title="Solve the real issue." description={`There are ${issues.length} short-term Issues in this team's queue. Identify, discuss, and solve the highest-value problem.`} /><div className="ids-meeting-list">{issues.map((issue) => <div className="ids-meeting-row" key={issue.id}><span className="issue-number">P{issue.priority}</span><button className="ids-meeting-copy" onClick={() => onOpenIssue(issue.id)}><strong>{issue.title}</strong><small><AgePill issue={issue} /> · {ageLabel(issue)} old</small></button><div className="ids-meeting-actions"><Button variant="quiet" onClick={() => onOpenIssue(issue.id)}>Open issue</Button>{issue.status !== 'in-ids' && <Button variant="secondary" onClick={() => onStartIssue(issue)} disabled={readOnly}>Start IDS</Button>}{issue.status !== 'solved' && <Button onClick={() => onSolveIssue(issue)} disabled={readOnly}>Solve ✓</Button>}</div></div>)}{issues.length === 0 && <EmptyState title="The IDS queue is clear" detail="Capture an Issue from the workspace when the next one appears." />}</div></div>;
   if (section === 'conclude') return <div className="meeting-section-content conclude-content"><span className="conclude-symbol">✓</span><span className="section-kicker">CONCLUDE · 5 MINUTES</span><h2>Leave with clarity.</h2><p>Recap the decisions, confirm every To-Do has an owner and due date, and rate the meeting.</p><label className="recap-field">Final recap<textarea value={recap} onChange={(event) => setRecap(event.target.value)} placeholder="What did the team decide?" rows={4} disabled={readOnly} /></label><div className="rating-field"><span className="section-kicker">MEETING RATING</span><div className="rating-options">{[6, 7, 8, 9, 10].map((value) => <button key={value} className={rating === value ? 'rating-selected' : ''} onClick={() => setRating(value)} disabled={readOnly}>{value}</button>)}</div></div></div>;
   return <div className="meeting-intro"><span className="intro-orbit">✦</span><span className="section-kicker">{team.name.toUpperCase()} L10</span><h2>Start with the room.</h2><p>The weekly rhythm gives the team a shared place to report, solve, and commit.</p></div>;
@@ -928,6 +988,8 @@ function MeetingSectionContent({ section, workspace, team, rocks, todos, issues,
 function SectionIntro({ kicker, title, description }: { kicker: string; title: string; description: string }) {
   return <div className="section-intro-row"><div><span className="section-kicker">{kicker}</span><h2>{title}</h2><p>{description}</p></div></div>;
 }
+
+type IdsStage = 'select' | 'order' | 'work';
 
 interface MeetingViewV2Props {
   workspace: Workspace;
@@ -945,7 +1007,7 @@ interface MeetingViewV2Props {
   selectedMeetingId: string;
   pendingMessages: TeamMessage[];
   section: MeetingSection;
-  secondsLeft: number;
+  clockNow: number;
   running: boolean;
   closed: boolean;
   pendingTransfers: IssueTransfer[];
@@ -956,6 +1018,7 @@ interface MeetingViewV2Props {
   onSkipMeeting: (meeting: Workspace['meetings'][number]) => void;
   onRescheduleMeeting: (meeting: Workspace['meetings'][number]) => void;
   onSelectSection: (section: MeetingSection) => void;
+  onTransitionSection: (fromSection: MeetingSection, toSection: MeetingSection) => Promise<boolean>;
   onToggleRunning: () => void;
   onUpdateRock: (rock: Rock) => void;
   onUpdateTodo: (todo: Todo, status?: TodoStatus) => void;
@@ -965,46 +1028,79 @@ interface MeetingViewV2Props {
   onMarkMessageRead: (messageId: string) => void;
   onCreateIssueFromMessage: (messageId: string) => void;
   onStartIssue: (issue: Issue) => void;
+  onParkIssue: (issue: Issue) => void;
   onSolveIssue: (issue: Issue) => void;
   onCreateIssueFromScorecard: (metric: ScorecardMetric, result: ScorecardResult) => void;
   onCreateIssueFromRock: (rock: Rock) => void;
   onSaveSectionNote: (section: MeetingSection, note: string) => Promise<boolean>;
-  onReorderIssues: (issueIds: string[]) => void;
+  onSelectMeetingIssues: (issueIds: string[]) => Promise<boolean>;
+  onSaveIssueNote: (issueId: string, note: string) => Promise<boolean>;
+  onReorderIssues: (issueIds: string[]) => Promise<boolean>;
   onAccept: (id: string) => void;
   onReject: (id: string) => void;
   onCancel: (id: string) => void;
-  onClose: (recap: string, rating: number) => void;
+  onClose: (recap: string, rating: number, attendeeRatings: MeetingAttendeeRating[]) => void;
   onEditSchedule: () => void;
   onNavigate: (view: ViewId) => void;
 }
 
-function MeetingViewV2({ workspace, team, readOnly, agenda, rocks, todos, issues, metrics, scorecardResults, headlines, meeting, occurrences, selectedMeetingId, section, secondsLeft, running, closed, pendingTransfers, pendingSourceTransfers, pendingMessages, canManageSchedule, onSelectMeeting, onStartMeeting, onSkipMeeting, onRescheduleMeeting, onSelectSection, onToggleRunning, onUpdateRock, onUpdateTodo, onOpenIssue, onOpenTodo, onOpenMessage, onMarkMessageRead, onCreateIssueFromMessage, onStartIssue, onSolveIssue, onCreateIssueFromScorecard, onCreateIssueFromRock, onSaveSectionNote, onReorderIssues, onAccept, onReject, onCancel, onClose, onEditSchedule, onNavigate }: MeetingViewV2Props) {
+function MeetingViewV2({ workspace, team, readOnly, agenda, rocks, todos, issues, metrics, scorecardResults, headlines, meeting, occurrences, selectedMeetingId, section, clockNow, running, closed, pendingTransfers, pendingSourceTransfers, pendingMessages, canManageSchedule, onSelectMeeting, onStartMeeting, onSkipMeeting, onRescheduleMeeting, onSelectSection, onTransitionSection, onToggleRunning, onUpdateRock, onUpdateTodo, onOpenIssue, onOpenTodo, onOpenMessage, onMarkMessageRead, onCreateIssueFromMessage, onStartIssue, onParkIssue, onSolveIssue, onCreateIssueFromScorecard, onCreateIssueFromRock, onSaveSectionNote, onSelectMeetingIssues, onSaveIssueNote, onReorderIssues, onAccept, onReject, onCancel, onClose, onEditSchedule, onNavigate }: MeetingViewV2Props) {
   const [recap, setRecap] = useState(meeting.recap);
   const [rating, setRating] = useState(meeting.lastRating || 8);
+  const [attendeeRatings, setAttendeeRatings] = useState<Record<string, number>>(() => Object.fromEntries((meeting.attendeeRatings ?? []).map((entry) => [entry.attendeeId, entry.rating])));
+  const [idsStage, setIdsStage] = useState<IdsStage>('select');
+  const [idsCursor, setIdsCursor] = useState(0);
   const currentIndex = Math.max(0, agenda.findIndex((item) => item.id === section));
   const skipped = meeting.status === 'skipped';
   const recordClosed = closed || meeting.status === 'closed' || skipped;
   const meetingReadOnly = readOnly || recordClosed;
-  const shortIssues = issues.filter((issue) => issue.horizon === 'short-term' && issue.status !== 'solved');
-  const minutes = Math.floor(secondsLeft / 60).toString().padStart(2, '0');
-  const seconds = (secondsLeft % 60).toString().padStart(2, '0');
+  const shortIssues = issues.filter((issue) => issue.horizon === 'short-term');
+  const meetingElapsed = elapsedSecondsSince(meeting.startedAt, meeting.status === 'closed' ? meeting.closedAt ?? clockNow : clockNow);
+  const activeSection = meeting.activeSection ?? section;
+  const storedSectionElapsed = meeting.sectionDurations?.[section] ?? 0;
+  const liveSectionElapsed = !recordClosed && meeting.status === 'in-progress' && activeSection === section
+    ? elapsedSecondsSince(meeting.activeSectionStartedAt ?? meeting.startedAt, clockNow)
+    : 0;
+  const sectionElapsed = storedSectionElapsed + liveSectionElapsed;
+  const sectionLimit = (agenda[currentIndex]?.duration ?? 0) * 60;
+  const sectionRemaining = Math.max(0, sectionLimit - sectionElapsed);
+  const canRateAttendees = !meetingReadOnly && meeting.facilitatorId === workspace.currentUser.id;
+  const completeAttendeeRatings: MeetingAttendeeRating[] = meeting.attendeeIds
+    .map((attendeeId) => ({ attendeeId, rating: attendeeRatings[attendeeId] }))
+    .filter((entry): entry is MeetingAttendeeRating => Number.isInteger(entry.rating) && entry.rating >= 1 && entry.rating <= 10);
+  const hasAllAttendeeRatings = meeting.attendeeIds.every((attendeeId) => Number.isInteger(attendeeRatings[attendeeId]) && attendeeRatings[attendeeId] >= 1 && attendeeRatings[attendeeId] <= 10);
+  useEffect(() => {
+    setRecap(meeting.recap);
+    setRating(meeting.lastRating || 8);
+    setAttendeeRatings(Object.fromEntries((meeting.attendeeRatings ?? []).map((entry) => [entry.attendeeId, entry.rating])));
+    setIdsStage('select');
+    setIdsCursor(0);
+  }, [meeting.id]);
+  const changeSection = async (nextSection: MeetingSection) => {
+    if (nextSection === section) return;
+    if (!meetingReadOnly && meeting.status === 'in-progress') {
+      const saved = await onTransitionSection(section, nextSection);
+      if (!saved) return;
+    }
+    onSelectSection(nextSection);
+  };
   const next = () => {
     const nextSection = agenda[Math.min(agenda.length - 1, currentIndex + 1)];
-    if (nextSection) onSelectSection(nextSection.id);
+    if (nextSection) void changeSection(nextSection.id);
   };
   return <>
     <div className="meeting-page-header">
-      <div><span className="eyebrow">{team.name.toUpperCase()} · {workspace.quarter.label}</span><h1>{skipped ? 'Meeting skipped.' : recordClosed ? 'Meeting complete.' : 'Run the room.'}</h1><p>{skipped ? 'This occurrence is preserved in history and the team cadence continues.' : recordClosed ? 'The meeting record is saved. The team can now execute the recap.' : 'Keep the reporting crisp. Put the real work where it belongs: IDS.'}</p></div>
+      <div><span className="eyebrow">{team.name.toUpperCase()} · {workspace.quarter.label}</span><h1>{skipped ? 'Meeting skipped.' : recordClosed ? 'Meeting complete.' : 'Run the room.'}</h1><p>{skipped ? 'This occurrence is preserved in history and the team cadence continues.' : recordClosed ? 'The meeting record is saved. The team can now execute the recap.' : 'Keep the reporting crisp. Put the real work where it belongs: IDS.'}</p><span className="meeting-facilitator">Facilitator · {meeting.facilitatorId ? userFor(workspace, meeting.facilitatorId).name : 'Not selected'}</span></div>
       <div className="meeting-header-actions"><div className={`meeting-status ${recordClosed ? 'meeting-status-closed' : ''}`}><span className="meeting-status-dot" />{skipped ? 'Skipped' : recordClosed ? 'Closed' : running ? 'In progress' : 'Ready to start'}</div>{!meetingReadOnly && <Button variant="secondary" onClick={onEditSchedule}>Change date & time</Button>}<Button variant="secondary" onClick={() => onNavigate('overview')}>Exit meeting</Button></div>
     </div>
     <TransferNotice workspace={workspace} teamId={team.id} pendingTransfers={pendingTransfers} pendingSourceTransfers={pendingSourceTransfers} editable={!meetingReadOnly} onAccept={onAccept} onReject={onReject} onCancel={onCancel} />
     <MeetingOccurrencePanel team={team} occurrences={occurrences} selectedMeetingId={selectedMeetingId} canManageSchedule={canManageSchedule && !recordClosed} onSelect={onSelectMeeting} onStart={onStartMeeting} onSkip={onSkipMeeting} onReschedule={onRescheduleMeeting} />
     <div className="meeting-workspace">
-      <aside className="agenda-rail card-surface"><div className="agenda-rail-head"><div><span className="section-kicker">{cadenceLabel(team.meetingCadence).toUpperCase()} RHYTHM</span><h2>{meeting.label}</h2></div><span className="agenda-date">{meeting.dateLabel}<small>{meeting.scheduledTime ? ` · ${meeting.scheduledTime}` : ''}</small></span></div><div className="agenda-list">{agenda.map((item, index) => <button key={item.id} className={`agenda-item ${item.id === section ? 'agenda-item-active' : ''} ${index < currentIndex || recordClosed ? 'agenda-item-done' : ''}`} onClick={() => onSelectSection(item.id)}><span className="agenda-index">{index < currentIndex || recordClosed ? '✓' : String(index + 1).padStart(2, '0')}</span><span className="agenda-item-copy"><strong>{item.label}</strong><small>{item.duration} min</small></span></button>)}</div><div className="agenda-rail-bottom"><span className="section-kicker">ATTENDEES</span><div className="attendee-line"><AvatarStack workspace={workspace} ids={meeting.attendeeIds} /><span>{meeting.attendeeIds.length} people invited</span></div></div></aside>
+      <aside className="agenda-rail card-surface"><div className="agenda-rail-head"><div><span className="section-kicker">{cadenceLabel(team.meetingCadence).toUpperCase()} RHYTHM</span><h2>{meeting.label}</h2></div><span className="agenda-date">{meeting.dateLabel}<small>{meeting.scheduledTime ? ` · ${meeting.scheduledTime}` : ''}</small></span></div><div className="agenda-list">{agenda.map((item, index) => <button key={item.id} className={`agenda-item ${item.id === section ? 'agenda-item-active' : ''} ${index < currentIndex || recordClosed ? 'agenda-item-done' : ''}`} onClick={() => void changeSection(item.id)}><span className="agenda-index">{index < currentIndex || recordClosed ? '✓' : String(index + 1).padStart(2, '0')}</span><span className="agenda-item-copy"><strong>{item.label}</strong><small>{item.duration} min</small></span></button>)}</div><div className="agenda-rail-bottom"><span className="section-kicker">FACILITATOR</span><div className="facilitator-line"><Avatar user={userFor(workspace, meeting.facilitatorId)} size="sm" /><span>{meeting.facilitatorId ? userFor(workspace, meeting.facilitatorId).name : 'Not selected'}</span></div><span className="section-kicker attendee-kicker">ATTENDEES</span><div className="attendee-line"><AvatarStack workspace={workspace} ids={meeting.attendeeIds} /><span>{meeting.attendeeIds.length} people invited</span></div></div></aside>
       <section className="meeting-stage card-surface">
-        <div className="meeting-stage-toolbar"><div className="stage-location"><span className="stage-number">{currentIndex + 1}</span><div><span className="section-kicker">NOW IN</span><strong>{agenda[currentIndex]?.label}</strong></div></div><div className="meeting-timer"><span className="timer-label">TIME BOX</span><strong className={secondsLeft < 60 ? 'timer-warning' : ''}>{minutes}:{seconds}</strong><button className={`timer-toggle ${running ? 'timer-pause' : ''}`} onClick={onToggleRunning} disabled={meetingReadOnly} aria-label={running ? 'Pause timer' : 'Start timer'}>{running ? 'Ⅱ' : '▶'}</button></div></div>
-        <div className="meeting-stage-body"><MeetingSectionContentV2 section={section} workspace={workspace} team={team} rocks={rocks} todos={todos} issues={shortIssues} metrics={metrics} scorecardResults={scorecardResults} headlines={headlines} meeting={meeting} pendingMessages={pendingMessages} recap={recap} setRecap={setRecap} rating={rating} setRating={setRating} readOnly={meetingReadOnly} onUpdateRock={onUpdateRock} onUpdateTodo={onUpdateTodo} onOpenIssue={onOpenIssue} onOpenTodo={onOpenTodo} onOpenMessage={onOpenMessage} onMarkMessageRead={onMarkMessageRead} onCreateIssueFromMessage={onCreateIssueFromMessage} onStartIssue={onStartIssue} onSolveIssue={onSolveIssue} onCreateIssueFromScorecard={onCreateIssueFromScorecard} onCreateIssueFromRock={onCreateIssueFromRock} onSaveSectionNote={onSaveSectionNote} onReorderIssues={onReorderIssues} onNavigate={onNavigate} /></div>
-        <div className="meeting-stage-footer"><button className="footer-nav-button" onClick={() => agenda[Math.max(0, currentIndex - 1)] && onSelectSection(agenda[Math.max(0, currentIndex - 1)].id)} disabled={currentIndex === 0}>← Previous</button><div className="footer-progress"><ProgressBar value={(currentIndex + 1) / Math.max(1, agenda.length) * 100} /><span>{currentIndex + 1} of {agenda.length}</span></div>{section === 'conclude' && !recordClosed ? <Button onClick={() => onClose(recap, rating)} disabled={meetingReadOnly}>Close meeting ✓</Button> : <button className="footer-nav-button footer-nav-next" onClick={next} disabled={currentIndex === agenda.length - 1}>Next section →</button>}</div>
+        <div className="meeting-stage-toolbar"><div className="stage-location"><span className="stage-number">{currentIndex + 1}</span><div><span className="section-kicker">NOW IN</span><strong>{agenda[currentIndex]?.label}</strong></div></div><div className="meeting-timer-group"><div className="meeting-timer meeting-timer-overall"><span className="timer-label">MEETING</span><strong>{formatDuration(meetingElapsed)}</strong><small>overall</small></div><div className="meeting-timer meeting-timer-section"><span className="timer-label">SECTION</span><strong className={sectionRemaining <= 60 && !recordClosed ? 'timer-warning' : ''}>{formatDuration(sectionElapsed)}</strong><small>{sectionRemaining > 0 ? `${formatDuration(sectionRemaining)} left` : 'time box reached'}</small></div>{meeting.status === 'in-progress' ? <span className="timer-live-indicator">● LIVE</span> : <button className="timer-toggle" onClick={onToggleRunning} disabled={meetingReadOnly} aria-label="Start meeting timer">▶</button>}</div></div>
+        <div className="meeting-stage-body"><MeetingSectionContentV2 section={section} workspace={workspace} team={team} rocks={rocks} todos={todos} issues={shortIssues} metrics={metrics} scorecardResults={scorecardResults} headlines={headlines} meeting={meeting} pendingMessages={pendingMessages} recap={recap} setRecap={setRecap} rating={rating} setRating={setRating} attendeeRatings={attendeeRatings} setAttendeeRating={(attendeeId, value) => setAttendeeRatings((current) => ({ ...current, [attendeeId]: value }))} canRateAttendees={canRateAttendees} hasAllAttendeeRatings={hasAllAttendeeRatings} idsStage={idsStage} idsCursor={idsCursor} setIdsStage={setIdsStage} setIdsCursor={setIdsCursor} readOnly={meetingReadOnly} onUpdateRock={onUpdateRock} onUpdateTodo={onUpdateTodo} onOpenIssue={onOpenIssue} onOpenTodo={onOpenTodo} onOpenMessage={onOpenMessage} onMarkMessageRead={onMarkMessageRead} onCreateIssueFromMessage={onCreateIssueFromMessage} onStartIssue={onStartIssue} onParkIssue={onParkIssue} onSolveIssue={onSolveIssue} onCreateIssueFromScorecard={onCreateIssueFromScorecard} onCreateIssueFromRock={onCreateIssueFromRock} onSaveSectionNote={onSaveSectionNote} onSelectMeetingIssues={onSelectMeetingIssues} onSaveIssueNote={onSaveIssueNote} onReorderIssues={onReorderIssues} onNavigate={onNavigate} /></div>
+        <div className="meeting-stage-footer"><button className="footer-nav-button" onClick={() => { const previous = agenda[Math.max(0, currentIndex - 1)]; if (previous) void changeSection(previous.id); }} disabled={currentIndex === 0}>← Previous</button><div className="footer-progress"><ProgressBar value={(currentIndex + 1) / Math.max(1, agenda.length) * 100} /><span>{currentIndex + 1} of {agenda.length}</span></div>{section === 'conclude' && !recordClosed ? <Button onClick={() => onClose(recap, rating, completeAttendeeRatings)} disabled={meetingReadOnly || !hasAllAttendeeRatings}>Close meeting ✓</Button> : <button className="footer-nav-button footer-nav-next" onClick={next} disabled={currentIndex === agenda.length - 1}>Next section →</button>}</div>
       </section>
     </div>
   </>;
@@ -1044,6 +1140,14 @@ interface MeetingSectionContentV2Props {
   setRecap: (value: string) => void;
   rating: number;
   setRating: (value: number) => void;
+  attendeeRatings: Record<string, number>;
+  setAttendeeRating: (attendeeId: string, rating: number) => void;
+  canRateAttendees: boolean;
+  hasAllAttendeeRatings: boolean;
+  idsStage: IdsStage;
+  idsCursor: number;
+  setIdsStage: (stage: IdsStage) => void;
+  setIdsCursor: (cursor: number) => void;
   readOnly: boolean;
   onUpdateRock: (rock: Rock) => void;
   onUpdateTodo: (todo: Todo, status?: TodoStatus) => void;
@@ -1053,26 +1157,43 @@ interface MeetingSectionContentV2Props {
   onMarkMessageRead: (messageId: string) => void;
   onCreateIssueFromMessage: (messageId: string) => void;
   onStartIssue: (issue: Issue) => void;
+  onParkIssue: (issue: Issue) => void;
   onSolveIssue: (issue: Issue) => void;
   onCreateIssueFromScorecard: (metric: ScorecardMetric, result: ScorecardResult) => void;
   onCreateIssueFromRock: (rock: Rock) => void;
   onSaveSectionNote: (section: MeetingSection, note: string) => Promise<boolean>;
-  onReorderIssues: (issueIds: string[]) => void;
+  onSelectMeetingIssues: (issueIds: string[]) => Promise<boolean>;
+  onSaveIssueNote: (issueId: string, note: string) => Promise<boolean>;
+  onReorderIssues: (issueIds: string[]) => Promise<boolean>;
   onNavigate: (view: ViewId) => void;
 }
 
-function MeetingSectionContentV2({ section, workspace, team, rocks, todos, issues, metrics, scorecardResults, headlines, meeting, pendingMessages, recap, setRecap, rating, setRating, readOnly, onUpdateRock, onUpdateTodo, onOpenIssue, onOpenTodo, onOpenMessage, onMarkMessageRead, onCreateIssueFromMessage, onStartIssue, onSolveIssue, onCreateIssueFromScorecard, onCreateIssueFromRock, onSaveSectionNote, onReorderIssues, onNavigate }: MeetingSectionContentV2Props) {
+function MeetingSectionContentV2({ section, workspace, team, rocks, todos, issues, metrics, scorecardResults, headlines, meeting, pendingMessages, recap, setRecap, rating, setRating, attendeeRatings, setAttendeeRating, canRateAttendees, hasAllAttendeeRatings, idsStage, idsCursor, setIdsStage, setIdsCursor, readOnly, onUpdateRock, onUpdateTodo, onOpenIssue, onOpenTodo, onOpenMessage, onMarkMessageRead, onCreateIssueFromMessage, onStartIssue, onParkIssue, onSolveIssue, onCreateIssueFromScorecard, onCreateIssueFromRock, onSaveSectionNote, onSelectMeetingIssues, onSaveIssueNote, onReorderIssues, onNavigate }: MeetingSectionContentV2Props) {
   const [draggedIssueId, setDraggedIssueId] = useState<string | null>(null);
   const [dragOverIssueId, setDragOverIssueId] = useState<string | null>(null);
+  const [selectedIssueIds, setSelectedIssueIds] = useState<string[]>(meeting.idsIssueIds);
+  const [idsNote, setIdsNote] = useState('');
+  const [savedIdsNote, setSavedIdsNote] = useState('');
   const meetingIssueIds = meeting.idsIssueIds.filter((issueId) => issues.some((issue) => issue.id === issueId));
-  const orderedIssues = [...meetingIssueIds.map((issueId) => issues.find((issue) => issue.id === issueId)).filter((issue): issue is Issue => Boolean(issue)), ...issues.filter((issue) => !meetingIssueIds.includes(issue.id))];
+  const orderedIssues = meetingIssueIds.map((issueId) => issues.find((issue) => issue.id === issueId)).filter((issue): issue is Issue => Boolean(issue));
+  const selectableIssues = issues.filter((issue) => issue.status !== 'solved' && issue.assignmentState !== 'redirected');
+  const selectedActiveIssueIds = selectedIssueIds.filter((issueId) => selectableIssues.some((issue) => issue.id === issueId));
+  const currentIdsIssue = orderedIssues[Math.min(idsCursor, Math.max(0, orderedIssues.length - 1))];
+  const currentIssueNote = currentIdsIssue ? [...meeting.idsNotes].reverse().find((note) => note.issueId === currentIdsIssue.id)?.note ?? '' : '';
+  useEffect(() => {
+    setSelectedIssueIds(meeting.idsIssueIds);
+  }, [meeting.id, meeting.version]);
+  useEffect(() => {
+    setIdsNote(currentIssueNote);
+    setSavedIdsNote(currentIssueNote);
+  }, [meeting.id, meeting.version, currentIdsIssue?.id, currentIssueNote]);
   const moveIssue = (issueId: string, direction: -1 | 1) => {
     const next = [...meetingIssueIds];
     const index = next.indexOf(issueId);
     const target = index + direction;
     if (index < 0 || target < 0 || target >= next.length || readOnly) return;
     [next[index], next[target]] = [next[target], next[index]];
-    onReorderIssues(next);
+    void onReorderIssues(next);
   };
   const dropIssue = (targetId: string) => {
     if (!draggedIssueId || draggedIssueId === targetId || readOnly) return;
@@ -1082,17 +1203,32 @@ function MeetingSectionContentV2({ section, workspace, team, rocks, todos, issue
     if (from < 0 || target < 0) return;
     next.splice(from, 1);
     next.splice(target, 0, draggedIssueId);
-    onReorderIssues(next);
+    void onReorderIssues(next);
     setDraggedIssueId(null);
     setDragOverIssueId(null);
+  };
+  const continueToOrder = async () => {
+    if (readOnly) return;
+    const nextSelection = selectedActiveIssueIds;
+    if (await onSelectMeetingIssues(nextSelection)) setIdsStage('order');
   };
   if (section === 'segue') return <div className="meeting-intro segue-intro"><span className="intro-orbit">✦</span><span className="section-kicker">SEGUE · 5 MINUTES</span><h2>Leave the noise at the door.</h2><p>Each person shares a personal and professional best from the week. Be present, be brief, and get the room ready to solve.</p><div className="check-in-grid"><article><span className="check-in-number">01</span><div><strong>Personal best</strong><small>What gave you energy?</small></div></article><article><span className="check-in-number">02</span><div><strong>Professional best</strong><small>What moved the work?</small></div></article><article><span className="check-in-number">03</span><div><strong>Room check</strong><small>What needs our focus?</small></div></article></div><PendingMessagesPanel workspace={workspace} messages={pendingMessages} readOnly={readOnly} onOpen={onOpenMessage} onMarkRead={onMarkMessageRead} onCreateIssue={onCreateIssueFromMessage} /></div>;
   if (section === 'scorecard') return <div className="meeting-section-content"><SectionIntro kicker={`SCORECARD · WEEK OF ${formatDate(meeting.weekStartDate ?? weekStartDateFor(new Date()))}`} title="Report the number, not the story." description="This is the saved result for the meeting’s Monday-start week. Manage values from the Scorecard screen." /><div className="meeting-metric-table">{metrics.map((metric) => { const result = scorecardResults.find((candidate) => candidate.metricId === metric.id && candidate.weekStartDate === (meeting.weekStartDate ?? weekStartDateFor(new Date()))); const existingIssue = result && workspace.issues.find((issue) => issue.linkedScorecardMetricId === metric.id && issue.linkedScorecardWeekStartDate === result.weekStartDate && issue.assignmentState !== 'redirected'); return <div className="metric-row" key={metric.id}><div className="metric-name"><span className={`metric-status-dot metric-${result?.status ?? 'missing'}`} /><strong>{metric.label}</strong><small><Avatar user={userFor(workspace, metric.ownerId)} size="sm" />{userFor(workspace, metric.ownerId).name}</small></div><div className="metric-values"><span>Target <b>{metric.target}</b> {metric.unit}</span><span>Actual <b>{result?.actual ?? 'Not entered'}</b>{result?.actual ? ` ${metric.unit}` : ''}</span></div><div className="metric-trend"><span className={`trend-arrow trend-${result?.trend ?? 'flat'}`}>{result?.trend === 'up' ? '↗' : result?.trend === 'down' ? '↘' : '→'}</span>{result?.trendLabel ?? 'No comparable prior result'}</div>{result ? <StatusPill status={result.status} /> : <span className="missing-result-pill">Not entered</span>}{result?.status === 'off-track' && !readOnly && <Button variant="secondary" className="row-action-button" onClick={() => onCreateIssueFromScorecard(metric, result)} disabled={Boolean(existingIssue)}>{existingIssue ? 'Issue created' : 'Create Issue'}</Button>}</div>; })}</div><MeetingNotesField meeting={meeting} section="scorecard" title="Scorecard notes" readOnly={readOnly} onSave={onSaveSectionNote} /><Button variant="secondary" onClick={() => onNavigate('scorecard')}>Open this week in Scorecard →</Button></div>;
   if (section === 'rock-review') return <div className="meeting-section-content"><SectionIntro kicker="ROCK REVIEW · 5 MINUTES" title="Are we on track?" description="Every Rock gets a clear status. Milestone counts show the work completed and remaining. Off-track Rocks can become Issues." /><div className="meeting-rock-list">{rocks.map((rock) => { const milestones = rockMilestoneCounts(rock); const existingIssue = workspace.issues.find((issue) => issue.linkedRockId === rock.id && issue.assignmentState !== 'redirected'); return <div className="meeting-rock-row" key={rock.id}><div className="meeting-rock-info"><strong>{rock.title}</strong><span><Avatar user={userFor(workspace, rock.ownerId)} size="sm" />{userFor(workspace, rock.ownerId).name} · due {formatDate(rock.dueDate)}</span></div><div className="meeting-rock-progress"><ProgressBar value={milestones.total ? milestones.completed / milestones.total * 100 : 0} tone={rock.status === 'off-track' ? 'coral' : 'teal'} /><span>{milestones.completed} completed · {milestones.remaining} remaining</span></div><button className={`quick-status-button ${rock.status}`} onClick={() => onUpdateRock(rock)} disabled={readOnly}><span className="status-dot" />{statusLabel(rock.status)}</button>{rock.status === 'off-track' && <Button variant="secondary" className="rock-issue-button" onClick={() => onCreateIssueFromRock(rock)} disabled={readOnly || Boolean(existingIssue)}>{existingIssue ? 'Issue created' : 'Create Issue'}</Button>}</div>; })}</div></div>;
   if (section === 'headlines') return <div className="meeting-section-content"><SectionIntro kicker="CUSTOMER & EMPLOYEE HEADLINES · 5 MINUTES" title="Share what changed." description="Wins, concerns, and context help the team see the whole picture before IDS." /><div className="headline-meeting-grid">{headlines.map((headline) => <article className="headline-meeting-card" key={headline.id}><div className="headline-card-label"><span>{headline.type === 'win' ? '↗' : '!'}</span>{headline.type === 'win' ? 'Win' : 'Concern'}<span className="headline-time">{formatDate(headline.createdAt)}</span></div><h3>{headline.title}</h3><p>{headline.detail}</p><span className="headline-author"><Avatar user={userFor(workspace, headline.authorId)} size="sm" />{userFor(workspace, headline.authorId).name}</span></article>)}</div><MeetingNotesField meeting={meeting} section="headlines" title="Customer & Employee headline notes" readOnly={readOnly} onSave={onSaveSectionNote} /></div>;
-  if (section === 'todo-review') return <div className="meeting-section-content"><SectionIntro kicker="TO-DO REVIEW · 5 MINUTES" title="Did we do what we said?" description="Mark commitments done or not done. Open a To-Do to review its context or update its notes." /><div className="meeting-todo-table">{todos.map((todo) => <div className="meeting-todo-row" key={todo.id}><button className={`todo-checkbox ${todo.status === 'done' ? 'checked' : ''}`} onClick={() => onUpdateTodo(todo)} disabled={readOnly} aria-label={`Mark ${todo.title} ${todo.status === 'done' ? 'open' : 'done'}`}>{todo.status === 'done' ? '✓' : ''}</button><button type="button" className={`meeting-todo-open ${todo.status === 'done' ? 'todo-done' : ''}`} onClick={() => onOpenTodo(todo.id, readOnly)}><strong>{todo.title}</strong><span><Avatar user={userFor(workspace, todo.ownerId)} size="sm" />{userFor(workspace, todo.ownerId).name} · due {formatDate(todo.dueDate)} · rolled {todo.carryForwardCount}×</span></button><StatusPill status={todo.flagged ? 'not-done' : todo.status} label={todo.flagged ? 'Flagged' : undefined} /></div>)}</div></div>;
-  if (section === 'ids') return <div className="meeting-section-content"><SectionIntro kicker="IDS · 60 MINUTES" title="Solve the real issue." description={`There are ${issues.length} short-term Issues in this team's queue. Drag active IDS items into order or use the move controls; priority remains independent.`} /><div className="ids-meeting-list">{orderedIssues.map((issue) => { const reorderIndex = meetingIssueIds.indexOf(issue.id); const reorderable = reorderIndex >= 0 && !readOnly; return <div className={`ids-meeting-row ${dragOverIssueId === issue.id ? 'ids-meeting-row-drag-over' : ''}`} key={issue.id} draggable={reorderable} onDragStart={() => reorderable && setDraggedIssueId(issue.id)} onDragOver={(event) => { if (reorderable && draggedIssueId && draggedIssueId !== issue.id) { event.preventDefault(); setDragOverIssueId(issue.id); } }} onDrop={(event) => { event.preventDefault(); dropIssue(issue.id); }} onDragEnd={() => { setDraggedIssueId(null); setDragOverIssueId(null); }}><span className="issue-priority">P{issue.priority}</span>{reorderable && <span className="ids-drag-handle" aria-hidden="true">⋮⋮</span>}<button className="ids-meeting-copy" onClick={() => onOpenIssue(issue.id, readOnly)}><strong>{issue.title}</strong><small><AgePill issue={issue} /> · {ageLabel(issue)} old</small></button><div className="ids-order-controls">{reorderable && <><button type="button" className="ids-order-button" onClick={() => moveIssue(issue.id, -1)} disabled={reorderIndex === 0} aria-label={`Move ${issue.title} up`}>↑</button><button type="button" className="ids-order-button" onClick={() => moveIssue(issue.id, 1)} disabled={reorderIndex === meetingIssueIds.length - 1} aria-label={`Move ${issue.title} down`}>↓</button></>}</div><div className="ids-meeting-actions"><Button variant="quiet" onClick={() => onOpenIssue(issue.id, readOnly)}>Open issue</Button>{issue.status !== 'in-ids' && <Button variant="secondary" onClick={() => onStartIssue(issue)} disabled={readOnly}>Start IDS</Button>}{issue.status !== 'solved' && <Button onClick={() => onSolveIssue(issue)} disabled={readOnly}>Solve ✓</Button>}</div></div>})}{issues.length === 0 && <EmptyState title="The IDS queue is clear" detail="Capture an Issue from the workspace when the next one appears." />}</div></div>;
-  if (section === 'conclude') { const actionSummary = meeting.actionSummary ?? { todosCreated: meeting.createdTodoIds.length, issuesReviewedInIds: meeting.idsIssueIds.length, issuesAddedToIds: meeting.idsAddedIssueIds.length, issuesSolved: meeting.idsIssueIds.filter((issueId) => workspace.issues.find((issue) => issue.id === issueId)?.status === 'solved').length }; return <div className="meeting-section-content conclude-content"><span className="conclude-symbol">✓</span><span className="section-kicker">CONCLUDE · 5 MINUTES</span><h2>Leave with clarity.</h2><p>Recap the decisions, confirm every To-Do has an owner and due date, and rate the meeting.</p><div className="meeting-action-summary"><div><strong>{actionSummary.todosCreated}</strong><span>To-Dos created</span></div><div><strong>{actionSummary.issuesReviewedInIds}</strong><span>Issues reviewed in IDS</span></div><div><strong>{actionSummary.issuesAddedToIds}</strong><span>Issues added to IDS</span></div><div><strong>{actionSummary.issuesSolved}</strong><span>Issues solved</span></div></div><label className="recap-field">Final recap<textarea value={recap} onChange={(event) => setRecap(event.target.value)} placeholder="What did the team decide?" rows={4} disabled={readOnly} /></label><div className="rating-field"><span className="section-kicker">MEETING RATING</span><div className="rating-options">{[6, 7, 8, 9, 10].map((value) => <button key={value} className={rating === value ? 'rating-selected' : ''} onClick={() => setRating(value)} disabled={readOnly}>{value}</button>)}</div></div></div>; }
+  if (section === 'todo-review') return <div className="meeting-section-content"><SectionIntro kicker="TO-DO REVIEW · 5 MINUTES" title="Did we do what we said?" description="Mark commitments done or not done. Open a To-Do to review its context or update its notes." /><div className="meeting-todo-table">{todos.map((todo) => <div className="meeting-todo-row" key={todo.id}><button className={`todo-checkbox ${todo.status === 'done' ? 'checked' : ''}`} onClick={() => onUpdateTodo(todo)} disabled={readOnly} aria-label={`Mark ${todo.title} ${todo.status === 'done' ? 'open' : 'done'}`}>{todo.status === 'done' ? '✓' : ''}</button><button type="button" className={`meeting-todo-open ${todo.status === 'done' ? 'todo-done' : ''}`} onClick={() => onOpenTodo(todo.id, readOnly)}><strong>{todo.title}</strong><span className="meeting-todo-meta">Due {formatDate(todo.dueDate)} · rolled {todo.carryForwardCount}×</span></button><div className="meeting-todo-owner"><Avatar user={userFor(workspace, todo.ownerId)} size="sm" /><span><small>OWNER</small><strong>{userFor(workspace, todo.ownerId).name}</strong></span></div><StatusPill status={todo.flagged ? 'not-done' : todo.status} label={todo.flagged ? 'Flagged' : undefined} /></div>)}</div></div>;
+  if (section === 'ids') {
+    if (idsStage === 'select') return <div className="meeting-section-content"><SectionIntro kicker="IDS · STEP 1 OF 3" title="Choose the Issues for IDS." description={`Select up to 5 of the ${selectableIssues.length} active short-term Issues. The facilitator can keep the list focused before the team starts solving.`} /><div className="ids-stage-toolbar"><strong>{selectedActiveIssueIds.length} / 5 selected</strong><span>Only selected Issues move into the meeting’s IDS order.</span></div><div className="ids-selection-list">{selectableIssues.map((issue) => { const selected = selectedIssueIds.includes(issue.id); const disabled = readOnly || (!selected && selectedActiveIssueIds.length >= 5); return <label className={`ids-selection-row ${selected ? 'ids-selection-row-selected' : ''}`} key={issue.id}><input type="checkbox" checked={selected} onChange={() => setSelectedIssueIds((current) => selected ? current.filter((id) => id !== issue.id) : current.length < 5 ? [...current, issue.id] : current)} disabled={disabled} /><span className="issue-number">P{issue.priority}</span><span className="ids-selection-copy"><strong>{issue.title}</strong><small><AgePill issue={issue} /> · {ageLabel(issue)} old · {statusLabel(issue.status)}</small></span><button type="button" className="row-action" onClick={(event) => { event.preventDefault(); onOpenIssue(issue.id, readOnly); }}>Open</button></label>; })}{selectableIssues.length === 0 && <EmptyState title="The active IDS queue is clear" detail="Capture a short-term Issue before selecting it for this meeting." />}</div><div className="ids-stage-actions"><Button variant="secondary" onClick={() => void continueToOrder()} disabled={readOnly}>Continue to order →</Button></div></div>;
+    if (idsStage === 'order') return <div className="meeting-section-content"><SectionIntro kicker="IDS · STEP 2 OF 3" title="Set the solving order." description="Order the selected Issues from highest-value conversation to lowest. Priority stays independent from this meeting order." /><div className="ids-meeting-list">{orderedIssues.map((issue) => { const reorderIndex = meetingIssueIds.indexOf(issue.id); const reorderable = !readOnly; return <div className={`ids-meeting-row ${dragOverIssueId === issue.id ? 'ids-meeting-row-drag-over' : ''}`} key={issue.id} draggable={reorderable} onDragStart={() => reorderable && setDraggedIssueId(issue.id)} onDragOver={(event) => { if (reorderable && draggedIssueId && draggedIssueId !== issue.id) { event.preventDefault(); setDragOverIssueId(issue.id); } }} onDrop={(event) => { event.preventDefault(); dropIssue(issue.id); }} onDragEnd={() => { setDraggedIssueId(null); setDragOverIssueId(null); }}><span className="issue-priority">{reorderIndex + 1}</span><span className="ids-drag-handle" aria-hidden="true">⋮⋮</span><button className="ids-meeting-copy" onClick={() => onOpenIssue(issue.id, readOnly)}><strong>{issue.title}</strong><small><AgePill issue={issue} /> · {statusLabel(issue.status)}</small></button><div className="ids-order-controls"><button type="button" className="ids-order-button" onClick={() => moveIssue(issue.id, -1)} disabled={readOnly || reorderIndex === 0} aria-label={`Move ${issue.title} up`}>↑</button><button type="button" className="ids-order-button" onClick={() => moveIssue(issue.id, 1)} disabled={readOnly || reorderIndex === meetingIssueIds.length - 1} aria-label={`Move ${issue.title} down`}>↓</button></div></div>})}{orderedIssues.length === 0 && <EmptyState title="No Issues selected" detail="Go back to selection and choose up to five Issues." />}</div><div className="ids-stage-actions"><Button variant="quiet" onClick={() => setIdsStage('select')}>← Back to selection</Button><Button variant="secondary" onClick={() => { setIdsCursor(0); setIdsStage('work'); }} disabled={readOnly || orderedIssues.length === 0}>Begin IDS →</Button></div></div>;
+    if (!currentIdsIssue) return <div className="meeting-section-content"><SectionIntro kicker="IDS · STEP 3 OF 3" title="No Issues are ready to work." description="Return to selection to choose the Issues the room should solve." /><div className="ids-stage-actions"><Button variant="secondary" onClick={() => setIdsStage('select')}>Back to selection</Button></div></div>;
+    const currentIssueIndex = Math.min(idsCursor, orderedIssues.length - 1);
+    const saveIssueNote = async () => {
+      if (readOnly || !idsNote.trim() || idsNote.trim() === savedIdsNote) return;
+      if (await onSaveIssueNote(currentIdsIssue.id, idsNote.trim())) setSavedIdsNote(idsNote.trim());
+    };
+    return <div className="meeting-section-content"><SectionIntro kicker={`IDS · STEP 3 OF 3 · ISSUE ${currentIssueIndex + 1} OF ${orderedIssues.length}`} title={currentIdsIssue.title} description="Identify, discuss, and solve this Issue. Add the room’s thinking below before moving to the next selected Issue." /><div className="ids-work-card"><div className="ids-work-card-head"><div><span className="issue-number">P{currentIdsIssue.priority}</span><StatusPill status={currentIdsIssue.status} /></div><Button variant="quiet" onClick={() => onOpenIssue(currentIdsIssue.id, readOnly)}>Open full Issue</Button></div><p className="ids-work-detail">{currentIdsIssue.detail || 'No additional Issue context has been recorded.'}</p><div className="issue-detail-meta"><span><Avatar user={userFor(workspace, currentIdsIssue.ownerId ?? currentIdsIssue.raisedById)} size="sm" /> {userFor(workspace, currentIdsIssue.ownerId ?? currentIdsIssue.raisedById).name}</span><span>{ageLabel(currentIdsIssue)} old · {currentIdsIssue.meetingsPassed} meetings passed</span></div><div className="meeting-notes-panel ids-notes-panel"><div className="meeting-notes-heading"><div><span className="section-kicker">IDS NOTES</span><strong>Identify · Discuss · Solve</strong></div><span className={idsNote.trim() !== savedIdsNote ? 'meeting-notes-status meeting-notes-unsaved' : 'meeting-notes-status'}>{idsNote.trim() !== savedIdsNote ? 'Unsaved changes' : 'Saved to this meeting'}</span></div><textarea value={idsNote} onChange={(event) => setIdsNote(event.target.value)} rows={8} placeholder="Capture what the team identified, discussed, decided, or needs to remember." disabled={readOnly} /><div className="meeting-notes-actions"><small>Each save is appended to this Issue’s history and the meeting recap.</small><Button variant="secondary" onClick={() => void saveIssueNote()} disabled={readOnly || !idsNote.trim() || idsNote.trim() === savedIdsNote}>Save IDS notes</Button></div></div><div className="ids-work-actions">{currentIdsIssue.status !== 'solved' && <><Button onClick={() => onSolveIssue(currentIdsIssue)} disabled={readOnly}>Solve Issue ✓</Button><Button variant="secondary" onClick={() => onParkIssue(currentIdsIssue)} disabled={readOnly}>Park for next meeting</Button></>}{currentIdsIssue.status === 'solved' && <span className="solved-banner"><span>✓</span><strong>Issue solved</strong></span>}</div></div><div className="ids-stage-actions"><Button variant="quiet" onClick={() => setIdsStage('order')}>← Back to order</Button><div><Button variant="secondary" onClick={() => setIdsCursor(Math.max(0, currentIssueIndex - 1))} disabled={currentIssueIndex === 0}>Previous Issue</Button><Button onClick={() => setIdsCursor(Math.min(orderedIssues.length - 1, currentIssueIndex + 1))} disabled={currentIssueIndex === orderedIssues.length - 1}>Next Issue →</Button></div></div></div>;
+  }
+  if (section === 'conclude') { const actionSummary = meeting.actionSummary ?? { todosCreated: meeting.createdTodoIds.length, issuesReviewedInIds: meeting.idsIssueIds.length, issuesAddedToIds: meeting.idsAddedIssueIds.length, issuesSolved: meeting.idsIssueIds.filter((issueId) => workspace.issues.find((issue) => issue.id === issueId)?.status === 'solved').length }; return <div className="meeting-section-content conclude-content"><span className="conclude-symbol">✓</span><span className="section-kicker">CONCLUDE · 5 MINUTES</span><h2>Leave with clarity.</h2><p>Recap the decisions, confirm every To-Do has an owner and due date, and rate the meeting.</p><div className="meeting-action-summary"><div><strong>{actionSummary.todosCreated}</strong><span>To-Dos created</span></div><div><strong>{actionSummary.issuesReviewedInIds}</strong><span>Issues reviewed in IDS</span></div><div><strong>{actionSummary.issuesAddedToIds}</strong><span>Issues added to IDS</span></div><div><strong>{actionSummary.issuesSolved}</strong><span>Issues solved</span></div></div><label className="recap-field">Final recap<textarea value={recap} onChange={(event) => setRecap(event.target.value)} placeholder="What did the team decide?" rows={4} disabled={readOnly} /></label><div className="rating-field"><span className="section-kicker">OVERALL MEETING RATING</span><div className="rating-options">{[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((value) => <button type="button" key={value} className={rating === value ? 'rating-selected' : ''} onClick={() => setRating(value)} disabled={readOnly}>{value}</button>)}</div></div><div className="attendee-rating-field"><div className="attendee-rating-heading"><div><span className="section-kicker">INDIVIDUAL RATINGS</span><strong>How did each person experience the meeting?</strong></div><span>{canRateAttendees ? 'Facilitator entry' : 'Facilitator only'}</span></div><div className="attendee-rating-list">{meeting.attendeeIds.map((attendeeId) => { const attendee = userFor(workspace, attendeeId); return <label className="attendee-rating-row" key={attendeeId}><span><Avatar user={attendee} size="sm" /><strong>{attendee.name}</strong></span><select value={attendeeRatings[attendeeId] ?? ''} onChange={(event) => setAttendeeRating(attendeeId, Number(event.target.value))} disabled={!canRateAttendees}><option value="">Rate</option>{[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((value) => <option value={value} key={value}>{value} / 10</option>)}</select></label>; })}{meeting.attendeeIds.length === 0 && <p className="record-empty">No attendees were recorded for this meeting.</p>}</div>{!hasAllAttendeeRatings && !readOnly && <small className="form-help">The facilitator must rate every recorded attendee before closing the meeting.</small>}</div></div>; }
   return <div className="meeting-intro"><span className="intro-orbit">✦</span><span className="section-kicker">{team.name.toUpperCase()} L10</span><h2>Start with the room.</h2><p>The weekly rhythm gives the team a shared place to report, solve, and commit.</p></div>;
 }
 

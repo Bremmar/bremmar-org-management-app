@@ -35,7 +35,7 @@ export type RecordKind =
 export type RockStatus = 'on-track' | 'off-track' | 'complete';
 export type RockTaskStatus = 'open' | 'in-progress' | 'done';
 export type TodoStatus = 'open' | 'done' | 'not-done';
-export type IssueStatus = 'open' | 'in-ids' | 'solved';
+export type IssueStatus = 'open' | 'in-ids' | 'parked' | 'solved';
 export type IssueHorizon = 'short-term' | 'long-term';
 export type IssueAssignmentState = 'assigned' | 'pending-transfer' | 'unassigned' | 'redirected';
 export type IssueAgeBand = 'fresh' | 'aging' | 'stale' | 'critical';
@@ -260,6 +260,11 @@ export interface MeetingIssueNoteRecord {
   createdAt: string;
 }
 
+export interface MeetingAttendeeRating {
+  attendeeId: string;
+  rating: number;
+}
+
 export interface MeetingActionSummary {
   todosCreated: number;
   issuesReviewedInIds: number;
@@ -301,6 +306,11 @@ export interface MeetingRecord extends WorkspaceRecord {
   recap: string;
   startedAt?: string;
   closedAt?: string;
+  durationSeconds?: number;
+  sectionDurations?: Partial<Record<MeetingSection, number>>;
+  activeSection?: MeetingSection;
+  activeSectionStartedAt?: string;
+  attendeeRatings?: MeetingAttendeeRating[];
   sectionNotes: Partial<Record<MeetingSection, string>>;
   idsIssueIds: string[];
   idsAddedIssueIds: string[];
@@ -326,9 +336,13 @@ export interface MeetingSummaryContext {
   label: string;
   scheduledDate: string;
   scheduledTime: string;
+  facilitatorId: string;
   startedAt?: string;
   closedAt: string;
+  durationSeconds?: number;
+  sectionDurations?: Partial<Record<MeetingSection, number>>;
   attendeeIds: string[];
+  attendeeRatings?: MeetingAttendeeRating[];
   recap: string;
   sectionNotes: Partial<Record<MeetingSection, string>>;
   idsNotes: MeetingIssueNoteRecord[];

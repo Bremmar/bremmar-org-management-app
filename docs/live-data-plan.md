@@ -126,6 +126,8 @@ operational work has been resolved or moved.
   team. Parent reviewers and Viewers have no schedule or summary mutation
   rights on descendant records. Completed records retain attendance, notes,
   IDS decisions, created To-Dos, manual recap, timestamps, and skip details.
+  Started meetings also retain the selected facilitator, continuous wall-clock
+  duration, per-section durations, and facilitator-entered attendee ratings.
 - Closing stores a manual/action recap plus an immutable close-time
   `MeetingSummaryContext` in the meeting's `team:{teamId}` partition and queues
   a `meetingSummaryJob`. The existing AI Function receives the snapshot over
@@ -187,15 +189,23 @@ The Functions API exposes typed server contracts for:
   date, and cursor filters plus attention counts.
 - `GET /api/teams/{teamId}/meetings/{meetingId}` — full read-only meeting detail.
 - `POST /api/teams/{teamId}/meetings/{meetingId}/start` — starts the selected
-  occurrence once and returns its server-generated timestamp.
+  occurrence once, records the selected active team facilitator, and returns its
+  server-generated timestamp.
 - `PATCH /api/teams/{teamId}/meetings/{meetingId}` — reschedule the current
   open meeting occurrence with `If-Match` concurrency protection.
 - `POST /api/teams/{teamId}/meetings/{meetingId}/skip` — persist a categorized
   skipped occurrence and refill the rolling cadence window.
 - `PATCH /api/teams/{teamId}/meetings/{meetingId}/notes` — save a section note
   for the open meeting with `If-Match`; closed meetings are read-only.
+- `PATCH /api/teams/{teamId}/meetings/{meetingId}/section` — closes the current
+  timed section, stores its elapsed seconds, and starts the next section with
+  `If-Match` concurrency protection.
+- `PATCH /api/teams/{teamId}/meetings/{meetingId}/ids/selection` — saves up to
+  five same-team short-term Issues for the meeting’s IDS queue.
 - `PATCH /api/teams/{teamId}/meetings/{meetingId}/ids/order` — persist the
   ordered IDS Issue IDs without changing their independent P1–P5 priorities.
+- `POST /api/issues/{issueId}/park` — marks an unresolved short-term Issue as
+  parked and carries it into the next meeting window.
 - `POST /api/scorecard/metrics/{metricId}/weeks/{weekStartDate}/issue` and
   `POST /api/rocks/{rockId}/issue` — idempotently create provenance-linked
   Issues from off-track Scorecard results and Rocks.
@@ -216,8 +226,9 @@ The Functions API exposes typed server contracts for:
 - `POST /api/issues/{issueId}/solve` records the follow-up choice and optional
   resolution note when solving an Issue; Issue-created To-Dos expose their
   linked Issue context as read-only in the web dialog.
-- `POST /api/teams/{teamId}/meetings/{meetingId}/ai-summary/retry` queues a
-  failed or legacy AI summary for an authorized direct team editor.
+- `POST /api/teams/{teamId}/meetings/{meetingId}/ai-summary/retry` queues a new
+  attempt for a failed, ready, or legacy AI summary for an authorized direct
+  team editor; a ready recap is exposed in the UI as Regenerate recap.
 - `POST /api/internal/meeting-summary-callback` accepts ready/failed results
   only with a valid HMAC signature, current attempt, and non-terminal job.
 - The start route records the meeting boundary used by meeting-health

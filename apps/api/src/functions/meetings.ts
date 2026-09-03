@@ -82,8 +82,10 @@ async function closeMeetingHandler(request: HttpRequest, _context: InvocationCon
   const meetingId = request.params.meetingId;
   if (!teamId || !meetingId) return { status: 422, jsonBody: { error: 'teamId and meetingId are required', code: 'VALIDATION' } };
   try {
-    const body = await requestJson<{ recap?: string; rating?: number }>(request);
-    const meeting = await repository.closeMeeting(teamId, meetingId, body.recap ?? '', body.rating ?? 0, principal.userId, expectedVersion(request));
+    const body = await requestJson<{ recap?: string; rating?: number; attendeeRatings?: unknown }>(request);
+    if (body.attendeeRatings !== undefined && (!Array.isArray(body.attendeeRatings) || body.attendeeRatings.some((entry) => !entry || typeof entry !== 'object' || typeof (entry as { attendeeId?: unknown }).attendeeId !== 'string' || !Number.isInteger((entry as { rating?: unknown }).rating)))) return { status: 422, jsonBody: { error: 'attendeeRatings must contain attendeeId and whole-number rating values.', code: 'VALIDATION' } };
+    const attendeeRatings = body.attendeeRatings as Array<{ attendeeId: string; rating: number }> | undefined;
+    const meeting = await repository.closeMeeting(teamId, meetingId, body.recap ?? '', body.rating ?? 0, principal.userId, expectedVersion(request), attendeeRatings);
     await dispatchSummary(repository, meeting, principal.userId);
     const latest = await repository.getMeeting(teamId, meeting.id, principal.userId);
     return responseWithEtag(latest, `W/\"${latest.version}\"`);
@@ -100,7 +102,10 @@ async function startMeetingHandler(request: HttpRequest, _context: InvocationCon
   const meetingId = request.params.meetingId;
   if (!teamId || !meetingId) return { status: 422, jsonBody: { error: 'teamId and meetingId are required', code: 'VALIDATION' } };
   try {
-    const meeting = await repository.startMeeting(teamId, meetingId, principal.userId, expectedVersion(request));
+    const contentType = request.headers.get('content-type')?.toLowerCase() ?? '';
+    const body = contentType.includes('application/json') ? await requestJson<{ facilitatorId?: unknown }>(request) : {};
+    if (body.facilitatorId !== undefined && typeof body.facilitatorId !== 'string') return { status: 422, jsonBody: { error: 'facilitatorId must be a string.', code: 'VALIDATION' } };
+    const meeting = await repository.startMeeting(teamId, meetingId, principal.userId, expectedVersion(request), body.facilitatorId);
     return responseWithEtag(meeting, `W/\"${meeting.version}\"`);
   } catch (error) {
     return repositoryErrorResponse(error);
@@ -214,12 +219,48 @@ async function reorderMeetingIssuesHandler(request: HttpRequest, _context: Invoc
   }
 }
 
+async function selectMeetingIssuesHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
+  const scope = await requestScope(request);
+  if (isResponse(scope)) return scope;
+  const { principal, repository } = scope;
+  const teamId = request.params.teamId;
+  const meetingId = request.params.meetingId;
+  if (!teamId || !meetingId) return { status: 422, jsonBody: { error: 'teamId and meetingId are required', code: 'VALIDATION' } };
+  try {
+    const body = await requestJson<{ issueIds?: unknown }>(request);
+    if (!Array.isArray(body?.issueIds) || body.issueIds.some((issueId) => typeof issueId !== 'string')) return { status: 422, jsonBody: { error: 'issueIds must be a list of Issue IDs', code: 'VALIDATION' } };
+    const meeting = await repository.setMeetingIssueSelection(teamId, meetingId, body.issueIds as string[], principal.userId, expectedVersion(request));
+    return responseWithEtag(meeting, `W/\"${meeting.version}\"`);
+  } catch (error) {
+    return repositoryErrorResponse(error);
+  }
+}
+
+async function transitionMeetingSectionHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
+  const scope = await requestScope(request);
+  if (isResponse(scope)) return scope;
+  const { principal, repository } = scope;
+  const teamId = request.params.teamId;
+  const meetingId = request.params.meetingId;
+  if (!teamId || !meetingId) return { status: 422, jsonBody: { error: 'teamId and meetingId are required', code: 'VALIDATION' } };
+  try {
+    const body = await requestJson<{ fromSection?: unknown; toSection?: unknown }>(request);
+    if (typeof body.fromSection !== 'string' || typeof body.toSection !== 'string' || !meetingSections.has(body.fromSection as MeetingSection) || !meetingSections.has(body.toSection as MeetingSection)) return { status: 422, jsonBody: { error: 'fromSection and toSection must be valid meeting sections.', code: 'VALIDATION' } };
+    const meeting = await repository.transitionMeetingSection(teamId, meetingId, body.fromSection as MeetingSection, body.toSection as MeetingSection, principal.userId, expectedVersion(request));
+    return responseWithEtag(meeting, `W/\"${meeting.version}\"`);
+  } catch (error) {
+    return repositoryErrorResponse(error);
+  }
+}
+
 app.http('addMeetingIssueNote', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/issues/{issueId}/notes', handler: addMeetingNoteHandler });
 app.http('meetingReview', { methods: ['GET'], authLevel: 'anonymous', route: 'meetings/review', handler: meetingReviewHandler });
 app.http('getMeeting', { methods: ['GET'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}', handler: getMeetingHandler });
 app.http('updateMeetingSchedule', { methods: ['PATCH'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}', handler: updateMeetingScheduleHandler });
 app.http('updateMeetingSectionNote', { methods: ['PATCH'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/notes', handler: updateMeetingSectionNoteHandler });
+app.http('selectMeetingIssues', { methods: ['PATCH'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/ids/selection', handler: selectMeetingIssuesHandler });
 app.http('reorderMeetingIssues', { methods: ['PATCH'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/ids/order', handler: reorderMeetingIssuesHandler });
+app.http('transitionMeetingSection', { methods: ['PATCH'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/section', handler: transitionMeetingSectionHandler });
 app.http('startMeeting', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/start', handler: startMeetingHandler });
 app.http('closeMeeting', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/close', handler: closeMeetingHandler });
 app.http('skipMeeting', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/skip', handler: skipMeetingHandler });

@@ -189,7 +189,7 @@ async function updateIssueHandler(request: HttpRequest, _context: InvocationCont
   }
 }
 
-async function issueActionHandler(request: HttpRequest, _context: InvocationContext, action: 'start' | 'solve'): Promise<HttpResponseInit> {
+async function issueActionHandler(request: HttpRequest, _context: InvocationContext, action: 'start' | 'solve' | 'park'): Promise<HttpResponseInit> {
   const scope = await requestScope(request);
   if (isResponse(scope)) return scope;
   const { principal, repository } = scope;
@@ -199,6 +199,8 @@ async function issueActionHandler(request: HttpRequest, _context: InvocationCont
     let issue;
     if (action === 'start') {
       issue = await repository.startIssue(issueId, principal.userId, expectedVersion(request));
+    } else if (action === 'park') {
+      issue = await repository.parkIssue(issueId, principal.userId, expectedVersion(request));
     } else {
       const body = await requestJson<{ createFollowUpTodo?: unknown; resolutionNote?: unknown }>(request);
       const createFollowUpTodo = body.createFollowUpTodo === undefined ? true : body.createFollowUpTodo;
@@ -284,6 +286,7 @@ app.http('deleteTodoChecklistItem', { methods: ['DELETE'], authLevel: 'anonymous
 app.http('createIssue', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/issues', handler: createIssueHandler });
 app.http('updateIssue', { methods: ['PATCH'], authLevel: 'anonymous', route: 'issues/{issueId}', handler: updateIssueHandler });
 app.http('startIssue', { methods: ['POST'], authLevel: 'anonymous', route: 'issues/{issueId}/ids', handler: (request, context) => issueActionHandler(request, context, 'start') });
+app.http('parkIssue', { methods: ['POST'], authLevel: 'anonymous', route: 'issues/{issueId}/park', handler: (request, context) => issueActionHandler(request, context, 'park') });
 app.http('solveIssue', { methods: ['POST'], authLevel: 'anonymous', route: 'issues/{issueId}/solve', handler: (request, context) => issueActionHandler(request, context, 'solve') });
 app.http('createRockTask', { methods: ['POST'], authLevel: 'anonymous', route: 'rocks/{rockId}/tasks', handler: createTaskHandler });
 app.http('updateRockTask', { methods: ['PATCH'], authLevel: 'anonymous', route: 'rock-tasks/{taskId}', handler: updateTaskHandler });

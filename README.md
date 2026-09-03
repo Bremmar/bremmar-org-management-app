@@ -6,7 +6,10 @@ weekly To-Dos, Issues/IDS, Scorecard measurables, Headlines, meeting history,
 cross-team messages and Issue handoffs, configurable L10 agendas, escalation
 paths, and Leadership rollups into one source of truth. Team configuration
 supports weekly or monthly L10 cadence, and an open/current meeting can be
-rescheduled when its date or time changes.
+rescheduled when its date or time changes. In-progress L10s record a continuous
+meeting timer, per-section durations, the facilitator, an overall rating, and
+facilitator-entered attendee ratings. IDS uses a focused selection of up to five
+Issues, an explicit order, issue-by-issue notes, and Solve or Park outcomes.
 
 ## Repository layout
 
@@ -69,6 +72,9 @@ occurrence. Team editors can update it through:
 - `PATCH /api/teams/{teamId}/meetings/{meetingId}`
 - `POST /api/teams/{teamId}/meetings/{meetingId}/skip`
 - `POST /api/teams/{teamId}/meetings/{meetingId}/start`
+- `PATCH /api/teams/{teamId}/meetings/{meetingId}/section`
+- `PATCH /api/teams/{teamId}/meetings/{meetingId}/ids/selection`
+- `PATCH /api/teams/{teamId}/meetings/{meetingId}/ids/order`
 
 Start writes an immutable server UTC timestamp. Skip requires a public holiday,
 annual leave, or other reason, keeps the occurrence in history, records the
@@ -88,8 +94,9 @@ Closing stores the manual recap, action summary, and a same-team immutable
 context snapshot in a `meetingSummaryJob`, then queues the existing AI Function.
 The post-Conclude recap shows queued/generating/ready/failed states and stores
 structured Executive summary, Decisions, Commitments, Risks, and Next focus
-output on the meeting. Failed jobs can be retried by a direct team editor;
-legacy closed meetings show Not generated and can be requested once. Core API
+output on the meeting. A direct team editor can regenerate a ready recap or
+retry a failed job; legacy closed meetings show Not generated and can be
+requested once. Core API
 worker requests and callbacks use HMAC signatures with timestamp and attempt
 checks to prevent replayed results.
 
