@@ -528,7 +528,7 @@ img { max-width: 100%; }
 
 .issue-number { display: grid; width: 26px; height: 26px; flex: 0 0 auto; place-items: center; border-radius: 7px; color: var(--coral); background: var(--coral-soft); font-size: 13px; font-weight: 850; }
 
-.company-table-row .issue-number, .workbench-issue-row .issue-number { display: inline-flex; gap: 0; }
+.company-table-row .issue-number, .workbench-issue-row .issue-number { display: inline-flex; align-items: center; justify-content: center; gap: 0; text-align: center; }
 
 .company-table-row .issue-number::before, .workbench-issue-row .issue-number::before { content: 'P'; }
 
@@ -1272,6 +1272,8 @@ img { max-width: 100%; }
 
 .rock-detail-notes p { margin: 7px 0 0; color: #77739a; font-size: 13px; line-height: 1.55; }
 
+.rock-detail-notes .rich-text-viewer { margin-top: 7px; color: #77739a; font-size: 13px; line-height: 1.55; }
+
 .task-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-top: 22px; }
 
 .task-header-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; flex-wrap: wrap; }
@@ -1315,7 +1317,9 @@ img { max-width: 100%; }
 /* To-Dos */
 .todo-summary-grid { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 14px; }
 
-.todo-summary-card { display: grid; grid-template-columns: auto 1fr; align-items: center; column-gap: 13px; min-height: 101px; padding: 17px 19px; box-shadow: none; }
+.todo-summary-card { display: grid; width: 100%; grid-template-columns: auto 1fr; align-items: center; column-gap: 13px; min-height: 101px; padding: 17px 19px; border: 1px solid var(--line); color: inherit; box-shadow: none; text-align: left; transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease; }
+
+.todo-summary-card:hover, .todo-summary-card-active { border-color: #b8c8d9; box-shadow: 0 8px 22px rgba(24, 35, 56, 0.08); transform: translateY(-1px); }
 
 .todo-summary-card strong { display: block; color: var(--navy); font-size: 26px; font-weight: 700; letter-spacing: -0.06em; }
 
@@ -1392,11 +1396,13 @@ img { max-width: 100%; }
 
 .issues-list-panel { border-right: 1px solid #eef0f4; }
 
-.workbench-panel-head { display: flex; align-items: flex-end; justify-content: space-between; padding: 22px; border-bottom: 1px solid #eef0f4; }
+.workbench-panel-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 14px; padding: 22px; border-bottom: 1px solid #eef0f4; }
 
 .workbench-panel-head h2 { margin: 6px 0 0; color: #33435b; font-size: 20px; }
 
 .sort-label { color: #8a98aa; font-size: 12px; }
+
+.workbench-panel-controls { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
 
 .workbench-issue-row { display: flex; width: 100%; align-items: center; gap: 13px; min-height: 77px; padding: 0 22px; border: 0; border-bottom: 1px solid #f0f2f6; color: var(--ink); background: #fff; text-align: left; }
 
@@ -1490,11 +1496,25 @@ img { max-width: 100%; }
 
 .todo-checklist-empty { margin: 12px 0; color: #94a1b1; font-size: 12px; line-height: 1.5; }
 
-.todo-checklist-add { display: flex; align-items: center; gap: 7px; margin-top: 10px; }
+.todo-checklist-add { display: flex; align-items: stretch; flex-direction: column; gap: 9px; margin-top: 10px; }
 
-.todo-checklist-add input { min-width: 0; flex: 1; }
+.todo-checklist-add input { min-width: 0; width: 100%; }
 
-.todo-checklist-add select { width: 135px; }
+.todo-checklist-add-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+
+.checklist-assignment { position: relative; }
+
+.checklist-assign-button { display: flex; min-height: 42px; align-items: center; gap: 7px; padding: 0 11px; border: 1px solid #dfe5ed; border-radius: 8px; color: #63728a; background: #fff; font-size: 12px; font-weight: 750; }
+
+.checklist-assign-button:hover, .checklist-assign-button[aria-expanded='true'] { border-color: #cbd4e0; color: var(--ink); background: #fafbfc; }
+
+.checklist-assign-button strong { color: var(--brand); font-weight: 800; }
+
+.checklist-assignment-menu { top: calc(100% + 6px); right: 0; min-width: 220px; }
+
+.checklist-assignment-label { padding: 6px 9px 5px; color: #9aa7b8; font-size: 10px; font-weight: 850; letter-spacing: 0.08em; text-transform: uppercase; }
+
+.checklist-assignment-menu button[aria-selected='true'] { color: var(--brand-deep); background: var(--brand-soft); }
 
 .linked-issue-heading strong { display: block; max-width: 450px; margin-top: 4px; color: #506079; font-size: 14px; line-height: 1.35; }
 
@@ -1507,6 +1527,8 @@ img { max-width: 100%; }
 .linked-issue-grid dt { color: #9aa7b8; font-size: 10px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; }
 
 .linked-issue-grid dd { margin: 4px 0 0; color: #63738b; font-size: 12px; line-height: 1.45; white-space: pre-wrap; }
+
+.linked-issue-grid dd .rich-text-viewer { color: inherit; font-size: inherit; line-height: inherit; }
 
 .pending-messages-panel { margin-bottom: 20px; padding: 15px 16px; border: 1px solid #e1e9f2; border-left: 3px solid #6588b7; border-radius: 8px; background: #f6f9fd; }
 
@@ -1819,6 +1841,8 @@ img { max-width: 100%; }
 
 .modal-card { position: relative; width: min(100%, 510px); max-height: calc(100vh - 40px); overflow-y: auto; padding: 31px; border-radius: 14px; background: #fff; box-shadow: 0 24px 70px rgba(18, 33, 59, 0.25); }
 
+.modal-card-wide { width: min(100%, 820px); }
+
 .modal-fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 
 .modal-close { position: absolute; top: 15px; right: 16px; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 50%; color: #8190a2; background: #f5f7fa; font-size: 21px; line-height: 1; }
@@ -1996,6 +2020,7 @@ img { max-width: 100%; }
   .rocks-summary-progress { grid-column: 1 / -1; padding: 11px 0 0; }
   .table-card-header, .metric-table-head { display: block; }
   .table-filters { margin-top: 15px; }
+  .workbench-panel-controls { align-items: flex-start; flex-direction: column; gap: 7px; }
   .table-header { display: none; }
   .table-row { grid-template-columns: 20px minmax(0, 1fr) auto; min-height: 78px; padding: 0 17px; }
   .table-person, .table-origin { display: none; }

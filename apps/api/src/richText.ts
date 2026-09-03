@@ -1,6 +1,6 @@
 import sanitizeHtml from 'sanitize-html';
 
-const TODO_NOTE_TAGS = ['p', 'br', 'strong', 'b', 'em', 'i', 'ul', 'ol', 'li'];
+const RICH_TEXT_TAGS = ['p', 'br', 'strong', 'b', 'em', 'i', 'ul', 'ol', 'li'];
 
 function escapeHtml(value: string) {
   return value
@@ -12,11 +12,11 @@ function escapeHtml(value: string) {
 }
 
 /**
- * To-Do Notes are intentionally a small HTML subset. Plain text from older
- * records is escaped and wrapped before sanitization so it cannot become
- * markup accidentally.
+ * Rich text fields are intentionally a small HTML subset. Plain text from
+ * older records is escaped and wrapped before sanitization so it cannot
+ * become markup accidentally.
  */
-export function sanitizeTodoNotes(value: string | undefined) {
+export function sanitizeRichText(value: string | undefined) {
   const source = typeof value === 'string' ? value : '';
   if (!source.trim()) return '';
   const containsSupportedMarkup = /<\/?(?:p|br|strong|b|em|i|ul|ol|li)(?:\s|>)/i.test(source);
@@ -24,8 +24,12 @@ export function sanitizeTodoNotes(value: string | undefined) {
     ? source
     : `<p>${escapeHtml(source).replace(/\r?\n/g, '<br />')}</p>`;
   return sanitizeHtml(normalized, {
-    allowedTags: TODO_NOTE_TAGS,
+    allowedTags: RICH_TEXT_TAGS,
     allowedAttributes: {},
     disallowedTagsMode: 'discard',
   });
+}
+
+export function sanitizeTodoNotes(value: string | undefined) {
+  return sanitizeRichText(value);
 }

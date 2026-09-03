@@ -1,6 +1,6 @@
 import { defaultAgeBand, initialWorkspace, testWorkspace } from './data';
 import { meetingDateFor, meetingDateLabel, meetingReviewStatus, meetingScheduledAt, meetingSectionsFor, nextConfiguredMeetingDateAfter, normalizeMeeting, issueMeetingBand, rockMilestoneCounts, scorecardTrendFor, weekStartDateFor } from './types';
-import { sanitizeTodoNotes } from './richText';
+import { sanitizeRichText, sanitizeTodoNotes } from './richText';
 import type {
   CompanyOverview,
   EnvironmentAccess,
@@ -427,7 +427,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
   }
 
   private refreshDerivedState() {
-    this.workspace.rocks = this.workspace.rocks.map(stripLegacyRockProgress);
+    this.workspace.rocks = this.workspace.rocks.map((rock) => ({ ...stripLegacyRockProgress(rock), notes: sanitizeRichText(rock.notes) }));
     this.workspace.teams = this.workspace.teams.map((team) => ({
       ...team,
       meetingCadence: team.meetingCadence ?? 'weekly',
@@ -436,6 +436,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     }));
     this.workspace.issues = this.workspace.issues.map((issue) => ageFor({
       ...issue,
+      detail: sanitizeRichText(issue.detail),
       meetingsPassed: issue.meetingsPassed ?? 0,
       escalationState: issue.escalationState ?? 'not-scheduled',
       escalationLevel: issue.escalationLevel ?? 0,
@@ -473,6 +474,11 @@ export class LocalWorkspaceApi implements WorkspaceApi {
   private canWriteTeam(teamId: string) {
     const role = this.membership(teamId)?.role;
     return role === 'OrgAdmin' || role === 'TeamLead' || role === 'Member';
+  }
+
+  private canManageMeeting(teamId: string) {
+    const role = this.membership(teamId)?.role;
+    return role === 'OrgAdmin' || role === 'TeamLead';
   }
 
   private requireRead(teamId: string) {
@@ -655,7 +661,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const allowedInput: Partial<Pick<Rock, 'title' | 'description' | 'notes' | 'ownerId' | 'dueDate' | 'priority'>> = {
       ...(input.title !== undefined ? { title: input.title.trim() } : {}),
       ...(input.description !== undefined ? { description: input.description } : {}),
-      ...(input.notes !== undefined ? { notes: input.notes } : {}),
+      ...(input.notes !== undefined ? { notes: sanitizeRichText(input.notes) } : {}),
       ...(input.ownerId !== undefined ? { ownerId: input.ownerId } : {}),
       ...(input.dueDate !== undefined ? { dueDate: input.dueDate } : {}),
       ...(input.priority !== undefined ? { priority: input.priority } : {}),
@@ -667,7 +673,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
   async addRock(input: Pick<Rock, 'title' | 'description' | 'ownerId' | 'dueDate' | 'priority' | 'teamId'> & { notes?: string }) {
     this.requireWrite(input.teamId);
     const timestamp = nowIso();
-    this.workspace.rocks.unshift({ ...input, id: `rock-${Date.now()}`, quarterId: this.workspace.quarter.id, notes: input.notes ?? '', status: 'on-track', tasks: [], createdAt: timestamp, updatedAt: timestamp, version: 1 });
+    this.workspace.rocks.unshift({ ...input, id: `rock-${Date.now()}`, quarterId: this.workspace.quarter.id, notes: sanitizeRichText(input.notes), status: 'on-track', tasks: [], createdAt: timestamp, updatedAt: timestamp, version: 1 });
     this.audit('Created Rock', this.workspace.rocks[0].id, input.title, 'rock');
     return this.result();
   }
@@ -1109,7 +1115,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
   async addIssue(input: Pick<Issue, 'title' | 'detail' | 'teamId' | 'raisedById'> & { horizon?: IssueHorizon; priority?: number; ownerId?: string; linkedRockId?: string; linkedScorecardMetricId?: string; linkedScorecardWeekStartDate?: string; idsNote?: string }) {
     this.requireWrite(input.teamId);
     const timestamp = nowIso();
-    const issue = { id: `issue-${Date.now()}`, teamId: input.teamId, title: input.title, detail: input.detail, sourceTeamId: input.teamId, currentTeamId: input.teamId, raisedById: input.raisedById, ownerId: input.ownerId ?? input.raisedById, priority: input.priority ?? 1, status: 'open' as const, horizon: input.horizon ?? 'short-term', assignmentState: 'assigned' as const, ...(input.linkedRockId ? { linkedRockId: input.linkedRockId } : {}), ...(input.linkedScorecardMetricId ? { linkedScorecardMetricId: input.linkedScorecardMetricId } : {}), ...(input.linkedScorecardWeekStartDate ? { linkedScorecardWeekStartDate: input.linkedScorecardWeekStartDate } : {}), ...(input.idsNote ? { idsNote: input.idsNote } : {}), createdAt: timestamp, updatedAt: timestamp, ageInDays: 0, ageBand: 'fresh' as const, meetingBand: issueMeetingBand(0, 'open'), version: 1, meetingsPassed: 0, escalationState: 'not-scheduled' as const, escalationLevel: 0 };
+    const issue = { id: `issue-${Date.now()}`, teamId: input.teamId, title: input.title, detail: sanitizeRichText(input.detail), sourceTeamId: input.teamId, currentTeamId: input.teamId, raisedById: input.raisedById, ownerId: input.ownerId ?? input.raisedById, priority: input.priority ?? 1, status: 'open' as const, horizon: input.horizon ?? 'short-term', assignmentState: 'assigned' as const, ...(input.linkedRockId ? { linkedRockId: input.linkedRockId } : {}), ...(input.linkedScorecardMetricId ? { linkedScorecardMetricId: input.linkedScorecardMetricId } : {}), ...(input.linkedScorecardWeekStartDate ? { linkedScorecardWeekStartDate: input.linkedScorecardWeekStartDate } : {}), ...(input.idsNote ? { idsNote: input.idsNote } : {}), createdAt: timestamp, updatedAt: timestamp, ageInDays: 0, ageBand: 'fresh' as const, meetingBand: issueMeetingBand(0, 'open'), version: 1, meetingsPassed: 0, escalationState: 'not-scheduled' as const, escalationLevel: 0 };
     this.workspace.issues.unshift(issue);
     this.audit('Created Issue', this.workspace.issues[0].id, input.title, 'issue');
     return this.result();
@@ -1121,7 +1127,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     this.requireVersion(issue.version, expectedVersion);
     const allowedInput = {
       ...(input.title !== undefined ? { title: input.title } : {}),
-      ...(input.detail !== undefined ? { detail: input.detail } : {}),
+      ...(input.detail !== undefined ? { detail: sanitizeRichText(input.detail) } : {}),
       ...(input.priority !== undefined ? { priority: input.priority } : {}),
       ...(input.horizon !== undefined ? { horizon: input.horizon } : {}),
       ...(input.ownerId !== undefined ? { ownerId: input.ownerId } : {}),
@@ -1266,22 +1272,26 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     this.requireWrite(teamId);
     const meeting = this.workspace.meetings.find((item) => item.id === meetingId && item.teamId === teamId);
     if (!meeting) throw new WorkspaceApiError('NOT_FOUND', 'Meeting record not found.');
-    this.requireVersion(meeting.version ?? 1, expectedVersion);
     if (meeting.status === 'closed' || meeting.status === 'skipped') throw new WorkspaceApiError('CONFLICT', 'Closed or skipped meetings cannot be started.');
     const teamMemberIds = new Set(this.workspace.memberships.filter((membership) => membership.teamId === teamId && membership.active).map((membership) => membership.userId));
     const selectedFacilitatorId = facilitatorId ?? meeting.facilitatorId ?? this.workspace.currentUser.id;
     if (!this.workspace.users.some((user) => user.id === selectedFacilitatorId && user.active) || !teamMemberIds.has(selectedFacilitatorId)) throw new WorkspaceApiError('VALIDATION', 'The facilitator must be an active member of this team.');
     if (meeting.status === 'in-progress') {
-      if (!meeting.facilitatorId) {
-        const timestamp = nowIso();
-        meeting.facilitatorId = selectedFacilitatorId;
-        if (!meeting.attendeeIds.includes(selectedFacilitatorId)) meeting.attendeeIds = [...meeting.attendeeIds, selectedFacilitatorId];
-        meeting.updatedAt = timestamp;
-        meeting.version = (meeting.version ?? 1) + 1;
-        this.audit('Recorded L10 facilitator', meeting.id, `${selectedFacilitatorId} recorded as facilitator.`, 'meeting');
-      }
+      // Starting/resuming is safe to repeat from a second screen when the
+      // meeting is already live and the facilitator is unchanged.
+      if (meeting.facilitatorId === selectedFacilitatorId) return this.result();
+      this.requireVersion(meeting.version ?? 1, expectedVersion);
+      if (!this.canManageMeeting(teamId)) throw new WorkspaceApiError('FORBIDDEN', 'Only a TeamLead or OrgAdmin can change the meeting facilitator.');
+      const timestamp = nowIso();
+      const previousFacilitatorId = meeting.facilitatorId;
+      meeting.facilitatorId = selectedFacilitatorId;
+      if (!meeting.attendeeIds.includes(selectedFacilitatorId)) meeting.attendeeIds = [...meeting.attendeeIds, selectedFacilitatorId];
+      meeting.updatedAt = timestamp;
+      meeting.version = (meeting.version ?? 1) + 1;
+      this.audit('Changed L10 facilitator', meeting.id, `${previousFacilitatorId ?? 'No facilitator'} → ${selectedFacilitatorId}.`, 'meeting');
       return this.result();
     }
+    this.requireVersion(meeting.version ?? 1, expectedVersion);
     const timestamp = nowIso();
     meeting.status = 'in-progress';
     meeting.startedAt = meeting.startedAt ?? timestamp;
@@ -1428,7 +1438,8 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     if (message.convertedIssueId) return this.result();
     const timestamp = nowIso();
     const issueId = `issue-message-${message.id}`;
-    const issue: Issue = { id: issueId, teamId: message.toTeamId, sourceTeamId: message.toTeamId, currentTeamId: message.toTeamId, title: input.title.trim(), detail: input.detail.trim(), priority: input.priority, status: 'open', horizon: input.horizon, assignmentState: 'assigned', raisedById: this.workspace.currentUser.id, ownerId: input.ownerId, createdAt: timestamp, updatedAt: timestamp, ageInDays: 0, ageBand: 'fresh', meetingBand: issueMeetingBand(0, 'open'), version: 1, meetingsPassed: 0, escalationState: 'not-scheduled', escalationLevel: 0 };
+    const detail = sanitizeRichText(input.detail);
+    const issue: Issue = { id: issueId, teamId: message.toTeamId, sourceTeamId: message.toTeamId, currentTeamId: message.toTeamId, title: input.title.trim(), detail, priority: input.priority, status: 'open', horizon: input.horizon, assignmentState: 'assigned', raisedById: this.workspace.currentUser.id, ownerId: input.ownerId, createdAt: timestamp, updatedAt: timestamp, ageInDays: 0, ageBand: 'fresh', meetingBand: issueMeetingBand(0, 'open'), version: 1, meetingsPassed: 0, escalationState: 'not-scheduled', escalationLevel: 0 };
     if (!issue.title || !issue.detail) throw new WorkspaceApiError('VALIDATION', 'An Issue title and detail are required.');
     this.workspace.issues.unshift(issue);
     message.status = 'converted';
@@ -1719,6 +1730,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
 
   async closeMeeting(teamId: string, recap: string, rating: number, meetingId?: string, attendeeRatings?: MeetingAttendeeRating[]) {
     this.requireWrite(teamId);
+    const canManage = this.canManageMeeting(teamId);
     const meeting = this.workspace.meetings.find((item) => item.teamId === teamId && (meetingId ? item.id === meetingId : true) && (item.status === 'upcoming' || item.status === 'in-progress'));
     if (!meeting) throw new WorkspaceApiError('NOT_FOUND', 'Meeting not found.');
     const activeTeam = this.workspace.teams.find((team) => team.id === teamId);
@@ -1728,7 +1740,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const ratings = attendeeRatings ?? [];
     if (attendeeRatings !== undefined && (!Array.isArray(attendeeRatings) || attendeeRatings.some((entry) => !entry || typeof entry.attendeeId !== 'string' || !Number.isInteger(entry.rating) || entry.rating < 1 || entry.rating > 10))) throw new WorkspaceApiError('VALIDATION', 'Each attendee rating must be a whole number from 1 to 10.');
     if (attendeeRatings !== undefined && ratings.length !== meeting.attendeeIds.length) throw new WorkspaceApiError('VALIDATION', 'Enter a rating for each recorded attendee before closing the meeting.');
-    if (attendeeRatings !== undefined && this.workspace.currentUser.id !== meeting.facilitatorId) throw new WorkspaceApiError('FORBIDDEN', 'Only the meeting facilitator can submit attendee ratings.');
+    if (attendeeRatings !== undefined && !canManage && this.workspace.currentUser.id !== meeting.facilitatorId) throw new WorkspaceApiError('FORBIDDEN', 'Only the meeting facilitator or a TeamLead can submit attendee ratings.');
     const attendeeIds = new Set(meeting.attendeeIds);
     if (new Set(ratings.map((entry) => entry.attendeeId)).size !== ratings.length || ratings.some((entry) => !attendeeIds.has(entry.attendeeId))) throw new WorkspaceApiError('VALIDATION', 'Ratings must be supplied once for each recorded attendee.');
     finalizeMeetingTiming(meeting, timestamp);
@@ -1808,9 +1820,9 @@ function mapSnapshot(snapshot: ApiSnapshot): Workspace {
     teams,
     users: snapshot.users,
     memberships: snapshot.memberships.map(serverMembership),
-    rocks: snapshot.rocks.map((rock) => ({ ...stripLegacyRockProgress(rock), id: rock.id, tasks: tasksByRock.get(rock.id) ?? [] })),
+    rocks: snapshot.rocks.map((rock) => ({ ...stripLegacyRockProgress(rock), id: rock.id, notes: sanitizeRichText(rock.notes), tasks: tasksByRock.get(rock.id) ?? [] })),
     todos: snapshot.todos.map((todo) => ({ ...todo, notes: sanitizeTodoNotes(todo.notes), checklist: normalizedChecklist(todo, snapshot.users, snapshot.memberships) })),
-    issues: snapshot.issues.map((issue) => ({ ...issue, meetingsPassed: issue.meetingsPassed ?? 0, meetingBand: issueMeetingBand(issue.meetingsPassed ?? 0, issue.status), escalationState: issue.escalationState ?? 'not-scheduled', escalationLevel: issue.escalationLevel ?? 0 })),
+    issues: snapshot.issues.map((issue) => ({ ...issue, detail: sanitizeRichText(issue.detail), meetingsPassed: issue.meetingsPassed ?? 0, meetingBand: issueMeetingBand(issue.meetingsPassed ?? 0, issue.status), escalationState: issue.escalationState ?? 'not-scheduled', escalationLevel: issue.escalationLevel ?? 0 })),
     messages: snapshot.messages,
     transfers: snapshot.transfers,
     notifications: snapshot.notifications,
@@ -1856,9 +1868,11 @@ function mergeMutationRecord(workspace: Workspace, value: MutationObject): boole
       replaceRecord(workspace.todos, { ...next, notes: sanitizeTodoNotes(next.notes), checklist: normalizedChecklist(next, workspace.users, workspace.memberships) });
       return true;
     }
-    case 'issue':
-      replaceRecord(workspace.issues, ageFor(value as unknown as Issue, workspace.settings));
+    case 'issue': {
+      const next = value as unknown as Issue;
+      replaceRecord(workspace.issues, ageFor({ ...next, detail: sanitizeRichText(next.detail) }, workspace.settings));
       return true;
+    }
     case 'scorecardMetric':
       replaceRecord(workspace.metrics, value as unknown as ScorecardMetric);
       return true;

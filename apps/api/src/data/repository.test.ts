@@ -451,6 +451,25 @@ test('To-Do notes accept the small rich-text subset and safely convert legacy te
   assert.doesNotMatch(sanitizeTodoNotes('<p>ok</p><img src=x onerror=alert(1)>'), /img|onerror/i);
 });
 
+test('Rock Notes and Issue Original Context use the same safe rich-text subset', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const rock = await repository.createRock({ teamId: 'projects', title: 'Rich Rock', ownerId: 'marcus-lee', notes: '<p><strong>Outcome</strong></p><script>alert(1)</script><a href="javascript:bad">unsafe</a>' }, 'marcus-lee');
+  assert.match(rock.notes, /<strong>Outcome<\/strong>/);
+  assert.doesNotMatch(rock.notes, /script|javascript|<a/i);
+
+  const updatedRock = await repository.updateRock(rock.id, { notes: '<p><em>Next step</em></p><img src=x onerror=alert(1)>' }, 'marcus-lee', rock.version);
+  assert.match(updatedRock.notes, /<em>Next step<\/em>/);
+  assert.doesNotMatch(updatedRock.notes, /img|onerror/i);
+
+  const issue = await repository.createIssue({ teamId: 'projects', title: 'Rich Issue', detail: '<p><strong>Context</strong></p><script>alert(1)</script><a href="javascript:bad">unsafe</a>', raisedById: 'marcus-lee', ownerId: 'marcus-lee' }, 'marcus-lee');
+  assert.match(issue.detail, /<strong>Context<\/strong>/);
+  assert.doesNotMatch(issue.detail, /script|javascript|<a/i);
+
+  const updatedIssue = await repository.updateIssue(issue.id, { detail: '<p><em>Decision needed</em></p><img src=x onerror=alert(1)>' }, 'marcus-lee', issue.version);
+  assert.match(updatedIssue.detail, /<em>Decision needed<\/em>/);
+  assert.doesNotMatch(updatedIssue.detail, /img|onerror/i);
+});
+
 test('Issue resolution records the follow-up choice, source link, and idempotent history', async () => {
   const repository = new MemoryWorkspaceRepository();
   const noTodo = await repository.getIssue('issue-project-scope', 'marcus-lee');
@@ -525,7 +544,7 @@ test('meeting occurrences record immutable starts, skip reasons, audit events, a
   const started = await repository.startMeeting('leadership', first.id, 'ava-khan', first.version);
   assert.equal(started.status, 'in-progress');
   assert.match(started.startedAt ?? '', /T/);
-  const resumed = await repository.startMeeting('leadership', first.id, 'ava-khan', started.version);
+  const resumed = await repository.startMeeting('leadership', first.id, 'ava-khan', first.version);
   assert.equal(resumed.startedAt, started.startedAt);
   assert.equal(resumed.version, started.version);
   const closed = await repository.closeMeeting('leadership', first.id, 'The team left with clear owners.', 8, 'ava-khan', resumed.version);
@@ -564,8 +583,7 @@ test('L10 starts store the facilitator, record section and overall timing, and r
   stored.activeSectionStartedAt = new Date(Date.now() - 90_000).toISOString();
   const ratings = transitioned.attendeeIds.map((attendeeId) => ({ attendeeId, rating: 9 }));
 
-  await rejectsWithCode(repository.closeMeeting('leadership', meeting.id, 'Facilitator-only ratings.', 8, 'ava-khan', transitioned.version, ratings), 'FORBIDDEN');
-  const closed = await repository.closeMeeting('leadership', meeting.id, 'The team left with clear owners.', 8, 'marcus-lee', transitioned.version, ratings);
+  const closed = await repository.closeMeeting('leadership', meeting.id, 'The team left with clear owners.', 8, 'ava-khan', transitioned.version, ratings);
   assert.equal((closed.durationSeconds ?? 0) >= 110, true);
   assert.equal((closed.sectionDurations?.segue ?? 0) >= 110, true);
   assert.equal((closed.sectionDurations?.scorecard ?? 0) >= 80, true);
@@ -577,6 +595,19 @@ test('L10 starts store the facilitator, record section and overall timing, and r
   assert.equal(job?.contextSnapshot.facilitatorId, 'marcus-lee');
   assert.deepEqual(job?.contextSnapshot.attendeeRatings, ratings);
   assert.equal(workspace.meetings.find((candidate) => candidate.id === meeting.id)?.status, 'closed');
+});
+
+test('TeamLeads can change an in-progress facilitator while Members cannot', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  await repository.upsertMembership({ userId: 'marcus-lee', teamId: 'leadership', role: 'Member' }, 'ava-khan');
+  const workspace = await repository.getTeamWorkspace('leadership', 'ava-khan');
+  const meeting = workspace.meetings.find((candidate) => candidate.status === 'upcoming')!;
+  const started = await repository.startMeeting('leadership', meeting.id, 'ava-khan', meeting.version, 'marcus-lee');
+  const changed = await repository.startMeeting('leadership', meeting.id, 'ava-khan', started.version, 'ava-khan');
+
+  assert.equal(changed.facilitatorId, 'ava-khan');
+  assert.equal(changed.attendeeIds.includes('ava-khan'), true);
+  await rejectsWithCode(repository.startMeeting('leadership', meeting.id, 'marcus-lee', changed.version, 'marcus-lee'), 'FORBIDDEN');
 });
 
 test('IDS selection is capped at five and parked Issues carry into the next meeting', async () => {

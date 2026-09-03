@@ -195,12 +195,20 @@ describe('LocalWorkspaceApi', () => {
   it('updates Rock notes and To-Do notes through versioned detail actions', async () => {
     const api = new LocalWorkspaceApi();
     const beforeRock = (await api.getWorkspace()).rocks.find((rock) => rock.id === 'rock-playbook')!;
-    const afterRock = await api.updateRock('rock-playbook', { notes: 'Add the support handoff checklist before launch.' }, beforeRock.version);
-    expect(afterRock.rocks.find((rock) => rock.id === 'rock-playbook')?.notes).toContain('support handoff');
+    const afterRock = await api.updateRock('rock-playbook', { notes: '<p><strong>Add the support handoff checklist</strong> before launch.</p><script>alert(1)</script>' }, beforeRock.version);
+    const updatedRock = afterRock.rocks.find((rock) => rock.id === 'rock-playbook')!;
+    expect(updatedRock.notes).toContain('<strong>Add the support handoff checklist</strong>');
+    expect(updatedRock.notes).not.toMatch(/script|alert/i);
 
     const beforeTodo = afterRock.todos.find((todo) => todo.id === 'todo-handoff')!;
     const afterTodo = await api.updateTodo('todo-handoff', { notes: 'Confirm the customer-facing owner in the next check-in.' }, beforeTodo.version);
     expect(afterTodo.todos.find((todo) => todo.id === 'todo-handoff')?.notes).toContain('customer-facing owner');
+
+    const beforeIssue = afterTodo.issues.find((issue) => issue.id === 'issue-handoffs')!;
+    const afterIssue = await api.updateIssue('issue-handoffs', { detail: '<p><em>Confirm the receiving owner</em> before launch.</p><img src=x onerror=alert(1)>' }, beforeIssue.version);
+    const updatedIssue = afterIssue.issues.find((issue) => issue.id === 'issue-handoffs')!;
+    expect(updatedIssue.detail).toContain('<em>Confirm the receiving owner</em>');
+    expect(updatedIssue.detail).not.toMatch(/img|onerror/i);
   });
 
   it('rolls an incomplete To-Do over when a due date moves later', async () => {
@@ -301,7 +309,7 @@ describe('LocalWorkspaceApi', () => {
     workspace = await api.createIssueFromMessage(message.id, { title: 'Security review before kickoff', detail: 'Leadership will confirm the receiving team before Friday.', priority: 2, horizon: 'short-term', ownerId: 'ava-khan' });
     const convertedMessage = workspace.messages.find((item) => item.id === message.id)!;
     const created = workspace.issues.find((issue) => issue.id === convertedMessage.convertedIssueId);
-    expect(created).toMatchObject({ title: 'Security review before kickoff', detail: 'Leadership will confirm the receiving team before Friday.', teamId: 'leadership' });
+    expect(created).toMatchObject({ title: 'Security review before kickoff', detail: '<p>Leadership will confirm the receiving team before Friday.</p>', teamId: 'leadership' });
     expect(workspace.messages.find((item) => item.id === message.id)?.status).toBe('converted');
   });
 
@@ -376,7 +384,7 @@ describe('LocalWorkspaceApi', () => {
     const first = upcoming()[0];
     workspace = await api.startMeeting('leadership', first.id, first.version);
     const started = workspace.meetings.find((meeting) => meeting.id === first.id)!;
-    workspace = await api.startMeeting('leadership', first.id, started.version);
+    workspace = await api.startMeeting('leadership', first.id, first.version);
     const resumed = workspace.meetings.find((meeting) => meeting.id === first.id)!;
     expect(resumed).toMatchObject({ status: 'in-progress', startedAt: started.startedAt, version: started.version });
 
@@ -396,11 +404,11 @@ describe('LocalWorkspaceApi', () => {
     expect((await api.getMeetingReview({ status: 'skipped', teamId: 'leadership' })).items.some((item) => item.meeting.id === skipped.id)).toBe(true);
   });
 
-  it('records facilitator-owned attendee ratings and section timing, and carries parked Issues forward', async () => {
+  it('lets a TeamLead rate a meeting for another facilitator and carries parked Issues forward', async () => {
     const api = new LocalWorkspaceApi();
     let workspace = await api.getWorkspace();
     const meeting = workspace.meetings.find((candidate) => candidate.teamId === 'leadership' && candidate.status === 'upcoming')!;
-    workspace = await api.startMeeting('leadership', meeting.id, meeting.version, 'ava-khan');
+    workspace = await api.startMeeting('leadership', meeting.id, meeting.version, 'marcus-lee');
     let started = workspace.meetings.find((candidate) => candidate.id === meeting.id)!;
     const state = api as unknown as { workspaces: Record<'live' | 'test', Workspace> };
     const stored = state.workspaces.live.meetings.find((candidate) => candidate.id === meeting.id)!;
@@ -415,12 +423,12 @@ describe('LocalWorkspaceApi', () => {
     workspace = await api.closeMeeting('leadership', 'The team left with clear owners.', 8, meeting.id, ratings);
     const closed = workspace.meetings.find((candidate) => candidate.id === meeting.id)!;
 
-    expect(closed.facilitatorId).toBe('ava-khan');
+    expect(closed.facilitatorId).toBe('marcus-lee');
     expect(closed.durationSeconds).toBeGreaterThanOrEqual(110);
     expect(closed.sectionDurations?.segue).toBeGreaterThanOrEqual(110);
     expect(closed.sectionDurations?.scorecard).toBeGreaterThanOrEqual(80);
     expect(closed.attendeeRatings).toEqual(ratings);
-    expect(closed.recap).toContain('Facilitator: Ava Khan');
+    expect(closed.recap).toContain('Facilitator: Marcus Lee');
 
     const issueWorkspace = await api.getWorkspace();
     const issueIds = issueWorkspace.issues.filter((issue) => issue.teamId === 'leadership').slice(0, 1).map((issue) => issue.id);

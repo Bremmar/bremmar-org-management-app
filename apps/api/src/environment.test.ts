@@ -113,7 +113,7 @@ test('workspace repositories keep identical IDs and memberships isolated by envi
   assert.equal(beforeLive.id, beforeTest.id);
   await factory.getWorkspaceRepository('test').updateIssue(beforeTest.id, { detail: 'Test-only context.' }, 'marcus-lee', beforeTest.version);
   assert.equal((await factory.getWorkspaceRepository('live').getIssue(beforeLive.id, 'marcus-lee')).detail, beforeLive.detail);
-  assert.equal((await factory.getWorkspaceRepository('test').getIssue(beforeTest.id, 'marcus-lee')).detail, 'Test-only context.');
+  assert.equal((await factory.getWorkspaceRepository('test').getIssue(beforeTest.id, 'marcus-lee')).detail, '<p>Test-only context.</p>');
 
   await factory.getWorkspaceRepository('live').updateTeam('projects', { description: 'Live-only team settings.' }, 'ava-khan');
   assert.notEqual((await factory.getWorkspaceRepository('test').getTeams()).find((team) => team.teamId === 'projects')?.description, 'Live-only team settings.');
