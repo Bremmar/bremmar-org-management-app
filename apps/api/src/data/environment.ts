@@ -11,6 +11,13 @@ const CONTROL_PARTITION = 'org';
 export const DEFAULT_CONTROL_TABLE_NAME = 'EnvironmentAccess';
 const ORG_ID = process.env.BREMMAR_ORG_ID ?? 'bremmar';
 const nowIso = () => new Date().toISOString();
+let lastControlPlaneTimestamp = 0;
+
+function nextControlPlaneTimestamp() {
+  const timestamp = Math.max(Date.now(), lastControlPlaneTimestamp + 1);
+  lastControlPlaneTimestamp = timestamp;
+  return new Date(timestamp).toISOString();
+}
 
 export interface EnvironmentAccessGrant {
   id: string;
@@ -306,7 +313,7 @@ export class AzureTableControlPlaneRepository implements ControlPlaneRepository 
     if (!targetUserId.trim()) throw new RepositoryError('VALIDATION', 'A stable user object ID is required.');
     const normalizedUserId = targetUserId.trim();
     const previous = await this.grantFor(normalizedUserId);
-    const timestamp = nowIso();
+    const timestamp = nextControlPlaneTimestamp();
     const grant: EnvironmentAccessGrant = {
       id: grantId(normalizedUserId), kind: 'environmentAccessGrant', pk: CONTROL_PARTITION, orgId: ORG_ID, userId: normalizedUserId, environmentId: 'test', allowed,
       grantedAt: allowed ? (previous?.grantedAt ?? timestamp) : previous?.grantedAt, grantedBy: allowed ? (previous?.grantedBy ?? actorId) : previous?.grantedBy,
