@@ -417,6 +417,33 @@ describe('LocalWorkspaceApi', () => {
     expect(issue.escalationDueAt).toBeUndefined();
   });
 
+  it('persists the configured L10 order and durations per team', async () => {
+    const api = new LocalWorkspaceApi();
+    const before = await api.getWorkspace();
+    const team = before.teams.find((candidate) => candidate.id === 'projects')!;
+    const configured = defaultMeetingSections().reverse().map((section, index) => ({
+      ...section,
+      duration: index + 1,
+      enabled: section.id !== 'scorecard',
+    }));
+
+    const workspace = await api.updateTeam(team.id, { meetingSections: configured }, team.version);
+    const updatedTeam = workspace.teams.find((candidate) => candidate.id === team.id)!;
+    const upcoming = workspace.meetings.find((meeting) => meeting.teamId === team.id && meeting.status === 'upcoming')!;
+
+    expect(updatedTeam.meetingSections.map((section) => section.id)).toEqual(configured.map((section) => section.id));
+    expect(updatedTeam.meetingSections.find((section) => section.id === 'ids')?.duration).toBe(configured.find((section) => section.id === 'ids')?.duration);
+    expect(updatedTeam.meetingSections.find((section) => section.id === 'scorecard')?.enabled).toBe(false);
+    expect(upcoming.agendaTotal).toBe(configured.filter((section) => section.enabled).length);
+    expect(workspace.meetings.find((meeting) => meeting.id === upcoming.id)?.agendaTotal).toBe(6);
+  });
+
+  it('keeps IDS and Conclude enabled in team L10 configuration', async () => {
+    const api = new LocalWorkspaceApi();
+    const invalid = defaultMeetingSections().map((section) => section.id === 'ids' ? { ...section, enabled: false } : section);
+    await expect(api.updateTeam('projects', { meetingSections: invalid })).rejects.toMatchObject({ code: 'VALIDATION' });
+  });
+
   it('creates the next L10 and carries unresolved IDS Issues forward', async () => {
     const api = new LocalWorkspaceApi();
     let workspace = await api.startIssue('issue-handoffs');

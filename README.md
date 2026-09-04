@@ -44,6 +44,22 @@ use the Functions API instead of the local fixture. The API's local settings use
 `LOCAL_POC_MODE=true` and a signed-cookie fallback secret only for this local POC
 mode.
 
+## Build metadata and team L10 agendas
+
+Every frontend build displays its build number and the localised date/time it
+was built in the shared sidebar. Build numbering starts at `1.01` for the first
+commit after the numbering anchor in `apps/web/vite.config.ts` and advances with
+each later commit. CI checks out the full Git history so the number remains
+deterministic; `VITE_BUILD_NUMBER` and `VITE_BUILD_DATE` can be supplied for a
+release build that needs an explicit value.
+
+Platform administrators can configure each team’s L10 from Admin → Configure.
+They can enable or disable optional sections, set each section’s duration in
+whole minutes, and use the up/down controls to save the meeting order. IDS and
+Conclude remain enabled and every supported section is validated server-side.
+The saved configuration drives the live agenda, timing, overdue calculation,
+new meeting occurrences, and meeting history for that team.
+
 If Azure Functions Core Tools is installed, copy
 `apps/api/local.settings.sample.json` to `local.settings.json`, keep
 `LOCAL_POC_MODE=true` for local development, build the API, and run it with
@@ -85,6 +101,10 @@ annual leave, or other reason, keeps the occurrence in history, records the
 actor/time, and leaves the cadence unchanged. Schedule, start, and skip actions
 are version-checked and limited to editors of the meeting’s own team; parent
 TeamLeads and Viewers can review descendant meetings but remain read-only.
+
+The same team configuration stores the ordered L10 section list, enabled state,
+and duration in minutes. The live meeting follows that order, and the total of
+enabled section durations is used when marking an open meeting Overdue.
 
 `GET /api/meetings/review` powers Past meetings. It accepts grouped `filter`
 values or precise `status` values alongside team, date, and cursor filters. It

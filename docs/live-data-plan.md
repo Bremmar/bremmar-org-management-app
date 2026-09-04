@@ -54,7 +54,8 @@ Leadership Team
 Every seeded node is operational and can own its own Rocks, Tasks, To-Dos,
 Issues, Scorecard, and L10. The Scorecard is configurable per team; for example,
 Cybersecurity is seeded without it. Platform administrators can add nodes,
-re-parent them, configure enabled L10 sections and section durations, define the
+re-parent them, configure the enabled and ordered L10 sections with per-section
+durations, define the
 ordered escalation recipients, or make a node grouping-only after its direct
 operational work has been resolved or moved.
 
@@ -261,7 +262,8 @@ The Functions API exposes typed server contracts for:
   predate that boundary and queues the close-time summary snapshot.
 - Issue transfer request, accept, reject, and cancel routes.
 - Platform administration routes for teams, users, memberships, aging settings,
-  L10 section configuration, and escalation hierarchies.
+  ordered L10 section configuration with per-section durations, and escalation
+  hierarchies.
 
 Mutation endpoints return the changed typed record (or the small set of records
 affected by a multi-record operation). The web adapter merges those deltas into

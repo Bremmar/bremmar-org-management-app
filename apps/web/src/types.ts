@@ -97,6 +97,7 @@ export interface Team {
   active: boolean;
   meetingSections: MeetingSectionConfig[];
   escalationUserIds: string[];
+  version?: number;
 }
 
 export interface TeamMembership {
@@ -670,11 +671,40 @@ export const defaultMeetingSections = (): MeetingSectionConfig[] => agendaSectio
   duration: section.duration,
 }));
 
+/** Return every supported section in the team's saved order, filling legacy gaps. */
+export function meetingSectionConfigsFor(team: Pick<Team, 'meetingSections'>): MeetingSectionConfig[] {
+  const defaults = defaultMeetingSections();
+  const defaultsById = new Map(defaults.map((section) => [section.id, section]));
+  const configured = team.meetingSections?.length ? team.meetingSections : defaults;
+  const seen = new Set<MeetingSection>();
+  const ordered = configured.flatMap((section) => {
+    const fallback = defaultsById.get(section.id);
+    if (!fallback || seen.has(section.id)) return [];
+    seen.add(section.id);
+    return [{
+      id: section.id,
+      label: section.label?.trim() || fallback.label,
+      enabled: section.enabled !== false,
+      duration: Number.isInteger(section.duration) && section.duration > 0 ? section.duration : fallback.duration,
+    }];
+  });
+  return [...ordered, ...defaults.filter((section) => !seen.has(section.id)).map((section) => ({ ...section }))];
+}
+
 export function meetingSectionsFor(team: Pick<Team, 'meetingSections'>): MeetingSectionConfig[] {
-  const configured = team.meetingSections?.length ? team.meetingSections : defaultMeetingSections();
-  return configured.filter((section) => section.enabled).map((section) => ({
-    ...section,
-    label: section.label.trim() || agendaSections.find((defaultSection) => defaultSection.id === section.id)?.label || section.id,
-    duration: Number.isFinite(section.duration) && section.duration > 0 ? section.duration : agendaSections.find((defaultSection) => defaultSection.id === section.id)?.duration || 5,
-  }));
+  const defaults = defaultMeetingSections();
+  const defaultsById = new Map(defaults.map((section) => [section.id, section]));
+  const configured = team.meetingSections?.length ? team.meetingSections : defaults;
+  const seen = new Set<MeetingSection>();
+  return configured.flatMap((section) => {
+    const fallback = defaultsById.get(section.id);
+    if (!fallback || seen.has(section.id) || section.enabled === false) return [];
+    seen.add(section.id);
+    return [{
+      id: section.id,
+      label: section.label?.trim() || fallback.label,
+      enabled: true,
+      duration: Number.isInteger(section.duration) && section.duration > 0 ? section.duration : fallback.duration,
+    }];
+  });
 }

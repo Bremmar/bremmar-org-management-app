@@ -89,6 +89,12 @@ img { max-width: 100%; }
 
 .quarter-mini-note { display: block; margin-top: 10px; color: #91a5c4; font-size: 12px; }
 
+.build-meta { margin: 0 3px 16px; padding: 0 13px; color: #91a5c4; font-size: 10px; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; }
+
+.build-meta span, .build-meta small { display: block; }
+
+.build-meta small { margin-top: 5px; color: #7187aa; font-size: 10px; font-weight: 500; letter-spacing: 0; line-height: 1.4; text-transform: none; }
+
 .sidebar-user { display: flex; width: 100%; align-items: center; gap: 10px; padding: 16px 8px 4px; border: 0; border-top: 1px solid rgba(216, 228, 247, 0.14); color: inherit; background: transparent; text-align: left; }
 
 .sidebar-user strong { display: block; color: #e6edf7; font-size: 13px; font-weight: 700; }
@@ -1897,9 +1903,19 @@ img { max-width: 100%; }
 
 .meeting-config-list, .escalation-config-list { display: flex; flex-direction: column; gap: 8px; }
 
-.meeting-config-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 10px; border: 1px solid #edf0f4; border-radius: 8px; background: #fbfcfe; }
+.meeting-config-row { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border: 1px solid #edf0f4; border-radius: 8px; background: #fbfcfe; }
 
 .meeting-config-row .checkbox-label { color: #53647c; }
+
+.meeting-config-position { display: grid; width: 24px; height: 24px; flex: 0 0 auto; place-items: center; border-radius: 6px; color: #77869b; background: #eef2f7; font-size: 11px; font-weight: 800; }
+
+.meeting-config-copy { min-width: 0; flex: 1; }
+
+.meeting-config-controls { display: flex; flex: 0 0 auto; gap: 4px; }
+
+.agenda-order-button { display: grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 1px solid #e1e7ee; border-radius: 6px; color: #64748b; background: #fff; font-size: 14px; line-height: 1; }
+
+.agenda-order-button:hover:not(:disabled) { border-color: #a8cdbd; color: var(--brand); }
 
 .duration-field { display: flex !important; flex-direction: row !important; align-items: center; gap: 7px !important; color: #8a98aa !important; font-size: 11px !important; font-weight: 700 !important; white-space: nowrap; }
 

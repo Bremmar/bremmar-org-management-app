@@ -20,6 +20,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # The frontend derives its build number from commits after the
+          # numbering anchor, so the deployment needs the complete history.
+          fetch-depth: 0
 
       - name: Use Node.js
         uses: actions/setup-node@v4

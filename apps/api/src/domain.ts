@@ -550,9 +550,27 @@ export const DEFAULT_MEETING_SECTIONS: MeetingSectionConfig[] = [
   { id: 'conclude', label: 'Conclude', enabled: true, duration: 5 },
 ];
 
+/** Normalize the saved sections while preserving a legacy partial agenda. */
+export function normalizeMeetingSections(sections?: readonly MeetingSectionConfig[]): MeetingSectionConfig[] {
+  const configured = sections?.length ? sections : DEFAULT_MEETING_SECTIONS;
+  const defaultsById = new Map(DEFAULT_MEETING_SECTIONS.map((section) => [section.id, section]));
+  const seen = new Set<MeetingSection>();
+  const ordered = configured.flatMap((section) => {
+    const fallback = defaultsById.get(section.id);
+    if (!fallback || seen.has(section.id)) return [];
+    seen.add(section.id);
+    return [{
+      id: section.id,
+      label: section.label?.trim() || fallback.label,
+      enabled: section.enabled !== false,
+      duration: Number.isInteger(section.duration) && section.duration > 0 ? section.duration : fallback.duration,
+    }];
+  });
+  return ordered;
+}
+
 export function meetingSectionsFor(team: Pick<TeamRecord, 'meetingSections'>): MeetingSectionConfig[] {
-  const configured = team.meetingSections?.length ? team.meetingSections : DEFAULT_MEETING_SECTIONS;
-  return configured.filter((section) => section.enabled).map((section) => ({ ...section }));
+  return normalizeMeetingSections(team.meetingSections).filter((section) => section.enabled);
 }
 
 export function meetingScheduledAt(meeting: Pick<MeetingRecord, 'scheduledDate' | 'scheduledTime'>): number {

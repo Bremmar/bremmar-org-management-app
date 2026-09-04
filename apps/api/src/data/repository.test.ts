@@ -146,6 +146,27 @@ test('stale versions are rejected and grouping conversion cannot hide active wor
   await rejectsWithCode(repository.updateTeam('projects', { nodeType: 'grouping' }, 'ava-khan'), 'VALIDATION');
 });
 
+test('team L10 configuration preserves order and durations at the repository boundary', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const before = (await repository.getTeams()).find((team) => team.teamId === 'projects')!;
+  const configured = DEFAULT_MEETING_SECTIONS.slice().reverse().map((section, index) => ({ ...section, duration: index + 1, enabled: section.id !== 'scorecard' }));
+
+  const updated = await repository.updateTeam('projects', { meetingSections: configured }, 'ava-khan', before.version);
+  const workspace = await repository.getTeamWorkspace('projects', 'marcus-lee');
+
+  assert.deepEqual(updated.meetingSections.map((section) => section.id), configured.map((section) => section.id));
+  assert.equal(updated.meetingSections.find((section) => section.id === 'ids')?.duration, configured.find((section) => section.id === 'ids')?.duration);
+  assert.equal(workspace.team.meetingSections.find((section) => section.id === 'scorecard')?.enabled, false);
+  assert.equal(workspace.meetings.find((meeting) => meeting.status === 'upcoming')?.agendaTotal, 6);
+
+  const upcoming = workspace.meetings.find((meeting) => meeting.status === 'upcoming')!;
+  const started = await repository.startMeeting('projects', upcoming.id, 'marcus-lee', upcoming.version);
+  assert.equal(started.activeSection, 'conclude');
+
+  await rejectsWithCode(repository.updateTeam('projects', { meetingSections: configured.filter((section) => section.id !== 'segue') }, 'ava-khan', updated.version), 'VALIDATION');
+  await rejectsWithCode(repository.updateTeam('projects', { meetingSections: configured }, 'ava-khan', before.version), 'CONFLICT');
+});
+
 test('avatar validation and configurable aging settings stay behind the admin boundary', async () => {
   const repository = new MemoryWorkspaceRepository();
   await rejectsWithCode(repository.updateUserProfile({ avatarDataUrl: 'not-an-avatar' }, 'ava-khan'), 'VALIDATION');
@@ -275,7 +296,7 @@ test('administrators can disable a team Scorecard while retaining IDS and Conclu
 
   const created = await repository.createTeam({ name: 'Quality Assurance', shortName: 'QA', description: 'Quality controls.', parentTeamId: 'leadership', nodeType: 'operational', meetingDay: 'Friday', meetingTime: '9:00 AM', accent: '#4c8f86', initials: 'QA', meetingSections: DEFAULT_MEETING_SECTIONS, escalationUserIds: ['ava-khan'] }, 'ava-khan');
   const workspace = await repository.getTeamWorkspace(created.teamId, 'ava-khan');
-  assert.equal(workspace.meetings.length, 4);
+  assert.equal(workspace.meetings.filter((meeting) => meeting.status === 'upcoming' && meetingScheduledAt(meeting) >= Date.now()).length, 4);
   assert.equal(workspace.meetings[0].agendaTotal, DEFAULT_MEETING_SECTIONS.length);
 });
 
@@ -317,7 +338,8 @@ test('new-team writes fall back to ordinary Cosmos creates when transactional ba
   assert.equal(team.name, 'Batch Fallback');
   assert.equal(batchCalls, 2);
   assert.equal(created.some((record) => record.kind === 'team' && record.id === team.teamId), true);
-  assert.equal(created.filter((record) => record.kind === 'meeting' && record.teamId === team.teamId).length, 4);
+  const createdMeetings = created.filter((record) => record.kind === 'meeting' && record.teamId === team.teamId) as MeetingRecord[];
+  assert.equal(createdMeetings.filter((meeting) => meetingScheduledAt(meeting) >= Date.now()).length, 4);
 });
 
 test('unresolved Issues use meeting health, count non-IDS Issues, and escalate once at four meetings', async () => {

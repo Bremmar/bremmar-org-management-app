@@ -13,6 +13,7 @@ import {
   isValidMeetingRating,
   meetingScheduledAt,
   meetingReviewStatus,
+  normalizeMeetingSections,
   meetingSectionsFor,
   nextConfiguredMeetingDateAfter,
   partitionFor,
@@ -40,6 +41,7 @@ import {
   type MeetingIssueNoteRecord,
   type MeetingRecord,
   type MeetingSection,
+  type MeetingSectionConfig,
   type HeadlineRecord,
   type TeamMessageRecord,
   type NotificationRecord,
@@ -340,6 +342,23 @@ function assertMeetingConfiguration(cadence: MeetingCadence, meetingDay: string,
   if (cadence === 'weekly' && weekdayOffsets[normalizedDay] === undefined) throw new RepositoryError('VALIDATION', 'Weekly meeting day must be Sunday through Saturday.');
 }
 
+function validateMeetingSections(sections: readonly MeetingSectionConfig[] | undefined) {
+  if (sections === undefined) return normalizeMeetingSections();
+  if (!Array.isArray(sections) || sections.length !== DEFAULT_MEETING_SECTIONS.length) throw new RepositoryError('VALIDATION', 'L10 configuration must include each supported section exactly once.');
+  const supportedIds = new Set(DEFAULT_MEETING_SECTIONS.map((section) => section.id));
+  const seen = new Set<MeetingSectionConfig['id']>();
+  for (const section of sections) {
+    if (!section || !supportedIds.has(section.id) || seen.has(section.id)) throw new RepositoryError('VALIDATION', 'L10 configuration must include each supported section exactly once.');
+    if (typeof section.label !== 'string' || !section.label.trim()) throw new RepositoryError('VALIDATION', 'Every L10 section needs a label.');
+    if (typeof section.enabled !== 'boolean') throw new RepositoryError('VALIDATION', 'Every L10 section must specify whether it is enabled.');
+    if (!Number.isInteger(section.duration) || section.duration < 1 || section.duration > 180) throw new RepositoryError('VALIDATION', 'Meeting section durations must be whole minutes between 1 and 180.');
+    seen.add(section.id);
+  }
+  if (!DEFAULT_MEETING_SECTIONS.every((section) => seen.has(section.id))) throw new RepositoryError('VALIDATION', 'L10 configuration must include each supported section exactly once.');
+  if (!sections.some((section) => section.id === 'ids' && section.enabled) || !sections.some((section) => section.id === 'conclude' && section.enabled)) throw new RepositoryError('VALIDATION', 'IDS and Conclude must remain enabled for every L10.');
+  return sections.map((section) => ({ id: section.id, label: section.label.trim(), enabled: section.enabled, duration: section.duration }));
+}
+
 function assertFutureMeetingSchedule(scheduledDate: string, scheduledTime: string) {
   const timestamp = meetingScheduledAt({ scheduledDate, scheduledTime });
   if (!Number.isFinite(timestamp) || timestamp <= Date.now()) throw new RepositoryError('VALIDATION', 'A rescheduled meeting must be in the future with a valid time.');
@@ -492,7 +511,7 @@ function makeTeam(input: Partial<TeamRecord> & { teamId: string; name: string; s
     meetingTime: input.meetingTime ?? '9:00 AM',
     accent: input.accent ?? '#4c8f86',
     initials: input.initials ?? input.shortName.slice(0, 2).toUpperCase(),
-    meetingSections: clone(input.meetingSections ?? DEFAULT_MEETING_SECTIONS),
+    meetingSections: clone(normalizeMeetingSections(input.meetingSections)),
     escalationUserIds: [...(input.escalationUserIds ?? [])],
   };
 }
@@ -2064,7 +2083,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     meeting.startedAt = meeting.startedAt ?? timestamp;
     meeting.facilitatorId = selectedFacilitatorId;
     if (!meeting.attendeeIds.includes(selectedFacilitatorId)) meeting.attendeeIds = [...meeting.attendeeIds, selectedFacilitatorId];
-    meeting.activeSection = meeting.activeSection ?? 'segue';
+    meeting.activeSection = meeting.activeSection ?? meetingSectionsFor(team)[0]?.id ?? 'conclude';
     meeting.activeSectionStartedAt = meeting.activeSectionStartedAt ?? timestamp;
     meeting.sectionDurations = meeting.sectionDurations ?? {};
     meeting.updatedAt = timestamp;
@@ -2266,11 +2285,12 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     const meetingCadence = input.meetingCadence ?? 'weekly';
     assertMeetingCadence(meetingCadence);
     assertMeetingConfiguration(meetingCadence, input.meetingDay ?? 'Monday', input.meetingTime ?? '9:00 AM');
+    const meetingSections = validateMeetingSections(input.meetingSections);
     if (!input.parentTeamId && this.teams.some((team) => team.active)) throw new RepositoryError('VALIDATION', 'New teams must be placed under the Leadership Team.');
     if (input.parentTeamId && !this.team(input.parentTeamId)) throw new RepositoryError('NOT_FOUND', 'Parent team not found.');
     let teamId = input.teamId || idFor('team', input.shortName);
     if (this.teams.some((team) => team.teamId === teamId)) teamId = `${teamId}-${Date.now()}`;
-    const team = makeTeam({ ...input, teamId, name: input.name, shortName: input.shortName, parentTeamId: input.parentTeamId, nodeType: input.nodeType });
+    const team = makeTeam({ ...input, meetingSections, teamId, name: input.name, shortName: input.shortName, parentTeamId: input.parentTeamId, nodeType: input.nodeType });
     this.teams.push(team);
     if (team.nodeType === 'operational') {
       const sections = meetingSectionsFor(team);
@@ -2301,12 +2321,9 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     const meetingCadence = input.meetingCadence ?? team.meetingCadence ?? 'weekly';
     assertMeetingCadence(meetingCadence);
     assertMeetingConfiguration(meetingCadence, input.meetingDay ?? team.meetingDay ?? 'Monday', input.meetingTime ?? team.meetingTime ?? '9:00 AM');
+    const meetingSections = input.meetingSections === undefined ? undefined : validateMeetingSections(input.meetingSections);
     if (team.nodeType === 'operational' && input.nodeType === 'grouping' && (this.rocks.some((rock) => rock.teamId === teamId) || this.todos.some((todo) => todo.teamId === teamId) || this.issues.some((issue) => issue.teamId === teamId && issue.assignmentState !== 'redirected'))) {
       throw new RepositoryError('VALIDATION', 'Resolve active work before changing this node to grouping-only.');
-    }
-    if (input.meetingSections) {
-      if (!input.meetingSections.some((section) => section.id === 'ids' && section.enabled) || !input.meetingSections.some((section) => section.id === 'conclude' && section.enabled)) throw new RepositoryError('VALIDATION', 'IDS and Conclude must remain enabled for every L10.');
-      if (input.meetingSections.some((section) => !Number.isInteger(section.duration) || section.duration < 1 || section.duration > 180)) throw new RepositoryError('VALIDATION', 'Meeting section durations must be whole minutes between 1 and 180.');
     }
     if (input.escalationUserIds?.some((userId) => !this.user(userId))) throw new RepositoryError('VALIDATION', 'Every escalation recipient must be an active organization user.');
     const proposed = this.teams.map((item) => item.teamId === teamId ? { ...item, ...input } : item);
@@ -2317,7 +2334,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       seen.add(current);
       current = proposed.find((item) => item.teamId === current)?.parentTeamId ?? null;
     }
-    Object.assign(team, input, { meetingSections: input.meetingSections ? clone(input.meetingSections) : team.meetingSections, escalationUserIds: input.escalationUserIds ? [...input.escalationUserIds] : team.escalationUserIds, updatedAt: nowIso(), updatedBy: actorId, version: team.version + 1 });
+    Object.assign(team, input, { meetingSections: meetingSections ? clone(meetingSections) : team.meetingSections, escalationUserIds: input.escalationUserIds ? [...input.escalationUserIds] : team.escalationUserIds, updatedAt: nowIso(), updatedBy: actorId, version: team.version + 1 });
     this.recordAudit(actorId, 'Updated team', teamId, `Updated ${team.name}.`, 'team');
     return clone(team);
   }
