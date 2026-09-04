@@ -290,6 +290,22 @@ export interface MeetingAttendeeRating {
   rating: number;
 }
 
+/** Member ratings use half-point increments on a 0.5–10 scale. */
+export function isValidMeetingRating(value: unknown): value is number {
+  return typeof value === 'number'
+    && Number.isFinite(value)
+    && value >= 0.5
+    && value <= 10
+    && Number.isInteger(value * 2);
+}
+
+/** The meeting rating is derived from the arithmetic mean of member ratings. */
+export function averageMeetingRating(ratings: readonly MeetingAttendeeRating[]): number | undefined {
+  if (!ratings.length) return undefined;
+  const average = ratings.reduce((total, entry) => total + entry.rating, 0) / ratings.length;
+  return Number(average.toFixed(2));
+}
+
 export interface MeetingActionSummary {
   todosCreated: number;
   issuesReviewedInIds: number;
@@ -342,6 +358,10 @@ export interface Headline {
   detail: string;
   createdAt: string;
   issueId?: string;
+  meetingId?: string;
+  updatedAt?: string;
+  updatedBy?: string;
+  version?: number;
 }
 
 export interface MeetingInstance {

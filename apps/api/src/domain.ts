@@ -86,6 +86,16 @@ export interface WorkspaceRecord {
   cosmosEtag?: string;
 }
 
+export interface HeadlineRecord extends WorkspaceRecord {
+  kind: 'headline';
+  teamId: string;
+  authorId: string;
+  type: 'win' | 'concern';
+  title: string;
+  detail: string;
+  issueId?: string;
+}
+
 export interface UserProfile extends WorkspaceRecord {
   kind: 'user';
   name: string;
@@ -263,6 +273,22 @@ export interface MeetingIssueNoteRecord {
 export interface MeetingAttendeeRating {
   attendeeId: string;
   rating: number;
+}
+
+/** Member ratings use the same 0.5–10 scale as the L10 rating control. */
+export function isValidMeetingRating(value: unknown): value is number {
+  return typeof value === 'number'
+    && Number.isFinite(value)
+    && value >= 0.5
+    && value <= 10
+    && Number.isInteger(value * 2);
+}
+
+/** The meeting score is the arithmetic mean of its recorded member ratings. */
+export function averageMeetingRating(ratings: readonly MeetingAttendeeRating[]): number | undefined {
+  if (!ratings.length) return undefined;
+  const average = ratings.reduce((total, entry) => total + entry.rating, 0) / ratings.length;
+  return Number(average.toFixed(2));
 }
 
 export interface MeetingActionSummary {
@@ -467,6 +493,7 @@ export interface TeamWorkspace {
   meetings: MeetingRecord[];
   metrics: ScorecardMetricRecord[];
   scorecardResults: ScorecardResultRecord[];
+  headlines: HeadlineRecord[];
   etag: string;
 }
 
@@ -487,7 +514,7 @@ export interface WorkspaceSnapshot {
   meetings: MeetingRecord[];
   metrics: ScorecardMetricRecord[];
   scorecardResults: ScorecardResultRecord[];
-  headlines: Array<WorkspaceRecord & { kind: 'headline'; authorId: string; type: 'win' | 'concern'; title: string; detail: string; issueId?: string }>;
+  headlines: HeadlineRecord[];
   audit: AuditEventRecord[];
   quarter: { id: string; label: string; theme: string; startDate: string; endDate: string; daysRemaining: number };
   etag: string;

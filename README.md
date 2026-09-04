@@ -7,9 +7,12 @@ cross-team messages and Issue handoffs, configurable L10 agendas, escalation
 paths, and Leadership rollups into one source of truth. Team configuration
 supports weekly or monthly L10 cadence, and an open/current meeting can be
 rescheduled when its date or time changes. In-progress L10s record a continuous
-meeting timer, per-section durations, the facilitator, an overall rating, and
-facilitator-entered attendee ratings. IDS uses a focused selection of up to five
-Issues, an explicit order, issue-by-issue notes, and Solve or Park outcomes.
+meeting timer, per-section durations, the facilitator, half-point attendee
+ratings, and an overall score derived from their average. Members can add
+meeting-specific Headlines before the L10. IDS uses a focused selection of up
+to five Issues, an explicit order, sanitized rich-text notes, and Solve or Park
+outcomes; solved Issues can be reopened from the standalone Issues screen when
+another IDS conversation is needed.
 
 ## Repository layout
 
@@ -29,9 +32,10 @@ The frontend currently runs with an explicit local seeded workspace API so the
 product flow can be explored without login or Azure resources. The local POC
 contains the Leadership → Professional Services / Managed Services hierarchy,
 one PlatformAdmin profile, role-aware team membership, and sample transfer
-notices, editable Rock/Issue/To-Do detail, meeting-specific IDS notes, automatic
-To-Do rollover Issues, and per-team L10/escalation configuration. The API package
-can be built independently with `npm run build:api`.
+notices, editable Rock/Issue/To-Do detail, advance meeting Headlines, rich-text
+IDS notes, automatic To-Do rollover Issues, and per-team L10/escalation
+configuration. The API package can be built independently with
+`npm run build:api`.
 
 The local POC keeps independent Live and Test workspace copies. Live is selected
 on startup; the seeded POC administrator can switch to Test from the authenticated
@@ -99,6 +103,20 @@ retry a failed job, or cancel a stuck generation and resubmit it; legacy closed
 meetings show Not generated and can be requested once. Core API
 worker requests and callbacks use HMAC signatures with timestamp and attempt
 checks to prevent replayed results.
+
+At Conclude, the facilitator or an authorized TeamLead/OrgAdmin records each
+attendee’s meeting rating on a 0.5–10 scale in 0.5 increments. The saved
+meeting rating is the arithmetic average of those attendee ratings, and both
+the individual values and derived score are included in the recap and summary
+context.
+
+Members can add a win or concern to the selected upcoming or in-progress L10’s
+Headlines section before the meeting. The headline is linked to that meeting,
+authored by the signed-in user, and included in its recap. IDS notes use the
+same sanitized rich-text allowlist as other notes. Reopening a solved Issue is
+available from Issues → Show solved; it restores the Issue to the open queue,
+preserves the resolution history, increments its version, and records an audit
+event.
 
 Changing an incomplete To-Do’s due date to a later date automatically reopens it,
 increments its rollover count, synchronizes a linked Rock Task, and creates the

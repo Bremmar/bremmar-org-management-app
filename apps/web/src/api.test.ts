@@ -59,6 +59,40 @@ describe('LocalWorkspaceApi', () => {
     expect(second.todos.filter((todo) => todo.id === 'todo-follow-up-issue-handoffs')).toHaveLength(1);
   });
 
+  it('derives a half-point meeting rating, lets a Member add an advance headline, and reopens a solved Issue', async () => {
+    const ratingSeed = structuredClone(initialWorkspace);
+    ratingSeed.currentUser = ratingSeed.users.find((user) => user.id === 'marcus-lee')!;
+    const ratingApi = new LocalWorkspaceApi(ratingSeed);
+    let workspace = await ratingApi.getWorkspace();
+    const meeting = workspace.meetings.find((candidate) => candidate.teamId === 'projects' && candidate.status === 'upcoming')!;
+    const ratings = meeting.attendeeIds.map((attendeeId, index) => ({ attendeeId, rating: index % 2 === 0 ? 8.5 : 9.5 }));
+    workspace = await ratingApi.closeMeeting('projects', 'The team left with clear owners.', 0, meeting.id, ratings);
+    const closed = workspace.meetings.find((candidate) => candidate.id === meeting.id)!;
+    expect(closed.lastRating).toBe(9);
+    expect(closed.recap).toContain('Meeting rating: 9/10 average');
+
+    const memberSeed = structuredClone(initialWorkspace);
+    memberSeed.currentUser = memberSeed.users.find((user) => user.id === 'maya-green')!;
+    const memberApi = new LocalWorkspaceApi(memberSeed);
+    workspace = await memberApi.getWorkspace();
+    const upcoming = workspace.meetings.find((candidate) => candidate.teamId === 'projects' && candidate.status === 'upcoming')!;
+    workspace = await memberApi.createHeadline({ teamId: 'projects', meetingId: upcoming.id, type: 'concern', title: 'A customer question needs context', detail: 'Add this to the room before the meeting.' });
+    expect(workspace.headlines[0]).toMatchObject({ teamId: 'projects', meetingId: upcoming.id, authorId: 'maya-green', type: 'concern' });
+
+    const issue = workspace.issues.find((candidate) => candidate.id === 'issue-project-scope')!;
+    workspace = await memberApi.addMeetingIssueNote(issue.id, upcoming.id, '<p><strong>Decision</strong></p><script>alert(1)</script><p>Use the checklist.</p>', issue.version);
+    const noted = workspace.issues.find((candidate) => candidate.id === issue.id)!;
+    expect(noted.idsNote).toContain('<strong>Decision</strong>');
+    expect(noted.idsNote).not.toMatch(/script/i);
+    workspace = await memberApi.solveIssue(issue.id, { createFollowUpTodo: false }, noted.version);
+    const solved = workspace.issues.find((candidate) => candidate.id === issue.id)!;
+    workspace = await memberApi.reopenIssue(issue.id, solved.version);
+    const reopened = workspace.issues.find((candidate) => candidate.id === issue.id)!;
+    expect(reopened.status).toBe('open');
+    expect(reopened.solvedAt).toBeUndefined();
+    expect(reopened.idsNote).toContain('Reopened for another IDS conversation');
+  });
+
   it('adds new records to the selected team', async () => {
     const api = new LocalWorkspaceApi();
     const workspace = await api.addIssue({

@@ -61,10 +61,10 @@ operational work has been resolved or moved.
 ## Data and authorization
 
 - Operational records use `team:{teamId}` as their Cosmos DB partition key.
-- Users, teams, memberships, settings, transfer envelopes, notifications, team
-  messages, and audit events use the `org` Cosmos partition. Meetings and their
-  IDS notes remain in the team partition with the operational records they
-  coordinate. Environment definitions, Test grants, and environment access
+- Users, teams, memberships, settings, Headlines, transfer envelopes,
+  notifications, team messages, and audit events use the `org` Cosmos partition.
+  Meetings and their IDS notes remain in the team partition with the operational
+  records they coordinate. Environment definitions, Test grants, and environment access
   audit events use the `org` partition in the `EnvironmentAccess` Azure Table.
 - Issues keep their stable ID and original `createdAt`. Because Cosmos
   partition keys are immutable, an accepted transfer is a versioned copy and
@@ -127,7 +127,20 @@ operational work has been resolved or moved.
   rights on descendant records. Completed records retain attendance, notes,
   IDS decisions, created To-Dos, manual recap, timestamps, and skip details.
   Started meetings also retain the selected facilitator, continuous wall-clock
-  duration, per-section durations, and facilitator-entered attendee ratings.
+  duration, per-section durations, half-point attendee ratings, and the derived
+  arithmetic-average meeting rating. Only the facilitator or a TeamLead/OrgAdmin
+  can submit the complete set of attendee ratings at close.
+- Headlines are authored by signed-in team members and may be linked to an
+  upcoming or in-progress meeting. A meeting-specific Headline is shown in that
+  L10 and its recap; legacy Headlines without a meeting ID remain team-visible.
+  Headline creation is audited through the API and remains subject to the
+  owning team’s server-side authorization.
+- IDS notes are stored as a small sanitized HTML subset (paragraphs, line breaks,
+  bold, italic, and ordered/unordered lists). The L10 editor writes the note to
+  the meeting and appends a labeled historical entry to the Issue. A solved
+  Issue can be reopened only through the standalone Issues workflow; reopening
+  restores it to `open`, preserves prior resolution notes, increments its
+  version, and records an audit event.
 - Closing stores a manual/action recap plus an immutable close-time
   `MeetingSummaryContext` in the meeting's `team:{teamId}` partition and queues
   a `meetingSummaryJob`. The existing AI Function receives the snapshot over
@@ -185,6 +198,8 @@ The Functions API exposes typed server contracts for:
   To-Do without deleting it.
 - Team message send/read/convert-to-Issue routes and meeting IDS-note/close
   routes.
+- `POST /api/teams/{teamId}/headlines` — add a win or concern to an authorized
+  upcoming or in-progress meeting; the signed-in member is the author.
 - `GET /api/meetings/review` — hierarchy-authorized history with team, status,
   date, and cursor filters plus attention counts.
 - `GET /api/teams/{teamId}/meetings/{meetingId}` — full read-only meeting detail.
@@ -204,8 +219,15 @@ The Functions API exposes typed server contracts for:
   five same-team short-term Issues for the meeting’s IDS queue.
 - `PATCH /api/teams/{teamId}/meetings/{meetingId}/ids/order` — persist the
   ordered IDS Issue IDs without changing their independent P1–P5 priorities.
+- `POST /api/teams/{teamId}/meetings/{meetingId}/issues/{issueId}/notes` stores
+  sanitized rich-text IDS notes and appends the note to the Issue’s history.
+- `POST /api/teams/{teamId}/meetings/{meetingId}/close` closes the record after
+  validating each recorded attendee’s 0.5–10 rating and derives the overall
+  rating from their average.
 - `POST /api/issues/{issueId}/park` — marks an unresolved short-term Issue as
   parked and carries it into the next meeting window.
+- `POST /api/issues/{issueId}/reopen` — restores a solved Issue to the open
+  queue with a versioned historical note and audit event.
 - `POST /api/scorecard/metrics/{metricId}/weeks/{weekStartDate}/issue` and
   `POST /api/rocks/{rockId}/issue` — idempotently create provenance-linked
   Issues from off-track Scorecard results and Rocks.

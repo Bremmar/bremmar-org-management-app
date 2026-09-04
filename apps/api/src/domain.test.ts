@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { canAcceptTransfer, canAdministerPlatform, canManageTeam, canWriteTeam, issueAgeBand, meetingReviewStatus, meetingScheduledAt, nextConfiguredMeetingDateAfter, nextMeetingDateAfter, nextMeetingDateFor, nextTodoStatus, partitionFor, validateAgeSettings, validateHierarchy } from './domain.js';
+import { averageMeetingRating, canAcceptTransfer, canAdministerPlatform, canManageTeam, canWriteTeam, isValidMeetingRating, issueAgeBand, meetingReviewStatus, meetingScheduledAt, nextConfiguredMeetingDateAfter, nextMeetingDateAfter, nextMeetingDateFor, nextTodoStatus, partitionFor, validateAgeSettings, validateHierarchy } from './domain.js';
 import type { MeetingRecord, TeamRecord } from './domain.js';
 
 test('team partitions are stable and explicit', () => {
@@ -37,6 +37,14 @@ test('role capabilities keep viewers read-only', () => {
   assert.equal(canManageTeam('Member'), false);
   assert.equal(canManageTeam('TeamLead'), true);
   assert.equal(canManageTeam('OrgAdmin'), true);
+});
+
+test('meeting ratings accept half points and derive the arithmetic mean', () => {
+  assert.equal(isValidMeetingRating(0.5), true);
+  assert.equal(isValidMeetingRating(8.5), true);
+  assert.equal(isValidMeetingRating(8.25), false);
+  assert.equal(isValidMeetingRating(10.5), false);
+  assert.equal(averageMeetingRating([{ attendeeId: 'one', rating: 8.5 }, { attendeeId: 'two', rating: 10 }]), 9.25);
 });
 
 test('todo status toggles between open and done', () => {

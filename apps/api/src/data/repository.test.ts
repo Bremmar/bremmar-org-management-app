@@ -608,13 +608,15 @@ test('L10 starts store the facilitator, record section and overall timing, and r
   stored.activeSectionStartedAt = startedAt;
   const transitioned = await repository.transitionMeetingSection('leadership', meeting.id, 'segue', 'scorecard', 'ava-khan', started.version);
   stored.activeSectionStartedAt = new Date(Date.now() - 90_000).toISOString();
-  const ratings = transitioned.attendeeIds.map((attendeeId) => ({ attendeeId, rating: 9 }));
+  const ratings = transitioned.attendeeIds.map((attendeeId, index) => ({ attendeeId, rating: index % 2 === 0 ? 8.5 : 9.5 }));
 
   const closed = await repository.closeMeeting('leadership', meeting.id, 'The team left with clear owners.', 8, 'ava-khan', transitioned.version, ratings);
   assert.equal((closed.durationSeconds ?? 0) >= 110, true);
   assert.equal((closed.sectionDurations?.segue ?? 0) >= 110, true);
   assert.equal((closed.sectionDurations?.scorecard ?? 0) >= 80, true);
   assert.deepEqual(closed.attendeeRatings, ratings);
+  assert.equal(closed.lastRating, 9);
+  assert.match(closed.recap, /Meeting rating: 9\/10 average/);
   assert.match(closed.recap, /Facilitator ID: marcus-lee/);
 
   workspace = await repository.getTeamWorkspace('leadership', 'marcus-lee');
@@ -622,6 +624,33 @@ test('L10 starts store the facilitator, record section and overall timing, and r
   assert.equal(job?.contextSnapshot.facilitatorId, 'marcus-lee');
   assert.deepEqual(job?.contextSnapshot.attendeeRatings, ratings);
   assert.equal(workspace.meetings.find((candidate) => candidate.id === meeting.id)?.status, 'closed');
+});
+
+test('Headlines can be submitted ahead of an L10, IDS notes retain safe rich text, and solved Issues can be reopened', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const before = await repository.getTeamWorkspace('projects', 'marcus-lee');
+  const meeting = before.meetings.find((candidate) => candidate.status === 'upcoming')!;
+  const headline = await repository.createHeadline({ teamId: 'projects', meetingId: meeting.id, type: 'win', title: 'Pilot feedback is ready', detail: 'The team has enough feedback to make the next decision.' }, 'marcus-lee');
+  assert.deepEqual({ kind: headline.kind, pk: headline.pk, meetingId: headline.meetingId, authorId: headline.authorId }, { kind: 'headline', pk: 'org', meetingId: meeting.id, authorId: 'marcus-lee' });
+  const snapshot = await repository.getWorkspaceSnapshot('marcus-lee');
+  assert.equal(snapshot.headlines.some((candidate) => candidate.id === headline.id && candidate.meetingId === meeting.id), true);
+  assert.equal((await repository.getTeamWorkspace('projects', 'marcus-lee')).headlines.some((candidate) => candidate.id === headline.id), true);
+  await rejectsWithCode(repository.createHeadline({ teamId: 'projects', type: 'concern', title: 'Not authorized' }, 'priya-shah'), 'FORBIDDEN');
+  const invalidRepository = new MemoryWorkspaceRepository();
+  const invalidMeeting = (await invalidRepository.getTeamWorkspace('projects', 'marcus-lee')).meetings.find((candidate) => candidate.status === 'upcoming')!;
+  await rejectsWithCode(invalidRepository.closeMeeting('projects', invalidMeeting.id, '', 0, 'marcus-lee', invalidMeeting.version, [{ attendeeId: invalidMeeting.attendeeIds[0], rating: 8.25 }]), 'VALIDATION');
+
+  const issue = await repository.getIssue('issue-project-scope', 'marcus-lee');
+  const noted = await repository.addMeetingIssueNote(issue.id, meeting.id, '<p><strong>Decision</strong></p><script>alert(1)</script><p>Use the checklist.</p>', 'marcus-lee', issue.version);
+  assert.match(noted.meeting.idsNotes.at(-1)?.note ?? '', /<strong>Decision<\/strong>/);
+  assert.doesNotMatch(noted.meeting.idsNotes.at(-1)?.note ?? '', /script/i);
+  assert.doesNotMatch(noted.issue.idsNote ?? '', /script/i);
+  const solved = await repository.solveIssue(issue.id, { createFollowUpTodo: false }, 'marcus-lee', noted.issue.version);
+  const reopened = await repository.reopenIssue(issue.id, 'marcus-lee', solved.version);
+  assert.equal(reopened.status, 'open');
+  assert.equal(reopened.solvedAt, undefined);
+  assert.match(reopened.idsNote ?? '', /Reopened for another IDS conversation/);
+  assert.equal((await repository.getAuditTrail('issue', issue.id, 'marcus-lee')).some((event) => event.action === 'Reopened Issue'), true);
 });
 
 test('TeamLeads can change an in-progress facilitator while Members cannot', async () => {

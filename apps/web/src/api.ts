@@ -1,6 +1,6 @@
 import { defaultAgeBand, initialWorkspace, testWorkspace } from './data';
-import { meetingDateFor, meetingDateLabel, meetingReviewStatus, meetingScheduledAt, meetingSectionsFor, nextConfiguredMeetingDateAfter, normalizeMeeting, issueMeetingBand, rockMilestoneCounts, scorecardTrendFor, weekStartDateFor } from './types';
-import { sanitizeRichText, sanitizeTodoNotes } from './richText';
+import { averageMeetingRating, isValidMeetingRating, meetingDateFor, meetingDateLabel, meetingReviewStatus, meetingScheduledAt, meetingSectionsFor, nextConfiguredMeetingDateAfter, normalizeMeeting, issueMeetingBand, rockMilestoneCounts, scorecardTrendFor, weekStartDateFor } from './types';
+import { richTextToPlainText, sanitizeRichText, sanitizeTodoNotes } from './richText';
 import type {
   CompanyOverview,
   AuditEntityType,
@@ -8,6 +8,7 @@ import type {
   EnvironmentAccess,
   EnvironmentId,
   EnvironmentSession,
+  Headline,
   Issue,
   IssueAgeBand,
   IssueAgeSettings,
@@ -90,6 +91,8 @@ export interface WorkspaceApi {
   startIssue(issueId: string, expectedVersion?: number): Promise<Workspace>;
   parkIssue(issueId: string, expectedVersion?: number): Promise<Workspace>;
   solveIssue(issueId: string, input: SolveIssueInput, expectedVersion?: number): Promise<Workspace>;
+  reopenIssue(issueId: string, expectedVersion?: number): Promise<Workspace>;
+  createHeadline(input: Pick<Headline, 'teamId' | 'type' | 'title' | 'detail'> & { meetingId?: string; issueId?: string }): Promise<Workspace>;
   addIssue(input: Pick<Issue, 'title' | 'detail' | 'teamId' | 'raisedById'> & { horizon?: IssueHorizon; priority?: number; ownerId?: string; linkedRockId?: string; linkedScorecardMetricId?: string; linkedScorecardWeekStartDate?: string; idsNote?: string }): Promise<Workspace>;
   updateIssue(issueId: string, input: Partial<Pick<Issue, 'title' | 'detail' | 'priority' | 'horizon' | 'ownerId' | 'idsNote'>>, expectedVersion?: number): Promise<Workspace>;
   addMeetingIssueNote(issueId: string, meetingId: string, note: string, expectedVersion?: number): Promise<Workspace>;
@@ -223,8 +226,10 @@ function historicalTimestamp(value: string) {
 }
 
 function appendHistoricalNote(current: string | undefined, at: string, note: string) {
-  const entry = `[${historicalTimestamp(at)}] ${note.trim()}`;
-  return current?.trim() ? `${current.trim()}\n\n${entry}` : entry;
+  const timestamp = sanitizeRichText(`<p><strong>[${historicalTimestamp(at)}]</strong></p>`);
+  const entry = `${timestamp}${sanitizeRichText(note)}`;
+  const previous = sanitizeRichText(current);
+  return previous ? `${previous}${entry}` : entry;
 }
 
 function meetingRecap(workspace: Workspace, team: Team, meeting: Workspace['meetings'][number], manualNotes: string) {
@@ -237,7 +242,7 @@ function meetingRecap(workspace: Workspace, team: Team, meeting: Workspace['meet
   const facilitator = workspace.users.find((user) => user.id === meeting.facilitatorId)?.name ?? meeting.facilitatorId;
   lines.push(`Facilitator: ${facilitator}`);
   if (meeting.durationSeconds !== undefined) lines.push(`Meeting duration: ${Math.floor(meeting.durationSeconds / 60)}m ${meeting.durationSeconds % 60}s`);
-  if (meeting.attendeeRatings?.length) lines.push(`Attendee ratings: ${meeting.attendeeRatings.map((entry) => `${workspace.users.find((user) => user.id === entry.attendeeId)?.name ?? entry.attendeeId} ${entry.rating}/10`).join('; ')}`);
+  if (meeting.attendeeRatings?.length) lines.push(`Meeting rating: ${meeting.lastRating}/10 average · Attendee ratings: ${meeting.attendeeRatings.map((entry) => `${workspace.users.find((user) => user.id === entry.attendeeId)?.name ?? entry.attendeeId} ${entry.rating}/10`).join('; ')}`);
   lines.push('');
   for (const section of sections) {
     const note = meeting.sectionNotes[section.id]?.trim();
@@ -252,9 +257,9 @@ function meetingRecap(workspace: Workspace, team: Team, meeting: Workspace['meet
     lines.push(`Scorecard: ${offTrack.length ? `off-track — ${offTrack.join(', ')}` : missing.length ? `not entered — ${missing.join(', ')}` : 'all visible measurables on track.'}`);
   }
   lines.push(`Rock Review: ${rocks.length ? rocks.map((rock) => { const milestones = rockMilestoneCounts(rock); return `${rock.title} (${milestones.completed} completed · ${milestones.remaining} remaining · ${rock.status})`; }).join('; ') : 'no Rocks recorded.'}`);
-  lines.push(`Headlines: ${workspace.headlines.filter((headline) => headline.teamId === team.id).map((headline) => headline.title).join('; ') || 'none recorded.'}`);
+  lines.push(`Headlines: ${workspace.headlines.filter((headline) => headline.teamId === team.id && (!headline.meetingId || headline.meetingId === meeting.id)).map((headline) => headline.title).join('; ') || 'none recorded.'}`);
   lines.push(`To-Do Review: ${todos.length ? todos.map((todo) => `${todo.title} — ${todo.status === 'done' ? 'done' : 'open'} · ${workspace.users.find((user) => user.id === todo.ownerId)?.name ?? 'unassigned'} · due ${todo.dueDate}`).join('; ') : 'no To-Dos recorded.'}`);
-  lines.push(`IDS: ${ids.length ? ids.map((issue) => `${issue.title} — ${issue.status === 'solved' ? 'solved' : 'carried forward'}${issue.idsNote ? ` · ${issue.idsNote.split('\n').at(-1)}` : ''}`).join('; ') : 'no Issues entered into IDS.'}`);
+  lines.push(`IDS: ${ids.length ? ids.map((issue) => `${issue.title} — ${issue.status === 'solved' ? 'solved' : 'carried forward'}${issue.idsNote ? ` · ${richTextToPlainText(issue.idsNote).split('\n').at(-1)}` : ''}`).join('; ') : 'no Issues entered into IDS.'}`);
   const actions = meeting.actionSummary ?? meetingActionSummary(workspace, meeting);
   lines.push(`Actions: ${actions.todosCreated} To-Dos created · ${actions.issuesReviewedInIds} Issues reviewed in IDS · ${actions.issuesAddedToIds} Issues added to IDS · ${actions.issuesSolved} Issues solved.`);
   if (meeting.createdTodoIds.length) lines.push(`Created To-Dos: ${meeting.createdTodoIds.map((id) => todos.find((todo) => todo.id === id)?.title ?? id).join('; ')}`);
@@ -275,7 +280,7 @@ function meetingAiSummary(workspace: Workspace, team: Team, meeting: Workspace['
   const issues = workspace.issues.filter((issue) => issue.teamId === team.id && issue.assignmentState !== 'redirected');
   const rocks = workspace.rocks.filter((rock) => rock.teamId === team.id);
   const todos = workspace.todos.filter((todo) => todo.teamId === team.id);
-  const decisions = meeting.idsNotes.map((note) => note.note.trim()).filter(Boolean);
+  const decisions = meeting.idsNotes.map((note) => richTextToPlainText(note.note)).filter(Boolean);
   const commitments = meeting.createdTodoIds.map((id) => todos.find((todo) => todo.id === id)?.title ?? id);
   const risks = [
     ...rocks.filter((rock) => rock.status === 'off-track').map((rock) => `Off-track Rock: ${rock.title}`),
@@ -440,6 +445,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     this.workspace.issues = this.workspace.issues.map((issue) => ageFor({
       ...issue,
       detail: sanitizeRichText(issue.detail),
+      idsNote: issue.idsNote ? sanitizeRichText(issue.idsNote) : undefined,
       meetingsPassed: issue.meetingsPassed ?? 0,
       escalationState: issue.escalationState ?? 'not-scheduled',
       escalationLevel: issue.escalationLevel ?? 0,
@@ -450,11 +456,12 @@ export class LocalWorkspaceApi implements WorkspaceApi {
       memberCount: this.workspace.memberships.filter((membership) => membership.teamId === team.id && membership.active).length,
     }));
     this.workspace.todos = this.workspace.todos.map((todo) => ({ ...todo, notes: sanitizeTodoNotes(todo.notes), checklist: normalizedChecklist(todo, this.workspace.users, this.workspace.memberships), carryForwardCount: todo.carryForwardCount ?? 0, flagged: todo.flagged ?? false, isMine: todo.ownerId === this.workspace.currentUser.id }));
+    this.workspace.headlines = (this.workspace.headlines ?? []).map((headline) => ({ ...headline, title: typeof headline.title === 'string' ? headline.title.trim() : '', detail: typeof headline.detail === 'string' ? headline.detail.trim() : '' }));
     this.workspace.scorecardResults = this.workspace.scorecardResults ?? [];
     this.workspace.meetings = this.workspace.meetings.map((meeting) => {
       const team = this.workspace.teams.find((candidate) => candidate.id === meeting.teamId);
       const sections = team ? meetingSectionsFor(team) : meetingSectionsFor({ meetingSections: [] });
-      return normalizeMeeting({ ...meeting, agendaTotal: sections.length, sectionNotes: meeting.sectionNotes ?? {}, sectionDurations: meeting.sectionDurations ?? {}, attendeeRatings: meeting.attendeeRatings ?? [], idsIssueIds: meeting.idsIssueIds ?? [], idsAddedIssueIds: meeting.idsAddedIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: meeting.idsNotes ?? [], aiSummaryStatus: meeting.aiSummaryStatus ?? (meeting.status === 'closed' ? 'not-generated' : undefined), aiSummarySource: meeting.aiSummarySource }, team);
+      return normalizeMeeting({ ...meeting, agendaTotal: sections.length, sectionNotes: meeting.sectionNotes ?? {}, sectionDurations: meeting.sectionDurations ?? {}, attendeeRatings: meeting.attendeeRatings ?? [], idsIssueIds: meeting.idsIssueIds ?? [], idsAddedIssueIds: meeting.idsAddedIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: (meeting.idsNotes ?? []).map((note) => ({ ...note, note: sanitizeRichText(note.note) })), aiSummaryStatus: meeting.aiSummaryStatus ?? (meeting.status === 'closed' ? 'not-generated' : undefined), aiSummarySource: meeting.aiSummarySource }, team);
     });
   }
 
@@ -1150,10 +1157,61 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     return this.result();
   }
 
+  async reopenIssue(issueId: string, expectedVersion?: number) {
+    const issue = this.issue(issueId);
+    this.requireWrite(issue.teamId);
+    if (issue.status !== 'solved') return this.result();
+    this.requireVersion(issue.version, expectedVersion);
+    const timestamp = nowIso();
+    issue.status = 'open';
+    delete issue.solvedAt;
+    issue.idsNote = appendHistoricalNote(issue.idsNote, timestamp, 'Reopened for another IDS conversation.');
+    issue.updatedAt = timestamp;
+    issue.updatedBy = this.workspace.currentUser.id;
+    issue.version += 1;
+    this.audit('Reopened Issue', issue.id, `Reopened ${issue.title} for another IDS conversation.`, 'issue');
+    return this.result();
+  }
+
+  async createHeadline(input: Pick<Headline, 'teamId' | 'type' | 'title' | 'detail'> & { meetingId?: string; issueId?: string }) {
+    this.requireWrite(input.teamId);
+    const team = this.workspace.teams.find((candidate) => candidate.id === input.teamId);
+    if (!team) throw new WorkspaceApiError('NOT_FOUND', 'Team not found.');
+    if (team.nodeType !== 'operational') throw new WorkspaceApiError('VALIDATION', 'Grouping-only nodes cannot own Headlines.');
+    if (input.type !== 'win' && input.type !== 'concern') throw new WorkspaceApiError('VALIDATION', 'Headline type must be win or concern.');
+    if (!input.title.trim()) throw new WorkspaceApiError('VALIDATION', 'Headline title is required.');
+    if (input.meetingId) {
+      const meeting = this.workspace.meetings.find((candidate) => candidate.id === input.meetingId && candidate.teamId === input.teamId);
+      if (!meeting) throw new WorkspaceApiError('NOT_FOUND', 'Meeting not found.');
+      if (meeting.status === 'closed' || meeting.status === 'skipped') throw new WorkspaceApiError('CONFLICT', 'Headlines can only be added to an upcoming or in-progress meeting.');
+    }
+    if (input.issueId) {
+      const issue = this.issue(input.issueId);
+      if (issue.teamId !== input.teamId) throw new WorkspaceApiError('VALIDATION', 'Linked Headline Issue must belong to the same team.');
+    }
+    const timestamp = nowIso();
+    this.workspace.headlines.unshift({
+      id: `headline-${Date.now()}`,
+      teamId: input.teamId,
+      authorId: this.workspace.currentUser.id,
+      type: input.type,
+      title: input.title.trim(),
+      detail: typeof input.detail === 'string' ? input.detail.trim() : '',
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      updatedBy: this.workspace.currentUser.id,
+      version: 1,
+      ...(input.meetingId ? { meetingId: input.meetingId } : {}),
+      ...(input.issueId ? { issueId: input.issueId } : {}),
+    });
+    this.audit('Created Headline', this.workspace.headlines[0].id, input.title.trim(), 'team');
+    return this.result();
+  }
+
   async addIssue(input: Pick<Issue, 'title' | 'detail' | 'teamId' | 'raisedById'> & { horizon?: IssueHorizon; priority?: number; ownerId?: string; linkedRockId?: string; linkedScorecardMetricId?: string; linkedScorecardWeekStartDate?: string; idsNote?: string }) {
     this.requireWrite(input.teamId);
     const timestamp = nowIso();
-    const issue = { id: `issue-${Date.now()}`, teamId: input.teamId, title: input.title, detail: sanitizeRichText(input.detail), sourceTeamId: input.teamId, currentTeamId: input.teamId, raisedById: input.raisedById, ownerId: input.ownerId ?? input.raisedById, priority: input.priority ?? 1, status: 'open' as const, horizon: input.horizon ?? 'short-term', assignmentState: 'assigned' as const, ...(input.linkedRockId ? { linkedRockId: input.linkedRockId } : {}), ...(input.linkedScorecardMetricId ? { linkedScorecardMetricId: input.linkedScorecardMetricId } : {}), ...(input.linkedScorecardWeekStartDate ? { linkedScorecardWeekStartDate: input.linkedScorecardWeekStartDate } : {}), ...(input.idsNote ? { idsNote: input.idsNote } : {}), createdAt: timestamp, updatedAt: timestamp, updatedBy: this.workspace.currentUser.id, ageInDays: 0, ageBand: 'fresh' as const, meetingBand: issueMeetingBand(0, 'open'), version: 1, meetingsPassed: 0, escalationState: 'not-scheduled' as const, escalationLevel: 0 };
+    const issue = { id: `issue-${Date.now()}`, teamId: input.teamId, title: input.title, detail: sanitizeRichText(input.detail), sourceTeamId: input.teamId, currentTeamId: input.teamId, raisedById: input.raisedById, ownerId: input.ownerId ?? input.raisedById, priority: input.priority ?? 1, status: 'open' as const, horizon: input.horizon ?? 'short-term', assignmentState: 'assigned' as const, ...(input.linkedRockId ? { linkedRockId: input.linkedRockId } : {}), ...(input.linkedScorecardMetricId ? { linkedScorecardMetricId: input.linkedScorecardMetricId } : {}), ...(input.linkedScorecardWeekStartDate ? { linkedScorecardWeekStartDate: input.linkedScorecardWeekStartDate } : {}), ...(input.idsNote ? { idsNote: sanitizeRichText(input.idsNote) } : {}), createdAt: timestamp, updatedAt: timestamp, updatedBy: this.workspace.currentUser.id, ageInDays: 0, ageBand: 'fresh' as const, meetingBand: issueMeetingBand(0, 'open'), version: 1, meetingsPassed: 0, escalationState: 'not-scheduled' as const, escalationLevel: 0 };
     this.workspace.issues.unshift(issue);
     this.audit('Created Issue', this.workspace.issues[0].id, input.title, 'issue');
     return this.result();
@@ -1169,7 +1227,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
       ...(input.priority !== undefined ? { priority: input.priority } : {}),
       ...(input.horizon !== undefined ? { horizon: input.horizon } : {}),
       ...(input.ownerId !== undefined ? { ownerId: input.ownerId } : {}),
-      ...(input.idsNote !== undefined ? { idsNote: input.idsNote } : {}),
+      ...(input.idsNote !== undefined ? { idsNote: sanitizeRichText(input.idsNote) } : {}),
     };
     Object.assign(issue, allowedInput, { updatedAt: nowIso(), updatedBy: this.workspace.currentUser.id, version: issue.version + 1 });
     this.audit('Updated Issue', issue.id, `Updated ${issue.title}.`, 'issue');
@@ -1180,13 +1238,14 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const issue = this.issue(issueId);
     this.requireWrite(issue.teamId);
     this.requireVersion(issue.version, expectedVersion);
-    if (!note.trim()) throw new WorkspaceApiError('VALIDATION', 'Add a note before saving.');
+    const cleanNote = sanitizeRichText(note);
+    if (!richTextToPlainText(cleanNote)) throw new WorkspaceApiError('VALIDATION', 'Add a note before saving.');
     const meeting = this.workspace.meetings.find((item) => item.id === meetingId && item.teamId === issue.teamId);
     if (!meeting) throw new WorkspaceApiError('NOT_FOUND', 'Meeting record not found.');
     if (meeting.status === 'closed') throw new WorkspaceApiError('CONFLICT', 'Closed meetings cannot receive new IDS notes.');
     if (!meeting.idsIssueIds.includes(issue.id) && meeting.idsIssueIds.length >= MAX_IDS_ISSUES) throw new WorkspaceApiError('VALIDATION', `Select no more than ${MAX_IDS_ISSUES} Issues for an L10.`);
     const timestamp = nowIso();
-    const entry = { id: `meeting-note-${Date.now()}`, meetingId, issueId, authorId: this.workspace.currentUser.id, note: note.trim(), createdAt: timestamp };
+    const entry = { id: `meeting-note-${Date.now()}`, meetingId, issueId, authorId: this.workspace.currentUser.id, note: cleanNote, createdAt: timestamp };
     meeting.idsNotes.push(entry);
     if (!meeting.idsIssueIds.includes(issue.id)) {
       meeting.idsIssueIds.push(issue.id);
@@ -1195,12 +1254,12 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     meeting.idsTotal = meeting.idsIssueIds.length;
     meeting.updatedAt = timestamp;
     meeting.version = (meeting.version ?? 1) + 1;
-    issue.idsNote = appendHistoricalNote(issue.idsNote, timestamp, note);
+    issue.idsNote = appendHistoricalNote(issue.idsNote, timestamp, cleanNote);
     issue.status = issue.status === 'open' ? 'in-ids' : issue.status;
     issue.updatedAt = timestamp;
     issue.updatedBy = this.workspace.currentUser.id;
     issue.version += 1;
-    this.audit('Added meeting IDS note', issue.id, `${meeting.label}: ${note.trim()}`, 'issue');
+    this.audit('Added meeting IDS note', issue.id, `${meeting.label}: ${richTextToPlainText(cleanNote)}`, 'issue');
     return this.result();
   }
 
@@ -1782,7 +1841,8 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const timestamp = nowIso();
     const sections = meetingSectionsFor(activeTeam);
     const ratings = attendeeRatings ?? [];
-    if (attendeeRatings !== undefined && (!Array.isArray(attendeeRatings) || attendeeRatings.some((entry) => !entry || typeof entry.attendeeId !== 'string' || !Number.isInteger(entry.rating) || entry.rating < 1 || entry.rating > 10))) throw new WorkspaceApiError('VALIDATION', 'Each attendee rating must be a whole number from 1 to 10.');
+    if (attendeeRatings !== undefined && (!Array.isArray(attendeeRatings) || attendeeRatings.some((entry) => !entry || typeof entry.attendeeId !== 'string' || !isValidMeetingRating(entry.rating)))) throw new WorkspaceApiError('VALIDATION', 'Each attendee rating must be a number from 0.5 to 10 in 0.5 increments.');
+    if (attendeeRatings === undefined && (typeof rating !== 'number' || !Number.isFinite(rating) || rating < 0 || rating > 10)) throw new WorkspaceApiError('VALIDATION', 'Meeting rating must be between 0 and 10.');
     if (attendeeRatings !== undefined && ratings.length !== meeting.attendeeIds.length) throw new WorkspaceApiError('VALIDATION', 'Enter a rating for each recorded attendee before closing the meeting.');
     if (attendeeRatings !== undefined && !canManage && this.workspace.currentUser.id !== meeting.facilitatorId) throw new WorkspaceApiError('FORBIDDEN', 'Only the meeting facilitator or a TeamLead can submit attendee ratings.');
     const attendeeIds = new Set(meeting.attendeeIds);
@@ -1794,7 +1854,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     meeting.version = (meeting.version ?? 1) + 1;
     meeting.agendaProgress = sections.length;
     meeting.agendaTotal = sections.length;
-    meeting.lastRating = Math.min(10, Math.max(0, rating));
+    meeting.lastRating = averageMeetingRating(ratings) ?? Math.min(10, Math.max(0, rating));
     if (attendeeRatings !== undefined) meeting.attendeeRatings = ratings.map((entry) => ({ ...entry }));
     meeting.idsTotal = meeting.idsIssueIds.length;
     meeting.idsSolved = meeting.idsIssueIds.filter((issueId) => this.workspace.issues.find((issue) => issue.id === issueId)?.status === 'solved').length;
@@ -1879,13 +1939,13 @@ function mapSnapshot(snapshot: ApiSnapshot): Workspace {
     memberships: snapshot.memberships.map(serverMembership),
     rocks: snapshot.rocks.map((rock) => ({ ...stripLegacyRockProgress(rock), id: rock.id, notes: sanitizeRichText(rock.notes), tasks: tasksByRock.get(rock.id) ?? [] })),
     todos: snapshot.todos.map((todo) => ({ ...todo, notes: sanitizeTodoNotes(todo.notes), checklist: normalizedChecklist(todo, snapshot.users, snapshot.memberships) })),
-    issues: snapshot.issues.map((issue) => ({ ...issue, detail: sanitizeRichText(issue.detail), meetingsPassed: issue.meetingsPassed ?? 0, meetingBand: issueMeetingBand(issue.meetingsPassed ?? 0, issue.status), escalationState: issue.escalationState ?? 'not-scheduled', escalationLevel: issue.escalationLevel ?? 0 })),
+    issues: snapshot.issues.map((issue) => ({ ...issue, detail: sanitizeRichText(issue.detail), idsNote: issue.idsNote ? sanitizeRichText(issue.idsNote) : undefined, meetingsPassed: issue.meetingsPassed ?? 0, meetingBand: issueMeetingBand(issue.meetingsPassed ?? 0, issue.status), escalationState: issue.escalationState ?? 'not-scheduled', escalationLevel: issue.escalationLevel ?? 0 })),
     messages: snapshot.messages,
     transfers: snapshot.transfers,
     notifications: snapshot.notifications,
     metrics: snapshot.metrics,
     scorecardResults: snapshot.scorecardResults ?? [],
-    headlines: snapshot.headlines,
+    headlines: (snapshot.headlines ?? []).map((headline) => ({ ...headline, title: typeof headline.title === 'string' ? headline.title.trim() : '', detail: typeof headline.detail === 'string' ? headline.detail.trim() : '' })),
     meetings: snapshot.meetings.map((meeting) => normalizeMeeting(meeting, teams.find((team) => team.id === meeting.teamId))),
     activity: snapshot.audit.map(mapAuditEvent),
   };
@@ -1927,9 +1987,12 @@ function mergeMutationRecord(workspace: Workspace, value: MutationObject): boole
     }
     case 'issue': {
       const next = value as unknown as Issue;
-      replaceRecord(workspace.issues, ageFor({ ...next, detail: sanitizeRichText(next.detail) }, workspace.settings));
+      replaceRecord(workspace.issues, ageFor({ ...next, detail: sanitizeRichText(next.detail), idsNote: next.idsNote ? sanitizeRichText(next.idsNote) : undefined }, workspace.settings));
       return true;
     }
+    case 'headline':
+      replaceRecord(workspace.headlines, value as unknown as Headline);
+      return true;
     case 'scorecardMetric':
       replaceRecord(workspace.metrics, value as unknown as ScorecardMetric);
       return true;
@@ -2101,6 +2164,8 @@ export class HttpWorkspaceApi implements WorkspaceApi {
   async startIssue(issueId: string, expectedVersion?: number) { return this.mutate(`/issues/${issueId}/ids`, 'POST', undefined, expectedVersion, { refresh: true }); }
   async parkIssue(issueId: string, expectedVersion?: number) { return this.mutate(`/issues/${issueId}/park`, 'POST', undefined, expectedVersion, { refresh: true }); }
   async solveIssue(issueId: string, input: SolveIssueInput, expectedVersion?: number) { return this.mutate(`/issues/${issueId}/solve`, 'POST', input, expectedVersion, { refresh: true }); }
+  async reopenIssue(issueId: string, expectedVersion?: number) { return this.mutate(`/issues/${issueId}/reopen`, 'POST', undefined, expectedVersion, { refresh: true }); }
+  async createHeadline(input: Pick<Headline, 'teamId' | 'type' | 'title' | 'detail'> & { meetingId?: string; issueId?: string }) { return this.mutate(`/teams/${input.teamId}/headlines`, 'POST', input, undefined, { refresh: true }); }
   async addIssue(input: Pick<Issue, 'title' | 'detail' | 'teamId' | 'raisedById'> & { horizon?: IssueHorizon; priority?: number; ownerId?: string; linkedRockId?: string; linkedScorecardMetricId?: string; linkedScorecardWeekStartDate?: string; idsNote?: string }) { return this.mutate(`/teams/${input.teamId}/issues`, 'POST', input); }
   async updateIssue(issueId: string, input: Partial<Pick<Issue, 'title' | 'detail' | 'priority' | 'horizon' | 'ownerId' | 'idsNote'>>, expectedVersion?: number) { return this.mutate(`/issues/${issueId}`, 'PATCH', input, expectedVersion); }
   async addMeetingIssueNote(issueId: string, meetingId: string, note: string, expectedVersion?: number) {

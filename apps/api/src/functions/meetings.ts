@@ -3,7 +3,7 @@ import { expectedVersion, isResponse, repositoryErrorResponse, requestJson, requ
 import { verifyAiSignature, dispatchMeetingSummaryJob } from '../ai.js';
 import { environmentRepositories } from '../data/services.js';
 import type { WorkspaceRepository } from '../data/repository.js';
-import type { EnvironmentId, MeetingAiSummary, MeetingReviewFilter, MeetingReviewQuery, MeetingReviewStatus, MeetingSection } from '../domain.js';
+import { isValidMeetingRating, type EnvironmentId, type MeetingAiSummary, type MeetingReviewFilter, type MeetingReviewQuery, type MeetingReviewStatus, type MeetingSection } from '../domain.js';
 
 const meetingSections = new Set<MeetingSection>(['segue', 'scorecard', 'rock-review', 'headlines', 'todo-review', 'ids', 'conclude']);
 const reviewFilters = new Set<MeetingReviewFilter | MeetingReviewStatus>(['attention', 'completed', 'skipped', 'all', 'upcoming', 'in-progress', 'closed', 'missed', 'overdue']);
@@ -83,7 +83,7 @@ async function closeMeetingHandler(request: HttpRequest, _context: InvocationCon
   if (!teamId || !meetingId) return { status: 422, jsonBody: { error: 'teamId and meetingId are required', code: 'VALIDATION' } };
   try {
     const body = await requestJson<{ recap?: string; rating?: number; attendeeRatings?: unknown }>(request);
-    if (body.attendeeRatings !== undefined && (!Array.isArray(body.attendeeRatings) || body.attendeeRatings.some((entry) => !entry || typeof entry !== 'object' || typeof (entry as { attendeeId?: unknown }).attendeeId !== 'string' || !Number.isInteger((entry as { rating?: unknown }).rating)))) return { status: 422, jsonBody: { error: 'attendeeRatings must contain attendeeId and whole-number rating values.', code: 'VALIDATION' } };
+    if (body.attendeeRatings !== undefined && (!Array.isArray(body.attendeeRatings) || body.attendeeRatings.some((entry) => !entry || typeof entry !== 'object' || typeof (entry as { attendeeId?: unknown }).attendeeId !== 'string' || !isValidMeetingRating((entry as { rating?: unknown }).rating)))) return { status: 422, jsonBody: { error: 'attendeeRatings must contain attendeeId and ratings from 0.5 to 10 in 0.5 increments.', code: 'VALIDATION' } };
     const attendeeRatings = body.attendeeRatings as Array<{ attendeeId: string; rating: number }> | undefined;
     const meeting = await repository.closeMeeting(teamId, meetingId, body.recap ?? '', body.rating ?? 0, principal.userId, expectedVersion(request), attendeeRatings);
     await dispatchSummary(repository, meeting, principal.userId);
