@@ -144,6 +144,53 @@ linked IDS Issue on the fourth rollover. Dates are validated and stored as
 `YYYY-MM-DD`; completed, unchanged, and earlier-date edits do not count. There
 is no separate move-forward endpoint or button.
 
+## Quarter history, next-quarter planning, and the team V/TO
+
+The workspace header includes a planning-quarter selector. It starts on the
+current quarter, but can be switched to a past quarter to review historical
+Rocks, Issues, To-Dos, Headlines, and completed L10 records. New Rocks, Issues,
+and To-Dos are assigned to the selected quarter, so the next-quarter workflow
+is:
+
+1. Select the upcoming quarter.
+2. Open Rocks and add the team’s 90-day priorities.
+3. Open Vision / Traction and link the selected Rocks to the team’s V/TO.
+
+Rocks, To-Dos, Headlines, and meetings retain their quarter association for
+history. Issues retain their originating/planning quarter, but unresolved
+Issues remain visible in the active IDS queue until they are solved. Historical
+L10 backfill is available from Past meetings for a selected past or current
+quarter; it records the date, time, facilitator, attendees, rating, recap, IDS
+notes, and an audit event without changing the live meeting cadence.
+
+Vision / Traction is a team-owned document rather than a quarter record. It
+implements the eight EOS V/TO questions:
+
+- Core Values.
+- Core Focus: purpose/cause/passion and niche.
+- 10-Year Target.
+- Marketing Strategy: Target Market/The List, Three Uniques, Proven Process,
+  and Guarantee.
+- 3-Year Picture: target date, financial or value targets, headcount/capacity,
+  and a vivid description.
+- 1-Year Plan: revenue/value, profit/margin, measurables, and annual goals.
+- Quarterly Rocks, linked to the team’s Rock records.
+- Issues List, linked to the team’s Issue records.
+
+Saving a V/TO creates an immutable, numbered version snapshot with an effective
+date, change summary, saving user, and optimistic concurrency check. TeamLead
+and OrgAdmin users can create versions; other authorized users can review the
+current V/TO and its history. The implementation follows the EOS V/TO and
+Vision Component model described by [EOS Worldwide](https://www.eosworldwide.com/vto)
+and [The Vision Component](https://www.eosworldwide.com/vision-component).
+
+The API contracts are:
+
+- `GET /api/workspace?quarterId={quarterId}` for the selected quarter context.
+- `GET /api/teams/{teamId}/vto` and `PUT /api/teams/{teamId}/vto` for the team
+  V/TO and versioned saves.
+- `POST /api/teams/{teamId}/meetings/history` for an audited historical L10.
+
 ## Work item audit trails
 
 Rocks, To-Dos, and Issues retain immutable server-side audit events for creation,

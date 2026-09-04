@@ -9,8 +9,8 @@ async function createRockHandler(request: HttpRequest, _context: InvocationConte
   const teamId = request.params.teamId;
   if (!teamId) return { status: 422, jsonBody: { error: 'teamId is required', code: 'VALIDATION' } };
   try {
-    const body = await requestJson<Partial<Pick<RockRecord, 'title' | 'description' | 'notes' | 'ownerId' | 'dueDate' | 'priority'>>>(request);
-    const rock = await repository.createRock({ teamId, title: body.title ?? '', description: body.description, notes: body.notes, ownerId: body.ownerId ?? principal.userId, dueDate: body.dueDate, priority: body.priority }, principal.userId);
+    const body = await requestJson<Partial<Pick<RockRecord, 'title' | 'description' | 'notes' | 'ownerId' | 'dueDate' | 'priority'>> & { quarterId?: string }>(request);
+    const rock = await repository.createRock({ teamId, quarterId: body.quarterId, title: body.title ?? '', description: body.description, notes: body.notes, ownerId: body.ownerId ?? principal.userId, dueDate: body.dueDate, priority: body.priority }, principal.userId);
     return responseWithEtag(rock, `W/\"${rock.version}\"`, 201);
   } catch (error) {
     return repositoryErrorResponse(error);
@@ -69,8 +69,8 @@ async function createTodoHandler(request: HttpRequest, _context: InvocationConte
   const teamId = request.params.teamId;
   if (!teamId) return { status: 422, jsonBody: { error: 'teamId is required', code: 'VALIDATION' } };
   try {
-    const body = await requestJson<Partial<Pick<TodoRecord, 'title' | 'notes' | 'ownerId' | 'dueDate' | 'linkedRockTaskId' | 'sourceIssueId'>>>(request);
-    const todo = await repository.createTodo({ teamId, title: body.title ?? '', notes: body.notes, ownerId: body.ownerId ?? principal.userId, dueDate: body.dueDate ?? new Date().toISOString().slice(0, 10), linkedRockTaskId: body.linkedRockTaskId, sourceIssueId: body.sourceIssueId }, principal.userId);
+    const body = await requestJson<Partial<Pick<TodoRecord, 'title' | 'notes' | 'ownerId' | 'dueDate' | 'linkedRockTaskId' | 'sourceIssueId'>> & { quarterId?: string }>(request);
+    const todo = await repository.createTodo({ teamId, quarterId: body.quarterId, title: body.title ?? '', notes: body.notes, ownerId: body.ownerId ?? principal.userId, dueDate: body.dueDate ?? new Date().toISOString().slice(0, 10), linkedRockTaskId: body.linkedRockTaskId, sourceIssueId: body.sourceIssueId }, principal.userId);
     return responseWithEtag(todo, `W/\"${todo.version}\"`, 201);
   } catch (error) {
     return repositoryErrorResponse(error);
@@ -166,8 +166,8 @@ async function createIssueHandler(request: HttpRequest, _context: InvocationCont
   const teamId = request.params.teamId;
   if (!teamId) return { status: 422, jsonBody: { error: 'teamId is required', code: 'VALIDATION' } };
   try {
-    const body = await requestJson<{ title?: string; detail?: string; priority?: number; horizon?: 'short-term' | 'long-term'; ownerId?: string; linkedRockId?: string; linkedScorecardMetricId?: string; linkedScorecardWeekStartDate?: string; idsNote?: string }>(request);
-    const issue = await repository.createIssue({ teamId, title: body.title ?? '', detail: body.detail, priority: body.priority, horizon: body.horizon, ownerId: body.ownerId, linkedRockId: body.linkedRockId, linkedScorecardMetricId: body.linkedScorecardMetricId, linkedScorecardWeekStartDate: body.linkedScorecardWeekStartDate, idsNote: body.idsNote, raisedById: principal.userId }, principal.userId);
+    const body = await requestJson<{ title?: string; detail?: string; priority?: number; horizon?: 'short-term' | 'long-term'; ownerId?: string; quarterId?: string; linkedRockId?: string; linkedScorecardMetricId?: string; linkedScorecardWeekStartDate?: string; idsNote?: string }>(request);
+    const issue = await repository.createIssue({ teamId, quarterId: body.quarterId, title: body.title ?? '', detail: body.detail, priority: body.priority, horizon: body.horizon, ownerId: body.ownerId, linkedRockId: body.linkedRockId, linkedScorecardMetricId: body.linkedScorecardMetricId, linkedScorecardWeekStartDate: body.linkedScorecardWeekStartDate, idsNote: body.idsNote, raisedById: principal.userId }, principal.userId);
     return responseWithEtag(issue, `W/\"${issue.version}\"`, 201);
   } catch (error) {
     return repositoryErrorResponse(error);

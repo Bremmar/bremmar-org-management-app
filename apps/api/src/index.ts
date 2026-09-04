@@ -13,3 +13,4 @@ import './functions/meetings.js';
 import './functions/scorecard.js';
 import './functions/audit.js';
 import './functions/headlines.js';
+import './functions/vto.js';
