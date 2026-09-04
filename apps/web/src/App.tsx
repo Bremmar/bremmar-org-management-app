@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, FormEvent, ReactNode } from 'react';
 import { workspaceApi, WorkspaceApiError, type SolveIssueInput } from './api';
 import { buildInfo } from './buildInfo';
@@ -1756,11 +1756,29 @@ function AuditTrailModal({ workspace, entityType, entity, onClose }: { workspace
 }
 
 function RichTextEditor({ name, value, disabled, placeholder, onChange }: { name: string; value: string; disabled: boolean; placeholder: string; onChange?: (value: string) => void }) {
-  const [html, setHtml] = useState(() => sanitizeTodoNotes(value));
+  const initialHtml = sanitizeTodoNotes(value);
+  const [html, setHtml] = useState(initialHtml);
   const editorRef = useRef<HTMLDivElement>(null);
-  useEffect(() => setHtml(sanitizeTodoNotes(value)), [value]);
+  const lastEmittedHtml = useRef(initialHtml);
+  const hasMounted = useRef(false);
+
+  // Keep the editable DOM uncontrolled while typing. Replacing innerHTML on
+  // every input causes browsers to lose the caret position, which makes text
+  // appear to be entered right-to-left. Only reconcile values from outside
+  // this editor (for example, when a different record is loaded).
+  useLayoutEffect(() => {
+    const next = sanitizeTodoNotes(value);
+    const editor = editorRef.current;
+    const wasEmittedByThisEditor = hasMounted.current && next === lastEmittedHtml.current;
+    if (!wasEmittedByThisEditor && editor && editor.innerHTML !== next) editor.innerHTML = next;
+    lastEmittedHtml.current = next;
+    setHtml((current) => current === next ? current : next);
+    hasMounted.current = true;
+  }, [value]);
+
   const updateHtml = (nextValue: string) => {
     const next = sanitizeTodoNotes(nextValue);
+    lastEmittedHtml.current = next;
     setHtml(next);
     onChange?.(next);
   };
@@ -1770,7 +1788,7 @@ function RichTextEditor({ name, value, disabled, placeholder, onChange }: { name
     document.execCommand(command);
     updateHtml(editorRef.current?.innerHTML ?? '');
   };
-  return <div className={`rich-text-editor ${disabled ? 'rich-text-editor-disabled' : ''}`}><div className="rich-text-toolbar" aria-label="Notes formatting"><button type="button" onMouseDown={(event) => { event.preventDefault(); format('bold'); }} disabled={disabled} aria-label="Bold"><strong>B</strong></button><button type="button" onMouseDown={(event) => { event.preventDefault(); format('italic'); }} disabled={disabled} aria-label="Italic"><em>I</em></button><button type="button" onMouseDown={(event) => { event.preventDefault(); format('insertUnorderedList'); }} disabled={disabled} aria-label="Bulleted list">• list</button><button type="button" onMouseDown={(event) => { event.preventDefault(); format('insertOrderedList'); }} disabled={disabled} aria-label="Numbered list">1. list</button></div><div ref={editorRef} className="rich-text-input" contentEditable={!disabled} suppressContentEditableWarning dangerouslySetInnerHTML={{ __html: html }} data-placeholder={placeholder} onInput={(event) => updateHtml(event.currentTarget.innerHTML)} /><input type="hidden" name={name} value={html} /></div>;
+  return <div className={`rich-text-editor ${disabled ? 'rich-text-editor-disabled' : ''}`}><div className="rich-text-toolbar" aria-label="Notes formatting"><button type="button" onMouseDown={(event) => { event.preventDefault(); format('bold'); }} disabled={disabled} aria-label="Bold"><strong>B</strong></button><button type="button" onMouseDown={(event) => { event.preventDefault(); format('italic'); }} disabled={disabled} aria-label="Italic"><em>I</em></button><button type="button" onMouseDown={(event) => { event.preventDefault(); format('insertUnorderedList'); }} disabled={disabled} aria-label="Bulleted list">• list</button><button type="button" onMouseDown={(event) => { event.preventDefault(); format('insertOrderedList'); }} disabled={disabled} aria-label="Numbered list">1. list</button></div><div ref={editorRef} className="rich-text-input" contentEditable={!disabled} dir="ltr" suppressContentEditableWarning data-placeholder={placeholder} onInput={(event) => updateHtml(event.currentTarget.innerHTML)} /><input type="hidden" name={name} value={html} /></div>;
 }
 
 function RichTextViewer({ value, className }: { value: string; className?: string }) {

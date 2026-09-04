@@ -1482,7 +1482,7 @@ img { max-width: 100%; }
 
 .rich-text-toolbar button:hover:not(:disabled), .rich-text-toolbar button:focus-visible:not(:disabled) { color: var(--brand); background: var(--brand-soft); }
 
-.rich-text-input { min-height: 105px; padding: 11px 12px; color: #53647c; font-size: 13px; line-height: 1.6; outline: 0; }
+.rich-text-input { min-height: 105px; padding: 11px 12px; color: #53647c; direction: ltr; font-size: 13px; line-height: 1.6; outline: 0; text-align: left; }
 
 .rich-text-input:empty::before { content: attr(data-placeholder); color: #a7b1bf; pointer-events: none; }
 
