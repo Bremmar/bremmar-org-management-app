@@ -37,6 +37,21 @@ jobs:
           VITE_LOCAL_POC_MODE: 'false'
         run: npm run build:web
 
+      - name: Validate Static Web Apps callback route
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const config = JSON.parse(fs.readFileSync('apps/web/dist/staticwebapp.config.json', 'utf8'));
+          const routes = Array.isArray(config.routes) ? config.routes : [];
+          const callbackIndex = routes.findIndex((rule) => rule.route === '/api/internal/meeting-summary-callback');
+          const catchAllIndex = routes.findIndex((rule) => rule.route === '/*');
+          const callbackIsAnonymous = callbackIndex >= 0 && JSON.stringify(routes[callbackIndex].allowedRoles) === '["anonymous"]';
+
+          if (callbackIndex < 0 || catchAllIndex < 0 || callbackIndex >= catchAllIndex || !callbackIsAnonymous) {
+            throw new Error('The anonymous meeting-summary callback route must precede the authenticated catch-all route.');
+          }
+          NODE
+
       - name: Build the Functions API
         run: npm run build:api
 

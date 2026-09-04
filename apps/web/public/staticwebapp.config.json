@@ -8,6 +8,10 @@
   },
   "routes": [
     {
+      "route": "/api/internal/meeting-summary-callback",
+      "allowedRoles": ["anonymous"]
+    },
+    {
       "route": "/*",
       "allowedRoles": ["authenticated"]
     }
