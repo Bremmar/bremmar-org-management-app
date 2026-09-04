@@ -385,9 +385,9 @@ test('meeting section notes and IDS ordering are versioned, auditable, and close
   let workspace = await repository.getTeamWorkspace('leadership', 'ava-khan');
   let meeting = workspace.meetings[0];
 
-  meeting = await repository.updateMeetingSectionNote('leadership', meeting.id, 'scorecard', 'The facilitator captured the weekly variance.', 'ava-khan', meeting.version);
-  meeting = await repository.updateMeetingSectionNote('leadership', meeting.id, 'headlines', 'A customer renewal needs an owner before Friday.', 'ava-khan', meeting.version);
-  assert.deepEqual(meeting.sectionNotes, { scorecard: 'The facilitator captured the weekly variance.', headlines: 'A customer renewal needs an owner before Friday.' });
+  meeting = await repository.updateMeetingSectionNote('leadership', meeting.id, 'scorecard', '<p><strong>The facilitator captured the weekly variance.</strong></p><script>alert(1)</script>', 'ava-khan', meeting.version);
+  meeting = await repository.updateMeetingSectionNote('leadership', meeting.id, 'headlines', '<p><em>A customer renewal needs an owner before Friday.</em></p>', 'ava-khan', meeting.version);
+  assert.deepEqual(meeting.sectionNotes, { scorecard: '<p><strong>The facilitator captured the weekly variance.</strong></p>', headlines: '<p><em>A customer renewal needs an owner before Friday.</em></p>' });
   await rejectsWithCode(repository.updateMeetingSectionNote('leadership', meeting.id, 'scorecard', 'Stale note', 'ava-khan', meeting.version - 1), 'CONFLICT');
 
   const reordered = await repository.reorderMeetingIssues('leadership', meeting.id, [secondIssue.id, firstIssue.id], 'ava-khan', meeting.version);
@@ -398,6 +398,9 @@ test('meeting section notes and IDS ordering are versioned, auditable, and close
   const closed = await repository.closeMeeting('leadership', meeting.id, 'Two decisions recorded.', 9, 'ava-khan', reordered.version);
   assert.deepEqual(closed.actionSummary, { todosCreated: 0, issuesReviewedInIds: 2, issuesAddedToIds: 2, issuesSolved: 0 });
   assert.match(closed.recap, /Actions: 0 To-Dos created · 2 Issues reviewed in IDS · 2 Issues added to IDS · 0 Issues solved\./);
+  assert.match(closed.recap, /scorecard: The facilitator captured the weekly variance\./);
+  assert.match(closed.recap, /headlines: A customer renewal needs an owner before Friday\./);
+  assert.doesNotMatch(closed.recap, /<strong>|<em>/);
   const nextMeeting = (await repository.getTeamWorkspace('leadership', 'ava-khan')).meetings.find((candidate) => candidate.status === 'upcoming')!;
   assert.deepEqual(nextMeeting.idsIssueIds, [secondIssue.id, firstIssue.id]);
   assert.deepEqual(nextMeeting.idsAddedIssueIds, []);
@@ -632,6 +635,7 @@ test('Headlines can be submitted ahead of an L10, IDS notes retain safe rich tex
   const meeting = before.meetings.find((candidate) => candidate.status === 'upcoming')!;
   const headline = await repository.createHeadline({ teamId: 'projects', meetingId: meeting.id, type: 'win', title: 'Pilot feedback is ready', detail: 'The team has enough feedback to make the next decision.' }, 'marcus-lee');
   assert.deepEqual({ kind: headline.kind, pk: headline.pk, meetingId: headline.meetingId, authorId: headline.authorId }, { kind: 'headline', pk: 'org', meetingId: meeting.id, authorId: 'marcus-lee' });
+  assert.equal(headline.detail, '<p>The team has enough feedback to make the next decision.</p>');
   const snapshot = await repository.getWorkspaceSnapshot('marcus-lee');
   assert.equal(snapshot.headlines.some((candidate) => candidate.id === headline.id && candidate.meetingId === meeting.id), true);
   assert.equal((await repository.getTeamWorkspace('projects', 'marcus-lee')).headlines.some((candidate) => candidate.id === headline.id), true);

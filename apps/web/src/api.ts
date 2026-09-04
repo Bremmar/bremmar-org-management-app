@@ -245,7 +245,7 @@ function meetingRecap(workspace: Workspace, team: Team, meeting: Workspace['meet
   if (meeting.attendeeRatings?.length) lines.push(`Meeting rating: ${meeting.lastRating}/10 average · Attendee ratings: ${meeting.attendeeRatings.map((entry) => `${workspace.users.find((user) => user.id === entry.attendeeId)?.name ?? entry.attendeeId} ${entry.rating}/10`).join('; ')}`);
   lines.push('');
   for (const section of sections) {
-    const note = meeting.sectionNotes[section.id]?.trim();
+    const note = richTextToPlainText(meeting.sectionNotes[section.id]);
     if (note) lines.push(`${section.label}: ${note}`);
   }
   if (sections.some((section) => section.id === 'scorecard')) {
@@ -456,12 +456,12 @@ export class LocalWorkspaceApi implements WorkspaceApi {
       memberCount: this.workspace.memberships.filter((membership) => membership.teamId === team.id && membership.active).length,
     }));
     this.workspace.todos = this.workspace.todos.map((todo) => ({ ...todo, notes: sanitizeTodoNotes(todo.notes), checklist: normalizedChecklist(todo, this.workspace.users, this.workspace.memberships), carryForwardCount: todo.carryForwardCount ?? 0, flagged: todo.flagged ?? false, isMine: todo.ownerId === this.workspace.currentUser.id }));
-    this.workspace.headlines = (this.workspace.headlines ?? []).map((headline) => ({ ...headline, title: typeof headline.title === 'string' ? headline.title.trim() : '', detail: typeof headline.detail === 'string' ? headline.detail.trim() : '' }));
+    this.workspace.headlines = (this.workspace.headlines ?? []).map((headline) => ({ ...headline, title: typeof headline.title === 'string' ? headline.title.trim() : '', detail: typeof headline.detail === 'string' ? sanitizeRichText(headline.detail) : '' }));
     this.workspace.scorecardResults = this.workspace.scorecardResults ?? [];
     this.workspace.meetings = this.workspace.meetings.map((meeting) => {
       const team = this.workspace.teams.find((candidate) => candidate.id === meeting.teamId);
       const sections = team ? meetingSectionsFor(team) : meetingSectionsFor({ meetingSections: [] });
-      return normalizeMeeting({ ...meeting, agendaTotal: sections.length, sectionNotes: meeting.sectionNotes ?? {}, sectionDurations: meeting.sectionDurations ?? {}, attendeeRatings: meeting.attendeeRatings ?? [], idsIssueIds: meeting.idsIssueIds ?? [], idsAddedIssueIds: meeting.idsAddedIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: (meeting.idsNotes ?? []).map((note) => ({ ...note, note: sanitizeRichText(note.note) })), aiSummaryStatus: meeting.aiSummaryStatus ?? (meeting.status === 'closed' ? 'not-generated' : undefined), aiSummarySource: meeting.aiSummarySource }, team);
+      return normalizeMeeting({ ...meeting, agendaTotal: sections.length, sectionNotes: Object.fromEntries(Object.entries(meeting.sectionNotes ?? {}).map(([section, note]) => [section, sanitizeRichText(note)])), sectionDurations: meeting.sectionDurations ?? {}, attendeeRatings: meeting.attendeeRatings ?? [], idsIssueIds: meeting.idsIssueIds ?? [], idsAddedIssueIds: meeting.idsAddedIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: (meeting.idsNotes ?? []).map((note) => ({ ...note, note: sanitizeRichText(note.note) })), aiSummaryStatus: meeting.aiSummaryStatus ?? (meeting.status === 'closed' ? 'not-generated' : undefined), aiSummarySource: meeting.aiSummarySource }, team);
     });
   }
 
@@ -1196,7 +1196,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
       authorId: this.workspace.currentUser.id,
       type: input.type,
       title: input.title.trim(),
-      detail: typeof input.detail === 'string' ? input.detail.trim() : '',
+      detail: typeof input.detail === 'string' ? sanitizeRichText(input.detail) : '',
       createdAt: timestamp,
       updatedAt: timestamp,
       updatedBy: this.workspace.currentUser.id,
@@ -1271,7 +1271,8 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     if (meeting.status === 'closed') throw new WorkspaceApiError('CONFLICT', 'Closed meetings cannot receive notes.');
     if (!['segue', 'scorecard', 'rock-review', 'headlines', 'todo-review', 'ids', 'conclude'].includes(section)) throw new WorkspaceApiError('VALIDATION', 'Invalid meeting section.');
     if (typeof note !== 'string') throw new WorkspaceApiError('VALIDATION', 'Meeting note must be a string.');
-    const normalizedNote = note.trim();
+    const cleanNote = sanitizeRichText(note);
+    const normalizedNote = richTextToPlainText(cleanNote) ? cleanNote.trim() : '';
     const sectionNotes = { ...meeting.sectionNotes };
     if (normalizedNote) sectionNotes[section] = normalizedNote;
     else delete sectionNotes[section];

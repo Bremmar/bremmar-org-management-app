@@ -1,4 +1,4 @@
-export type ViewId = 'overview' | 'company' | 'meeting' | 'meeting-history' | 'rocks' | 'todos' | 'issues' | 'messages' | 'scorecard' | 'admin' | 'profile';
+export type ViewId = 'overview' | 'company' | 'meeting' | 'meeting-prep' | 'meeting-history' | 'rocks' | 'todos' | 'issues' | 'messages' | 'scorecard' | 'admin' | 'profile';
 
 export type RockStatus = 'on-track' | 'off-track' | 'complete';
 export type RockTaskStatus = 'open' | 'in-progress' | 'done';

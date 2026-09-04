@@ -78,6 +78,7 @@ describe('LocalWorkspaceApi', () => {
     const upcoming = workspace.meetings.find((candidate) => candidate.teamId === 'projects' && candidate.status === 'upcoming')!;
     workspace = await memberApi.createHeadline({ teamId: 'projects', meetingId: upcoming.id, type: 'concern', title: 'A customer question needs context', detail: 'Add this to the room before the meeting.' });
     expect(workspace.headlines[0]).toMatchObject({ teamId: 'projects', meetingId: upcoming.id, authorId: 'maya-green', type: 'concern' });
+    expect(workspace.headlines[0].detail).toBe('<p>Add this to the room before the meeting.</p>');
 
     const issue = workspace.issues.find((candidate) => candidate.id === 'issue-project-scope')!;
     workspace = await memberApi.addMeetingIssueNote(issue.id, upcoming.id, '<p><strong>Decision</strong></p><script>alert(1)</script><p>Use the checklist.</p>', issue.version);
@@ -571,9 +572,10 @@ describe('LocalWorkspaceApi', () => {
     const metric = workspace.metrics.find((candidate) => candidate.id === 'metric-evidence')!;
     const result = workspace.scorecardResults.find((candidate) => candidate.metricId === metric.id && candidate.weekStartDate === meeting.weekStartDate)!;
 
-    workspace = await api.updateMeetingSectionNote('cybersecurity', meeting.id, 'scorecard', 'Capture the assignment gap and owner.', meeting.version);
+    workspace = await api.updateMeetingSectionNote('cybersecurity', meeting.id, 'scorecard', '<p><strong>Capture the assignment gap</strong> and owner.</p><script>alert(1)</script>', meeting.version);
     const savedMeeting = workspace.meetings.find((candidate) => candidate.id === meeting.id)!;
-    expect(savedMeeting.sectionNotes.scorecard).toBe('Capture the assignment gap and owner.');
+    expect(savedMeeting.sectionNotes.scorecard).toContain('<strong>Capture the assignment gap</strong>');
+    expect(savedMeeting.sectionNotes.scorecard).not.toMatch(/script|alert/i);
     expect(savedMeeting.version).toBe((meeting.version ?? 1) + 1);
 
     workspace = await api.createIssueFromScorecard(metric.id, result.weekStartDate, result.version);
