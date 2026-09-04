@@ -433,6 +433,8 @@ export interface AuditEventRecord extends WorkspaceRecord {
   eventType: 'team' | 'membership' | 'rock' | 'todo' | 'issue' | 'transfer' | 'profile' | 'meeting' | 'admin';
 }
 
+export type AuditEntityType = 'rock' | 'todo' | 'issue';
+
 export interface DashboardSummary {
   teamId: string;
   rocks: { total: number; onTrack: number; offTrack: number; complete: number };

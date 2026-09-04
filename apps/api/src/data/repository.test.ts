@@ -470,6 +470,33 @@ test('Rock Notes and Issue Original Context use the same safe rich-text subset',
   assert.doesNotMatch(updatedIssue.detail, /img|onerror/i);
 });
 
+test('work item audit trails are entity-scoped and team-authorized', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const before = await repository.getTeamWorkspace('projects', 'marcus-lee');
+  const rock = before.rocks.find((item) => item.id === 'rock-project-kickoff')!;
+  const updatedRock = await repository.updateRock(rock.id, { notes: 'Audit the handoff owner.' }, 'marcus-lee', rock.version);
+  const todo = before.todos.find((item) => item.id === 'todo-project-kickoff')!;
+  const updatedTodo = await repository.updateTodo(todo.id, { notes: 'Confirm the owner.' }, 'marcus-lee', todo.version);
+  const issue = before.issues.find((item) => item.id === 'issue-project-scope')!;
+  const updatedIssue = await repository.updateIssue(issue.id, { idsNote: 'Keep the owner matrix current.' }, 'marcus-lee', issue.version);
+  const issueMeeting = before.meetings.find((meeting) => meeting.teamId === issue.teamId)!;
+  await repository.addMeetingIssueNote(issue.id, issueMeeting.id, 'Discuss the owner matrix in IDS.', 'marcus-lee', updatedIssue.version);
+
+  const rockAudit = await repository.getAuditTrail('rock', updatedRock.id, 'marcus-lee');
+  const todoAudit = await repository.getAuditTrail('todo', updatedTodo.id, 'marcus-lee');
+  const issueAudit = await repository.getAuditTrail('issue', updatedIssue.id, 'marcus-lee');
+  assert.equal(rockAudit[0]?.actorId, 'marcus-lee');
+  assert.equal(rockAudit[0]?.target, updatedRock.id);
+  assert.equal(todoAudit[0]?.action, 'Updated To-Do');
+  assert.equal(todoAudit[0]?.target, updatedTodo.id);
+  assert.equal(issueAudit[0]?.action, 'Added meeting IDS note');
+  assert.equal(issueAudit[0]?.target, updatedIssue.id);
+  assert.ok(issueAudit.some((event) => event.action === 'Updated Issue'));
+  assert.ok(issueAudit.every((event) => event.target === updatedIssue.id));
+
+  await rejectsWithCode(repository.getAuditTrail('rock', 'rock-service-health', 'maya-green'), 'FORBIDDEN');
+});
+
 test('Issue resolution records the follow-up choice, source link, and idempotent history', async () => {
   const repository = new MemoryWorkspaceRepository();
   const noTodo = await repository.getIssue('issue-project-scope', 'marcus-lee');

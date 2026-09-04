@@ -17,6 +17,7 @@ import {
   scorecardTrendFor,
   weekStartDateFor,
   type AuditEventRecord,
+  type AuditEntityType,
   type CompanyOverview,
   type DeleteRockTaskResult,
   type DashboardSummary,
@@ -155,6 +156,7 @@ export interface WorkspaceRepository {
   getNotifications(userId: string): Promise<NotificationRecord[]>;
   markNotificationRead(notificationId: string, userId: string, expectedVersion?: number): Promise<NotificationRecord>;
   getIssue(issueId: string, userId: string): Promise<IssueRecord>;
+  getAuditTrail(entityType: AuditEntityType, entityId: string, userId: string): Promise<AuditEventRecord[]>;
   updateRockStatus(rockId: string, status: RockRecord['status'], actorId: string, expectedVersion?: number): Promise<RockRecord>;
   updateRock(rockId: string, input: Partial<Pick<RockRecord, 'title' | 'description' | 'notes' | 'ownerId' | 'dueDate' | 'priority'>>, actorId: string, expectedVersion?: number): Promise<RockRecord>;
   updateTodoStatus(todoId: string, status: TodoRecord['status'], actorId: string, expectedVersion?: number): Promise<TodoRecord>;
@@ -724,6 +726,22 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     return [...this.issues].reverse().find((issue) => issue.id === issueId && issue.assignmentState !== 'redirected') ?? null;
   }
 
+  protected auditTarget(entityType: AuditEntityType, entityId: string): WorkspaceRecord & { teamId: string } {
+    const target = entityType === 'rock'
+      ? this.rocks.find((rock) => rock.id === entityId)
+      : entityType === 'todo'
+        ? this.todos.find((todo) => todo.id === entityId)
+        : entityType === 'issue'
+          ? this.activeIssue(entityId)
+          : undefined;
+    if (!target) throw new RepositoryError('NOT_FOUND', `${entityType[0].toUpperCase()}${entityType.slice(1)} not found.`);
+    return target;
+  }
+
+  protected auditEventTypes(entityType: AuditEntityType): AuditEventRecord['eventType'][] {
+    return entityType === 'issue' ? ['issue', 'transfer', 'meeting'] : [entityType];
+  }
+
   protected getDescendantIds(teamId: string): string[] {
     const children = this.teams.filter((team) => team.parentTeamId === teamId && team.active).map((team) => team.teamId);
     return children.flatMap((child) => [child, ...this.getDescendantIds(child)]);
@@ -1009,6 +1027,15 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     if (!issue) throw new RepositoryError('NOT_FOUND', 'Issue not found.');
     this.requireRead(issue.teamId, userId);
     return clone(issueAge({ ...issue, detail: sanitizeRichText(issue.detail) }, this.settings));
+  }
+
+  async getAuditTrail(entityType: AuditEntityType, entityId: string, userId: string) {
+    const target = this.auditTarget(entityType, entityId);
+    this.requireRead(target.teamId, userId);
+    const eventTypes = new Set(this.auditEventTypes(entityType));
+    return clone(this.audit
+      .filter((event) => event.target === entityId && eventTypes.has(event.eventType))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt)));
   }
 
   async updateRockStatus(rockId: string, status: RockRecord['status'], actorId: string, expectedVersion?: number) {
@@ -2818,6 +2845,20 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
     const issue = records.find((item) => item.id === issueId && item.assignmentState !== 'redirected');
     if (!issue) throw new RepositoryError('NOT_FOUND', 'Issue not found.');
     return this.publicValue(issueAge({ ...issue, detail: sanitizeRichText(issue.detail) }, await this.ageSettings()));
+  }
+  async getAuditTrail(entityType: AuditEntityType, entityId: string, userId: string) {
+    await this.ensureLoaded();
+    const target = this.auditTarget(entityType, entityId);
+    this.requireRead(target.teamId, userId);
+    const eventTypes = new Set(this.auditEventTypes(entityType));
+    const events = await this.query<AuditEventRecord>('SELECT * FROM c WHERE c.pk = @pk AND c.kind = @kind AND c.target = @target', [
+      { name: '@pk', value: 'org' },
+      { name: '@kind', value: 'auditEvent' },
+      { name: '@target', value: entityId },
+    ], 'org');
+    return this.publicValue(clone(events
+      .filter((event) => eventTypes.has(event.eventType))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))));
   }
   async getIssueTransfer(transferId: string) { const records = await this.orgRecords<IssueTransferRecord>('issueTransfer'); const transfer = records.find((item) => item.id === transferId); if (!transfer) throw new RepositoryError('NOT_FOUND', 'Issue transfer not found.'); return this.publicValue(transfer); }
   async requestIssueTransfer(input: { issueId: string; destinationTeamId: string; requestedById: string; note?: string; idempotencyKey?: string }) { return this.withMutation(input.requestedById, () => super.requestIssueTransfer(input)); }

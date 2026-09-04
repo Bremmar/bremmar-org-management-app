@@ -106,6 +106,21 @@ linked IDS Issue on the fourth rollover. Dates are validated and stored as
 `YYYY-MM-DD`; completed, unchanged, and earlier-date edits do not count. There
 is no separate move-forward endpoint or button.
 
+## Work item audit trails
+
+Rocks, To-Dos, and Issues retain immutable server-side audit events for creation,
+updates, status changes, checklist changes, IDS actions, rollovers, and Issue
+transfers. The history is intentionally hidden from the normal card view; the
+card’s Audit trail action loads it on demand. The detail view shows the latest
+editor, version, timestamp, and each recorded change using the user’s initials.
+
+The authenticated API endpoint is:
+
+- `GET /api/audit/{entityType}/{entityId}` where `entityType` is `rock`, `todo`, or `issue`.
+
+The endpoint checks the signed-in user’s organization and team read access before
+returning events, so a selected team or item ID is never treated as proof of access.
+
 To-Dos can contain embedded checklists. New checklist items default to the
 To-Do owner, while assignment is limited to active members of the owning team;
 checklist changes use the parent To-Do version for optimistic concurrency and do

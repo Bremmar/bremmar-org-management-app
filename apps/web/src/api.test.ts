@@ -211,6 +211,33 @@ describe('LocalWorkspaceApi', () => {
     expect(updatedIssue.detail).not.toMatch(/img|onerror/i);
   });
 
+  it('loads entity-scoped audit trails with the latest editor for Rocks, To-Dos, and Issues', async () => {
+    const api = new LocalWorkspaceApi();
+    let workspace = await api.getWorkspace();
+    const rock = workspace.rocks.find((item) => item.id === 'rock-playbook')!;
+    workspace = await api.updateRock(rock.id, { notes: 'Audit the handoff owner.' }, rock.version);
+    const updatedRock = workspace.rocks.find((item) => item.id === rock.id)!;
+    const rockAudit = await api.getAuditTrail('rock', rock.id);
+    expect(rockAudit[0]).toMatchObject({ target: rock.id, actorId: 'ava-khan', action: 'Updated Rock' });
+    expect(updatedRock.updatedBy).toBe('ava-khan');
+
+    const todo = workspace.todos.find((item) => item.id === 'todo-handoff')!;
+    workspace = await api.updateTodo(todo.id, { notes: 'Confirm the owner.' }, todo.version);
+    const todoAudit = await api.getAuditTrail('todo', todo.id);
+    expect(todoAudit[0]).toMatchObject({ target: todo.id, actorId: 'ava-khan', action: 'Updated To-Do' });
+
+    const issue = workspace.issues.find((item) => item.id === 'issue-handoffs')!;
+    workspace = await api.updateIssue(issue.id, { idsNote: 'Keep the owner matrix current.' }, issue.version);
+    const issueAudit = await api.getAuditTrail('issue', issue.id);
+    expect(issueAudit[0]).toMatchObject({ target: issue.id, actorId: 'ava-khan', action: 'Updated Issue' });
+    expect(issueAudit.every((event) => event.target === issue.id)).toBe(true);
+
+    const restrictedSeed = structuredClone(initialWorkspace);
+    restrictedSeed.currentUser = restrictedSeed.users.find((user) => user.id === 'maya-green')!;
+    const restrictedApi = new LocalWorkspaceApi(restrictedSeed);
+    await expect(restrictedApi.getAuditTrail('rock', rock.id)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
   it('rolls an incomplete To-Do over when a due date moves later', async () => {
     const api = new LocalWorkspaceApi();
     let workspace = await api.getWorkspace();
@@ -652,6 +679,16 @@ describe('LocalWorkspaceApi', () => {
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({ dueDate: '2026-09-21' });
     expect(fetchMock.mock.calls[1][0]).toBe('/api/workspace');
     expect(result.todos.find((todo) => todo.id === before.id)?.dueDate).toBe('2026-09-21');
+    fetchMock.mockRestore();
+  });
+
+  it('loads audit history from the authenticated API endpoint', async () => {
+    const api = new HttpWorkspaceApi();
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify([{ id: 'audit-1', actorId: 'ava-khan', action: 'Updated Issue', target: 'issue-handoffs', detail: 'Updated the Issue.', createdAt: '2026-09-03T12:00:00.000Z', eventType: 'issue' }]), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    const events = await api.getAuditTrail('issue', 'issue-handoffs');
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/audit/issue/issue-handoffs');
+    expect(events[0]).toMatchObject({ id: 'audit-1', actorId: 'ava-khan', target: 'issue-handoffs', type: 'issue' });
     fetchMock.mockRestore();
   });
 });

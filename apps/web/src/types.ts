@@ -132,6 +132,7 @@ export interface RockTask {
   linkedTodoId?: string;
   createdAt: string;
   updatedAt: string;
+  updatedBy?: string;
   version: number;
 }
 
@@ -149,6 +150,7 @@ export interface Rock {
   tasks: RockTask[];
   createdAt: string;
   updatedAt: string;
+  updatedBy?: string;
   version: number;
 }
 
@@ -178,6 +180,7 @@ export interface Todo {
   checklist: TodoChecklistItem[];
   createdAt: string;
   updatedAt: string;
+  updatedBy?: string;
   version: number;
   isMine?: boolean;
   carryForwardCount: number;
@@ -209,6 +212,7 @@ export interface Issue {
   ownerId?: string;
   createdAt: string;
   updatedAt: string;
+  updatedBy?: string;
   solvedAt?: string;
   ageInDays: number;
   ageBand: IssueAgeBand;
@@ -422,6 +426,8 @@ export interface AuditEvent {
   createdAt: string;
   type: 'team' | 'membership' | 'rock' | 'todo' | 'issue' | 'transfer' | 'profile' | 'meeting';
 }
+
+export type AuditEntityType = 'rock' | 'todo' | 'issue';
 
 export interface IssueAgeSettings {
   agingDays: number;

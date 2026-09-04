@@ -3,6 +3,8 @@ import { meetingDateFor, meetingDateLabel, meetingReviewStatus, meetingScheduled
 import { sanitizeRichText, sanitizeTodoNotes } from './richText';
 import type {
   CompanyOverview,
+  AuditEntityType,
+  AuditEvent,
   EnvironmentAccess,
   EnvironmentId,
   EnvironmentSession,
@@ -65,6 +67,7 @@ export interface WorkspaceApi {
   getEnvironmentAccess(): Promise<EnvironmentAccess[]>;
   updateEnvironmentAccess(userId: string, testAllowed: boolean): Promise<EnvironmentAccess[]>;
   getWorkspace(): Promise<Workspace>;
+  getAuditTrail(entityType: AuditEntityType, entityId: string): Promise<AuditEvent[]>;
   getCompanyOverview(): Promise<CompanyOverview>;
   updateRockStatus(rockId: string, status: RockStatus, expectedVersion?: number): Promise<Workspace>;
   updateRock(rockId: string, input: Partial<Pick<Rock, 'title' | 'description' | 'notes' | 'ownerId' | 'dueDate' | 'priority'>>, expectedVersion?: number): Promise<Workspace>;
@@ -531,6 +534,21 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     return cloneWorkspace(this.workspace);
   }
 
+  async getAuditTrail(entityType: AuditEntityType, entityId: string) {
+    this.requireSelectedEnvironmentAccess();
+    const teamId = entityType === 'rock'
+      ? this.workspace.rocks.find((rock) => rock.id === entityId)?.teamId
+      : entityType === 'todo'
+        ? this.workspace.todos.find((todo) => todo.id === entityId)?.teamId
+        : this.workspace.issues.find((issue) => issue.id === entityId && issue.assignmentState !== 'redirected')?.teamId;
+    if (!teamId) throw new WorkspaceApiError('NOT_FOUND', `${entityType[0].toUpperCase()}${entityType.slice(1)} not found.`);
+    this.requireRead(teamId);
+    const eventTypes = entityType === 'issue' ? new Set<AuditEvent['type']>(['issue', 'transfer', 'meeting']) : new Set<AuditEvent['type']>([entityType]);
+    return structuredClone(this.workspace.activity
+      .filter((event) => event.target === entityId && eventTypes.has(event.type))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt)));
+  }
+
   async getMeetingReview(query: MeetingReviewQuery = {}): Promise<MeetingReviewPage> {
     this.requireSelectedEnvironmentAccess();
     this.refreshDerivedState();
@@ -649,6 +667,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     this.requireVersion(rock.version, expectedVersion);
     rock.status = status;
     rock.updatedAt = nowIso();
+    rock.updatedBy = this.workspace.currentUser.id;
     rock.version += 1;
     this.audit('Updated Rock status', rock.id, `${rock.title} marked ${status}.`, 'rock');
     return this.result();
@@ -666,14 +685,15 @@ export class LocalWorkspaceApi implements WorkspaceApi {
       ...(input.dueDate !== undefined ? { dueDate: input.dueDate } : {}),
       ...(input.priority !== undefined ? { priority: input.priority } : {}),
     };
-    Object.assign(rock, allowedInput, { updatedAt: nowIso(), version: rock.version + 1 });
+    Object.assign(rock, allowedInput, { updatedAt: nowIso(), updatedBy: this.workspace.currentUser.id, version: rock.version + 1 });
+    this.audit('Updated Rock', rock.id, `Updated ${rock.title}.`, 'rock');
     return this.result();
   }
 
   async addRock(input: Pick<Rock, 'title' | 'description' | 'ownerId' | 'dueDate' | 'priority' | 'teamId'> & { notes?: string }) {
     this.requireWrite(input.teamId);
     const timestamp = nowIso();
-    this.workspace.rocks.unshift({ ...input, id: `rock-${Date.now()}`, quarterId: this.workspace.quarter.id, notes: sanitizeRichText(input.notes), status: 'on-track', tasks: [], createdAt: timestamp, updatedAt: timestamp, version: 1 });
+    this.workspace.rocks.unshift({ ...input, id: `rock-${Date.now()}`, quarterId: this.workspace.quarter.id, notes: sanitizeRichText(input.notes), status: 'on-track', tasks: [], createdAt: timestamp, updatedAt: timestamp, updatedBy: this.workspace.currentUser.id, version: 1 });
     this.audit('Created Rock', this.workspace.rocks[0].id, input.title, 'rock');
     return this.result();
   }
@@ -682,8 +702,9 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const rock = this.rock(rockId);
     this.requireWrite(rock.teamId);
     const timestamp = nowIso();
-    rock.tasks.push({ ...input, id: `task-${Date.now()}`, rockId, teamId: rock.teamId, status: 'open', createdAt: timestamp, updatedAt: timestamp, version: 1 });
+    rock.tasks.push({ ...input, id: `task-${Date.now()}`, rockId, teamId: rock.teamId, status: 'open', createdAt: timestamp, updatedAt: timestamp, updatedBy: this.workspace.currentUser.id, version: 1 });
     rock.updatedAt = timestamp;
+    rock.updatedBy = this.workspace.currentUser.id;
     rock.version += 1;
     this.audit('Added Rock Task', rock.id, input.title, 'rock');
     return this.result();
@@ -702,7 +723,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
       ...(input.dueDate !== undefined ? { dueDate: input.dueDate } : {}),
       ...(input.status !== undefined ? { status: input.status } : {}),
     };
-    Object.assign(task, allowedInput, { updatedAt: nowIso(), version: task.version + 1 });
+    Object.assign(task, allowedInput, { updatedAt: nowIso(), updatedBy: this.workspace.currentUser.id, version: task.version + 1 });
     if (task.linkedTodoId) {
       const todo = this.workspace.todos.find((item) => item.id === task.linkedTodoId);
       if (todo) {
@@ -710,11 +731,14 @@ export class LocalWorkspaceApi implements WorkspaceApi {
         if (input.assigneeId) todo.ownerId = input.assigneeId;
         if (input.dueDate) todo.dueDate = input.dueDate;
         todo.updatedAt = nowIso();
+        todo.updatedBy = this.workspace.currentUser.id;
         todo.version += 1;
       }
     }
     rock.updatedAt = nowIso();
+    rock.updatedBy = this.workspace.currentUser.id;
     rock.version += 1;
+    this.audit('Updated Rock Task', task.id, task.title, 'rock');
     return this.result();
   }
 
@@ -728,11 +752,13 @@ export class LocalWorkspaceApi implements WorkspaceApi {
         delete todo.linkedRockTaskId;
         todo.origin = 'Team workspace · former Rock Task';
         todo.updatedAt = nowIso();
+        todo.updatedBy = this.workspace.currentUser.id;
         todo.version += 1;
       }
     }
     rock.tasks = rock.tasks.filter((item) => item.id !== taskId);
     rock.updatedAt = nowIso();
+    rock.updatedBy = this.workspace.currentUser.id;
     rock.version += 1;
     this.audit('Deleted Rock Task', task.id, `${task.title} removed from ${rock.title}.`, 'rock');
     return this.result();
@@ -743,9 +769,10 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     this.requireWrite(rock.teamId);
     if (task.linkedTodoId) return this.result();
     const timestamp = nowIso();
-    const todo: Todo = { id: `todo-task-${task.id}`, teamId: rock.teamId, title: task.title, notes: sanitizeTodoNotes(task.notes), ownerId: task.assigneeId, dueDate: task.dueDate, status: task.status === 'done' ? 'done' : 'open', origin: `Rock · ${rock.title}`, linkedRockTaskId: task.id, checklist: [], createdAt: timestamp, updatedAt: timestamp, version: 1, carryForwardCount: 0, flagged: false };
+    const todo: Todo = { id: `todo-task-${task.id}`, teamId: rock.teamId, title: task.title, notes: sanitizeTodoNotes(task.notes), ownerId: task.assigneeId, dueDate: task.dueDate, status: task.status === 'done' ? 'done' : 'open', origin: `Rock · ${rock.title}`, linkedRockTaskId: task.id, checklist: [], createdAt: timestamp, updatedAt: timestamp, updatedBy: this.workspace.currentUser.id, version: 1, carryForwardCount: 0, flagged: false };
     task.linkedTodoId = todo.id;
     task.updatedAt = timestamp;
+    task.updatedBy = this.workspace.currentUser.id;
     task.version += 1;
     rock.tasks = rock.tasks.map((item) => item.id === task.id ? task : item);
     this.workspace.todos.unshift(todo);
@@ -772,7 +799,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
       todo.carryForwardCount += 1;
       todo.flagged = todo.carryForwardCount > 3;
     }
-    Object.assign(todo, { ...nextInput, ...(nextInput.notes !== undefined ? { notes: sanitizeTodoNotes(nextInput.notes) } : {}) }, { updatedAt: timestamp, version: todo.version + 1 });
+    Object.assign(todo, { ...nextInput, ...(nextInput.notes !== undefined ? { notes: sanitizeTodoNotes(nextInput.notes) } : {}) }, { updatedAt: timestamp, updatedBy: this.workspace.currentUser.id, version: todo.version + 1 });
     if (todo.linkedRockTaskId) {
       const linked = this.task(todo.linkedRockTaskId);
       this.requireWrite(linked.rock.teamId);
@@ -781,8 +808,10 @@ export class LocalWorkspaceApi implements WorkspaceApi {
       if (normalizedInput.ownerId) linked.task.assigneeId = normalizedInput.ownerId;
       if (normalizedDueDate) linked.task.dueDate = normalizedDueDate;
       linked.task.updatedAt = timestamp;
+      linked.task.updatedBy = this.workspace.currentUser.id;
       linked.task.version += 1;
       linked.rock.updatedAt = timestamp;
+      linked.rock.updatedBy = this.workspace.currentUser.id;
       linked.rock.version += 1;
     }
     if (isRollover && todo.flagged && !todo.convertedIssueId) {
@@ -810,12 +839,15 @@ export class LocalWorkspaceApi implements WorkspaceApi {
         escalationState: 'not-scheduled',
         escalationLevel: 0,
         sourceTodoId: todo.id,
+        updatedBy: this.workspace.currentUser.id,
       };
       this.workspace.issues.unshift(issue);
       todo.convertedIssueId = issueId;
       this.audit('Converted repeated To-Do to Issue', issueId, `${todo.title} moved forward ${todo.carryForwardCount} times.`, 'issue');
     } else if (isRollover) {
       this.audit('Moved To-Do forward', todo.id, `${todo.title} moved to ${todo.dueDate} (${todo.carryForwardCount} times).`, 'todo');
+    } else {
+      this.audit('Updated To-Do', todo.id, `Updated ${todo.title}.`, 'todo');
     }
     return this.result();
   }
@@ -831,6 +863,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const item: TodoChecklistItem = { id: `checklist-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, text: text.trim(), completed: false, supporterId: resolvedSupporterId, createdAt: timestamp, updatedAt: timestamp };
     todo.checklist = [...(todo.checklist ?? []), item];
     todo.updatedAt = timestamp;
+    todo.updatedBy = this.workspace.currentUser.id;
     todo.version += 1;
     this.audit('Added To-Do checklist item', todo.id, `${todo.title}: ${item.text}`, 'todo');
     return this.result();
@@ -847,6 +880,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     if (input.supporterId !== undefined) this.requireChecklistSupporter(todo.teamId, input.supporterId);
     Object.assign(item, { ...input, text: input.text?.trim() ?? item.text, updatedAt: nowIso() });
     todo.updatedAt = item.updatedAt;
+    todo.updatedBy = this.workspace.currentUser.id;
     todo.version += 1;
     this.audit('Updated To-Do checklist item', todo.id, `${todo.title}: ${item.text}`, 'todo');
     return this.result();
@@ -860,6 +894,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     if (!item) throw new WorkspaceApiError('NOT_FOUND', 'Checklist item not found.');
     todo.checklist = todo.checklist.filter((candidate) => candidate.id !== itemId);
     todo.updatedAt = nowIso();
+    todo.updatedBy = this.workspace.currentUser.id;
     todo.version += 1;
     this.audit('Removed To-Do checklist item', todo.id, `${todo.title}: ${item.text}`, 'todo');
     return this.result();
@@ -1022,7 +1057,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
       if (sourceIssue.teamId !== input.teamId) throw new WorkspaceApiError('VALIDATION', 'Source Issue must belong to the same team.');
     }
     const timestamp = nowIso();
-    this.workspace.todos.unshift({ ...input, dueDate, id: `todo-${Date.now()}`, notes: sanitizeTodoNotes(input.notes), status: 'open', origin: input.linkedRockTaskId ? 'Rock Task' : input.sourceIssueId ? 'Issue follow-up' : 'Team workspace', checklist: [], createdAt: timestamp, updatedAt: timestamp, version: 1, carryForwardCount: 0, flagged: false });
+    this.workspace.todos.unshift({ ...input, dueDate, id: `todo-${Date.now()}`, notes: sanitizeTodoNotes(input.notes), status: 'open', origin: input.linkedRockTaskId ? 'Rock Task' : input.sourceIssueId ? 'Issue follow-up' : 'Team workspace', checklist: [], createdAt: timestamp, updatedAt: timestamp, updatedBy: this.workspace.currentUser.id, version: 1, carryForwardCount: 0, flagged: false });
     this.audit('Created To-Do', this.workspace.todos[0].id, input.title, 'todo');
     return this.result();
   }
@@ -1037,6 +1072,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const timestamp = nowIso();
     issue.status = 'in-ids';
     issue.updatedAt = timestamp;
+    issue.updatedBy = this.workspace.currentUser.id;
     issue.version += 1;
     if (meeting && !meeting.idsIssueIds.includes(issue.id)) {
       meeting.idsIssueIds.push(issue.id);
@@ -1061,6 +1097,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     issue.status = 'parked';
     issue.idsNote = appendHistoricalNote(issue.idsNote, timestamp, 'Parked for a future IDS conversation.');
     issue.updatedAt = timestamp;
+    issue.updatedBy = this.workspace.currentUser.id;
     issue.version += 1;
     if (meeting && !meeting.idsIssueIds.includes(issue.id)) {
       meeting.idsIssueIds.push(issue.id);
@@ -1086,6 +1123,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     issue.status = 'solved';
     issue.solvedAt = timestamp;
     issue.updatedAt = issue.solvedAt;
+    issue.updatedBy = this.workspace.currentUser.id;
     if (meeting && !meeting.idsIssueIds.includes(issue.id)) {
       meeting.idsIssueIds.push(issue.id);
       if (!meeting.idsAddedIssueIds.includes(issue.id)) meeting.idsAddedIssueIds.push(issue.id);
@@ -1097,7 +1135,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const followUpExists = this.workspace.todos.some((todo) => todo.id === followUpId);
     let followUpCreated = false;
     if (input.createFollowUpTodo && !followUpExists) {
-      this.workspace.todos.unshift({ id: followUpId, teamId: issue.teamId, title: `Follow up on the solution: ${issue.title}`, notes: '', ownerId: this.workspace.currentUser.id, dueDate: new Date(Date.now() + 7 * DAY).toISOString().slice(0, 10), status: 'open', origin: `IDS · ${issue.title}`, sourceIssueId: issue.id, checklist: [], createdAt: timestamp, updatedAt: timestamp, version: 1, carryForwardCount: 0, flagged: false });
+      this.workspace.todos.unshift({ id: followUpId, teamId: issue.teamId, title: `Follow up on the solution: ${issue.title}`, notes: '', ownerId: this.workspace.currentUser.id, dueDate: new Date(Date.now() + 7 * DAY).toISOString().slice(0, 10), status: 'open', origin: `IDS · ${issue.title}`, sourceIssueId: issue.id, checklist: [], createdAt: timestamp, updatedAt: timestamp, updatedBy: this.workspace.currentUser.id, version: 1, carryForwardCount: 0, flagged: false });
       followUpCreated = true;
       if (meeting) {
         meeting.createdTodoIds.push(followUpId);
@@ -1115,7 +1153,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
   async addIssue(input: Pick<Issue, 'title' | 'detail' | 'teamId' | 'raisedById'> & { horizon?: IssueHorizon; priority?: number; ownerId?: string; linkedRockId?: string; linkedScorecardMetricId?: string; linkedScorecardWeekStartDate?: string; idsNote?: string }) {
     this.requireWrite(input.teamId);
     const timestamp = nowIso();
-    const issue = { id: `issue-${Date.now()}`, teamId: input.teamId, title: input.title, detail: sanitizeRichText(input.detail), sourceTeamId: input.teamId, currentTeamId: input.teamId, raisedById: input.raisedById, ownerId: input.ownerId ?? input.raisedById, priority: input.priority ?? 1, status: 'open' as const, horizon: input.horizon ?? 'short-term', assignmentState: 'assigned' as const, ...(input.linkedRockId ? { linkedRockId: input.linkedRockId } : {}), ...(input.linkedScorecardMetricId ? { linkedScorecardMetricId: input.linkedScorecardMetricId } : {}), ...(input.linkedScorecardWeekStartDate ? { linkedScorecardWeekStartDate: input.linkedScorecardWeekStartDate } : {}), ...(input.idsNote ? { idsNote: input.idsNote } : {}), createdAt: timestamp, updatedAt: timestamp, ageInDays: 0, ageBand: 'fresh' as const, meetingBand: issueMeetingBand(0, 'open'), version: 1, meetingsPassed: 0, escalationState: 'not-scheduled' as const, escalationLevel: 0 };
+    const issue = { id: `issue-${Date.now()}`, teamId: input.teamId, title: input.title, detail: sanitizeRichText(input.detail), sourceTeamId: input.teamId, currentTeamId: input.teamId, raisedById: input.raisedById, ownerId: input.ownerId ?? input.raisedById, priority: input.priority ?? 1, status: 'open' as const, horizon: input.horizon ?? 'short-term', assignmentState: 'assigned' as const, ...(input.linkedRockId ? { linkedRockId: input.linkedRockId } : {}), ...(input.linkedScorecardMetricId ? { linkedScorecardMetricId: input.linkedScorecardMetricId } : {}), ...(input.linkedScorecardWeekStartDate ? { linkedScorecardWeekStartDate: input.linkedScorecardWeekStartDate } : {}), ...(input.idsNote ? { idsNote: input.idsNote } : {}), createdAt: timestamp, updatedAt: timestamp, updatedBy: this.workspace.currentUser.id, ageInDays: 0, ageBand: 'fresh' as const, meetingBand: issueMeetingBand(0, 'open'), version: 1, meetingsPassed: 0, escalationState: 'not-scheduled' as const, escalationLevel: 0 };
     this.workspace.issues.unshift(issue);
     this.audit('Created Issue', this.workspace.issues[0].id, input.title, 'issue');
     return this.result();
@@ -1133,7 +1171,8 @@ export class LocalWorkspaceApi implements WorkspaceApi {
       ...(input.ownerId !== undefined ? { ownerId: input.ownerId } : {}),
       ...(input.idsNote !== undefined ? { idsNote: input.idsNote } : {}),
     };
-    Object.assign(issue, allowedInput, { updatedAt: nowIso(), version: issue.version + 1 });
+    Object.assign(issue, allowedInput, { updatedAt: nowIso(), updatedBy: this.workspace.currentUser.id, version: issue.version + 1 });
+    this.audit('Updated Issue', issue.id, `Updated ${issue.title}.`, 'issue');
     return this.result();
   }
 
@@ -1159,6 +1198,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     issue.idsNote = appendHistoricalNote(issue.idsNote, timestamp, note);
     issue.status = issue.status === 'open' ? 'in-ids' : issue.status;
     issue.updatedAt = timestamp;
+    issue.updatedBy = this.workspace.currentUser.id;
     issue.version += 1;
     this.audit('Added meeting IDS note', issue.id, `${meeting.label}: ${note.trim()}`, 'issue');
     return this.result();
@@ -1319,6 +1359,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     this.workspace.transfers.unshift(transfer);
     issue.assignmentState = 'pending-transfer';
     issue.updatedAt = timestamp;
+    issue.updatedBy = this.workspace.currentUser.id;
     issue.version += 1;
     this.workspace.memberships.filter((membership) => membership.teamId === destinationTeamId && membership.active && membership.role !== 'Viewer').forEach((membership) => {
       this.notify(membership.userId, { type: 'issue-transfer-requested', title: `Issue transferred to ${destination.shortName}`, message: `${issue.title} is waiting for your team to accept or reject it.`, issueId, transferId: transfer.id, teamId: destinationTeamId });
@@ -1338,11 +1379,12 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const timestamp = nowIso();
     const existing = this.workspace.issues.find((issue) => issue.id === sourceIssue.id && issue.teamId === transfer.destinationTeamId && issue.assignmentState !== 'redirected');
     if (!existing) {
-      this.workspace.issues.push({ ...sourceIssue, teamId: transfer.destinationTeamId, currentTeamId: transfer.destinationTeamId, assignmentState: 'assigned', updatedAt: timestamp, version: 1 });
+      this.workspace.issues.push({ ...sourceIssue, teamId: transfer.destinationTeamId, currentTeamId: transfer.destinationTeamId, assignmentState: 'assigned', updatedAt: timestamp, updatedBy: this.workspace.currentUser.id, version: 1 });
     }
     sourceIssue.assignmentState = 'redirected';
     sourceIssue.currentTeamId = transfer.destinationTeamId;
     sourceIssue.updatedAt = timestamp;
+    sourceIssue.updatedBy = this.workspace.currentUser.id;
     sourceIssue.version += 1;
     transfer.status = 'accepted';
     transfer.decidedById = this.workspace.currentUser.id;
@@ -1369,6 +1411,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     issue.currentTeamId = null;
     issue.ownerId = undefined;
     issue.updatedAt = timestamp;
+    issue.updatedBy = this.workspace.currentUser.id;
     issue.version += 1;
     transfer.status = 'rejected';
     transfer.rejectionMessage = message.trim();
@@ -1393,6 +1436,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     issue.assignmentState = 'assigned';
     issue.currentTeamId = issue.teamId;
     issue.updatedAt = nowIso();
+    issue.updatedBy = this.workspace.currentUser.id;
     issue.version += 1;
     transfer.status = 'cancelled';
     transfer.decidedById = this.workspace.currentUser.id;
@@ -1789,12 +1833,25 @@ type ApiSnapshot = {
   metrics: ScorecardMetric[];
   scorecardResults: ScorecardResult[];
   headlines: Workspace['headlines'];
-  audit: Array<{ id: string; actorId: string; action: string; target: string; detail: string; createdAt: string; eventType?: string; type?: string }>;
+  audit: ApiAuditEvent[];
   quarter: QuarterDto;
   etag: string;
 };
 
 type QuarterDto = Workspace['quarter'];
+
+type ApiAuditEvent = { id: string; actorId: string; action: string; target: string; detail: string; createdAt: string; eventType?: string; type?: string };
+
+const auditEventTypes = new Set<AuditEvent['type']>(['team', 'membership', 'rock', 'todo', 'issue', 'transfer', 'profile', 'meeting']);
+
+function auditEventType(value: string | undefined): AuditEvent['type'] {
+  if (!value || value === 'admin' || !auditEventTypes.has(value as AuditEvent['type'])) return 'team';
+  return value as AuditEvent['type'];
+}
+
+function mapAuditEvent(event: ApiAuditEvent): AuditEvent {
+  return { id: String(event.id), actorId: String(event.actorId), action: String(event.action), target: String(event.target), detail: String(event.detail), createdAt: String(event.createdAt), type: auditEventType(event.type ?? event.eventType) };
+}
 
 function codeForResponse(value: unknown): WorkspaceApiError['code'] {
   return value === 'NOT_FOUND' || value === 'FORBIDDEN' || value === 'CONFLICT' || value === 'VALIDATION' || value === 'UNAVAILABLE' ? value : 'UNAVAILABLE';
@@ -1830,7 +1887,7 @@ function mapSnapshot(snapshot: ApiSnapshot): Workspace {
     scorecardResults: snapshot.scorecardResults ?? [],
     headlines: snapshot.headlines,
     meetings: snapshot.meetings.map((meeting) => normalizeMeeting(meeting, teams.find((team) => team.id === meeting.teamId))),
-    activity: snapshot.audit.map((event) => ({ id: event.id, actorId: event.actorId, action: event.action, target: event.target, detail: event.detail, createdAt: event.createdAt, type: (event.type ?? event.eventType) === 'admin' ? 'team' : (event.type ?? event.eventType ?? 'team') as Workspace['activity'][number]['type'] })),
+    activity: snapshot.audit.map(mapAuditEvent),
   };
 }
 
@@ -1915,7 +1972,7 @@ function mergeMutationRecord(workspace: Workspace, value: MutationObject): boole
       workspace.issues = workspace.issues.map((issue) => ageFor(issue, workspace.settings));
       return true;
     case 'auditEvent':
-      workspace.activity.unshift({ id: String(value.id), actorId: String(value.actorId), action: String(value.action), target: String(value.target), detail: String(value.detail), createdAt: String(value.createdAt), type: (value.eventType === 'admin' ? 'team' : value.eventType ?? 'team') as Workspace['activity'][number]['type'] });
+      workspace.activity.unshift(mapAuditEvent(value as unknown as ApiAuditEvent));
       return true;
     default:
       return false;
@@ -1983,6 +2040,11 @@ export class HttpWorkspaceApi implements WorkspaceApi {
     const workspace = mapSnapshot(await this.request<ApiSnapshot>('/workspace'));
     this.cachedWorkspace = workspace;
     return cloneWorkspace(workspace);
+  }
+
+  async getAuditTrail(entityType: AuditEntityType, entityId: string) {
+    const events = await this.request<ApiAuditEvent[]>(`/audit/${entityType}/${encodeURIComponent(entityId)}`);
+    return events.map(mapAuditEvent);
   }
 
   async getCompanyOverview(): Promise<CompanyOverview> {
