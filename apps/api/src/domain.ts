@@ -17,6 +17,8 @@ export type RecordKind =
   | 'team'
   | 'teamMembership'
   | 'quarter'
+  | 'vto'
+  | 'vtoVersion'
   | 'meeting'
   | 'meetingSummaryJob'
   | 'rock'
@@ -52,6 +54,81 @@ export type MeetingReviewStatus = MeetingStatus | 'missed' | 'overdue';
 export type MeetingReviewFilter = 'attention' | 'completed' | 'skipped' | 'all';
 export type MeetingSkipReason = 'public-holiday' | 'annual-leave' | 'other';
 export type MeetingAiSummaryStatus = 'not-generated' | 'queued' | 'generating' | 'ready' | 'failed' | 'cancelled';
+export type QuarterStatus = 'past' | 'current' | 'upcoming';
+
+export interface QuarterRecord extends WorkspaceRecord {
+  kind: 'quarter';
+  label: string;
+  theme: string;
+  startDate: string;
+  endDate: string;
+}
+
+export interface QuarterSummary extends Pick<QuarterRecord, 'id' | 'label' | 'theme' | 'startDate' | 'endDate'> {
+  status: QuarterStatus;
+  daysRemaining: number;
+  daysUntilStart?: number;
+}
+
+export interface VtoMarketingStrategy {
+  targetMarket: string;
+  uniques: string[];
+  provenProcess: string;
+  guarantee: string;
+}
+
+export interface VtoThreeYearPicture {
+  targetDate: string;
+  revenue: string;
+  profit: string;
+  headcount: string;
+  description: string;
+}
+
+export interface VtoOneYearPlan {
+  year: number;
+  revenue: string;
+  profit: string;
+  measurables: string[];
+  goals: string[];
+}
+
+/** The eight EOS V/TO questions, with operational links kept as references. */
+export interface VtoContent {
+  coreValues: string[];
+  coreFocusPurpose: string;
+  coreFocusNiche: string;
+  tenYearTarget: string;
+  marketingStrategy: VtoMarketingStrategy;
+  threeYearPicture: VtoThreeYearPicture;
+  oneYearPlan: VtoOneYearPlan;
+  quarterlyRockIds: string[];
+  issueIds: string[];
+}
+
+export interface VtoRecord extends WorkspaceRecord, VtoContent {
+  kind: 'vto';
+  teamId: string;
+  versionNumber: number;
+  effectiveDate: string;
+  changeSummary: string;
+  savedBy: string;
+}
+
+export interface VtoVersionRecord extends WorkspaceRecord, VtoContent {
+  kind: 'vtoVersion';
+  teamId: string;
+  vtoId: string;
+  versionNumber: number;
+  effectiveDate: string;
+  changeSummary: string;
+  savedBy: string;
+}
+
+export interface VtoDocument {
+  current: VtoRecord | null;
+  versions: VtoVersionRecord[];
+}
 
 export function issueMeetingBand(meetingsPassed: number, status: IssueStatus): IssueMeetingBand {
   if (status === 'solved' || meetingsPassed <= 0) return 'neutral';
@@ -89,6 +166,7 @@ export interface WorkspaceRecord {
 export interface HeadlineRecord extends WorkspaceRecord {
   kind: 'headline';
   teamId: string;
+  quarterId?: string;
   authorId: string;
   type: 'win' | 'concern';
   title: string;
@@ -178,6 +256,7 @@ export interface TodoChecklistItem {
 export interface TodoRecord extends WorkspaceRecord {
   kind: 'todo';
   teamId: string;
+  quarterId?: string;
   title: string;
   notes: string;
   ownerId: string;
@@ -195,6 +274,7 @@ export interface TodoRecord extends WorkspaceRecord {
 export interface IssueRecord extends WorkspaceRecord {
   kind: 'issue';
   teamId: string;
+  quarterId?: string;
   sourceTeamId: string;
   currentTeamId: string | null;
   title: string;
@@ -311,6 +391,7 @@ export interface MeetingAiSummary {
 export interface MeetingRecord extends WorkspaceRecord {
   kind: 'meeting';
   teamId: string;
+  quarterId?: string;
   label: string;
   dateLabel: string;
   /** Calendar date selected for this meeting occurrence. */
@@ -456,7 +537,7 @@ export interface AuditEventRecord extends WorkspaceRecord {
   action: string;
   target: string;
   detail: string;
-  eventType: 'team' | 'membership' | 'rock' | 'todo' | 'issue' | 'transfer' | 'profile' | 'meeting' | 'admin';
+  eventType: 'team' | 'membership' | 'rock' | 'todo' | 'issue' | 'transfer' | 'profile' | 'meeting' | 'vto' | 'admin';
 }
 
 export type AuditEntityType = 'rock' | 'todo' | 'issue';
@@ -494,6 +575,8 @@ export interface TeamWorkspace {
   metrics: ScorecardMetricRecord[];
   scorecardResults: ScorecardResultRecord[];
   headlines: HeadlineRecord[];
+  vto: VtoRecord | null;
+  vtoVersions: VtoVersionRecord[];
   etag: string;
 }
 
@@ -516,7 +599,10 @@ export interface WorkspaceSnapshot {
   scorecardResults: ScorecardResultRecord[];
   headlines: HeadlineRecord[];
   audit: AuditEventRecord[];
-  quarter: { id: string; label: string; theme: string; startDate: string; endDate: string; daysRemaining: number };
+  quarters: QuarterSummary[];
+  vtos: VtoRecord[];
+  vtoVersions: VtoVersionRecord[];
+  quarter: QuarterSummary;
   etag: string;
 }
 
@@ -624,6 +710,46 @@ function dateOnlyFor(value: string | Date) {
   if (Number.isNaN(date.getTime())) throw new Error('Invalid date.');
   if (dateOnly && date.toISOString().slice(0, 10) !== dateOnly) throw new Error('Invalid date.');
   return date;
+}
+
+function quarterDateAt(value: string) {
+  const date = new Date(`${value}T12:00:00Z`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value) throw new Error('Invalid quarter date.');
+  return date;
+}
+
+/** Add calculated status to a persisted quarter without storing volatile dates. */
+export function quarterSummary(record: Pick<QuarterRecord, 'id' | 'label' | 'theme' | 'startDate' | 'endDate'>, at: string | Date = new Date()): QuarterSummary {
+  const start = quarterDateAt(record.startDate);
+  const end = quarterDateAt(record.endDate);
+  const reference = new Date(at);
+  if (Number.isNaN(reference.getTime())) throw new Error('Invalid quarter reference date.');
+  const referenceDate = reference.toISOString().slice(0, 10);
+  const startDate = start.toISOString().slice(0, 10);
+  const endDate = end.toISOString().slice(0, 10);
+  const status: QuarterStatus = referenceDate < startDate ? 'upcoming' : referenceDate > endDate ? 'past' : 'current';
+  const endOfQuarter = Date.parse(`${endDate}T23:59:59.999Z`);
+  const startOfQuarter = Date.parse(`${startDate}T00:00:00.000Z`);
+  return {
+    id: record.id,
+    label: record.label,
+    theme: record.theme,
+    startDate,
+    endDate,
+    status,
+    daysRemaining: status === 'current' ? Math.max(0, Math.ceil((endOfQuarter - reference.getTime()) / (24 * 60 * 60 * 1000))) : 0,
+    ...(status === 'upcoming' ? { daysUntilStart: Math.max(0, Math.ceil((startOfQuarter - reference.getTime()) / (24 * 60 * 60 * 1000))) } : {}),
+  };
+}
+
+export function quarterIdForDate(value: string | Date, quarters: readonly Pick<QuarterRecord, 'id' | 'startDate' | 'endDate'>[]) {
+  const date = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : new Date(value).toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return undefined;
+  return quarters.find((quarter) => date >= quarter.startDate && date <= quarter.endDate)?.id;
+}
+
+export function currentQuarterId(quarters: readonly QuarterSummary[]) {
+  return quarters.find((quarter) => quarter.status === 'current')?.id ?? [...quarters].sort((left, right) => left.startDate.localeCompare(right.startDate)).at(-1)?.id;
 }
 
 /** Return the next occurrence, preserving the day of month for monthly teams. */

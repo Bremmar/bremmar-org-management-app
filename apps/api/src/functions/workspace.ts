@@ -19,7 +19,8 @@ async function workspaceSnapshotHandler(request: HttpRequest, _context: Invocati
   const scope = await requestScope(request);
   if (isResponse(scope)) return scope;
   try {
-    const snapshot = await scope.repository.getWorkspaceSnapshot(scope.principal.userId);
+    const quarterId = request.query.get('quarterId') ?? undefined;
+    const snapshot = await scope.repository.getWorkspaceSnapshot(scope.principal.userId, quarterId);
     return responseWithEtag(snapshot, snapshot.etag);
   } catch (error) {
     return repositoryErrorResponse(error);

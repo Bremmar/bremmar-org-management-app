@@ -5,6 +5,7 @@ import {
   canAdministerPlatform,
   canManageTeam,
   canWriteTeam,
+  currentQuarterId,
   DEFAULT_ISSUE_AGE_SETTINGS,
   DEFAULT_MEETING_SECTIONS,
   averageMeetingRating,
@@ -17,6 +18,8 @@ import {
   meetingSectionsFor,
   nextConfiguredMeetingDateAfter,
   partitionFor,
+  quarterIdForDate,
+  quarterSummary,
   scorecardTrendFor,
   weekStartDateFor,
   type AuditEventRecord,
@@ -43,6 +46,8 @@ import {
   type MeetingSection,
   type MeetingSectionConfig,
   type HeadlineRecord,
+  type QuarterRecord,
+  type QuarterSummary,
   type TeamMessageRecord,
   type NotificationRecord,
   type RockRecord,
@@ -56,6 +61,10 @@ import {
   type TodoChecklistItem,
   type WorkspaceSnapshot,
   type TodoRecord,
+  type VtoContent,
+  type VtoDocument,
+  type VtoRecord,
+  type VtoVersionRecord,
   type UserProfile,
   type WorkspaceRecord,
 } from '../domain.js';
@@ -107,6 +116,7 @@ export interface CreateIssueInput {
   /** Optional server-selected stable ID used by idempotent source conversions. */
   id?: string;
   teamId: string;
+  quarterId?: string;
   title: string;
   detail?: string;
   priority?: number;
@@ -135,12 +145,27 @@ export interface CreateHeadlineInput {
 
 export interface CreateTodoInput {
   teamId: string;
+  quarterId?: string;
   title: string;
   notes?: string;
   ownerId: string;
   dueDate: string;
   linkedRockTaskId?: string;
   sourceIssueId?: string;
+}
+
+export type SaveVtoInput = VtoContent & Pick<VtoRecord, 'effectiveDate' | 'changeSummary'>;
+
+export interface CreateHistoricalMeetingInput {
+  teamId: string;
+  quarterId?: string;
+  scheduledDate: string;
+  scheduledTime: string;
+  facilitatorId: string;
+  attendeeIds: string[];
+  rating?: number;
+  recap?: string;
+  idsNote?: string;
 }
 
 export interface UpdateTodoChecklistItemInput {
@@ -163,7 +188,8 @@ export interface WorkspaceRepository {
   getSessionContext(userId: string): Promise<SessionContext | null>;
   getTeamDashboard(teamId: string, userId?: string): Promise<DashboardSummary>;
   getTeamWorkspace(teamId: string, userId: string): Promise<TeamWorkspace>;
-  getWorkspaceSnapshot(userId: string): Promise<WorkspaceSnapshot>;
+  getWorkspaceSnapshot(userId: string, quarterId?: string): Promise<WorkspaceSnapshot>;
+  getVto(teamId: string, userId: string): Promise<VtoDocument>;
   getMeetingReview(userId: string, query?: MeetingReviewQuery): Promise<MeetingReviewPage>;
   getMeeting(teamId: string, meetingId: string, userId: string): Promise<MeetingRecord>;
   getCompanyOverview(userId: string): Promise<CompanyOverview>;
@@ -196,8 +222,10 @@ export interface WorkspaceRepository {
   parkIssue(issueId: string, actorId: string, expectedVersion?: number): Promise<IssueRecord>;
   solveIssue(issueId: string, input: SolveIssueInput, actorId: string, expectedVersion?: number): Promise<IssueRecord>;
   reopenIssue(issueId: string, actorId: string, expectedVersion?: number): Promise<IssueRecord>;
-  createRock(input: { teamId: string; title: string; description?: string; notes?: string; ownerId: string; dueDate?: string; priority?: RockRecord['priority'] }, actorId: string): Promise<RockRecord>;
+  createRock(input: { teamId: string; quarterId?: string; title: string; description?: string; notes?: string; ownerId: string; dueDate?: string; priority?: RockRecord['priority'] }, actorId: string): Promise<RockRecord>;
   createTodo(input: CreateTodoInput, actorId: string): Promise<TodoRecord>;
+  saveVto(teamId: string, input: SaveVtoInput, actorId: string, expectedVersion?: number): Promise<VtoRecord>;
+  createHistoricalMeeting(input: CreateHistoricalMeetingInput, actorId: string): Promise<MeetingRecord>;
   createRockTask(input: { rockId: string; title: string; notes?: string; assigneeId: string; assignedAt: string; startDate: string; dueDate: string }, actorId: string): Promise<RockTaskRecord>;
   updateRockTask(taskId: string, input: Partial<Pick<RockTaskRecord, 'title' | 'notes' | 'assigneeId' | 'assignedAt' | 'startDate' | 'dueDate' | 'status'>>, actorId: string, expectedVersion?: number): Promise<RockTaskRecord>;
   deleteRockTask(taskId: string, actorId: string, expectedVersion?: number): Promise<DeleteRockTaskResult>;
@@ -240,6 +268,49 @@ const generatedId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random()
 function baseRecord(id: string, kind: WorkspaceRecord['kind'], teamId?: string, version = 1): WorkspaceRecord {
   const timestamp = nowIso();
   return { id, kind, pk: teamId ? partitionFor('team', teamId) : partitionFor('org', ORG_ID), orgId: ORG_ID, teamId, createdAt: timestamp, updatedAt: timestamp, updatedBy: 'system', version };
+}
+
+const quarterThemes = ['Make the foundation visible.', 'Create useful momentum.', 'Make Q3 feel lighter.', 'Finish the year with focus.'];
+
+function quarterRecord(year: number, quarter: number): QuarterRecord {
+  const startMonth = (quarter - 1) * 3;
+  const startDate = new Date(Date.UTC(year, startMonth, 1, 12)).toISOString().slice(0, 10);
+  const endDate = new Date(Date.UTC(year, startMonth + 3, 0, 12)).toISOString().slice(0, 10);
+  const id = `${year}-q${quarter}`;
+  return { ...baseRecord(id, 'quarter'), kind: 'quarter', label: `Q${quarter} ${year}`, theme: quarterThemes[quarter - 1] ?? `Q${quarter} ${year} focus.`, startDate, endDate };
+}
+
+function defaultQuarterRecords(reference = new Date()): QuarterRecord[] {
+  const date = new Date(reference);
+  const currentQuarter = Math.floor(date.getUTCMonth() / 3) + 1;
+  const currentIndex = date.getUTCFullYear() * 4 + currentQuarter - 1;
+  return [-2, -1, 0, 1, 2].map((offset) => {
+    const index = currentIndex + offset;
+    const year = Math.floor(index / 4);
+    const quarter = (index % 4) + 1;
+    return quarterRecord(year, quarter);
+  });
+}
+
+function emptyVtoContent(teamName: string): VtoContent {
+  return {
+    coreValues: ['Be useful', 'Be clear', 'Own the outcome'],
+    coreFocusPurpose: `Help ${teamName} make meaningful progress.`,
+    coreFocusNiche: `${teamName} work that turns priorities into dependable outcomes.`,
+    tenYearTarget: `A trusted, high-performing ${teamName} function.`,
+    marketingStrategy: { targetMarket: 'Our organisation and its customers.', uniques: ['Practical', 'Clear', 'Accountable'], provenProcess: 'Align · Prioritise · Execute · Review', guarantee: 'Every commitment has a clear owner and next step.' },
+    threeYearPicture: { targetDate: '2029-12-31', revenue: 'To be agreed', profit: 'To be agreed', headcount: 'To be agreed', description: `${teamName} is known for dependable delivery and visible traction.` },
+    oneYearPlan: { year: new Date().getUTCFullYear(), revenue: 'To be agreed', profit: 'To be agreed', measurables: ['Commitments completed on time'], goals: ['Create a repeatable operating rhythm'] },
+    quarterlyRockIds: [],
+    issueIds: [],
+  };
+}
+
+function makeVto(team: TeamRecord, content: VtoContent, versionNumber = 1, kind: 'vto' | 'vtoVersion' = 'vto'): VtoRecord | VtoVersionRecord {
+  const id = kind === 'vto' ? `vto-${team.teamId}` : `vto-${team.teamId}-version-${versionNumber}`;
+  const record = baseRecord(id, kind, team.teamId, versionNumber);
+  const common = { ...record, kind, teamId: team.teamId, ...clone(content), versionNumber, effectiveDate: '2026-07-01', changeSummary: versionNumber === 1 ? 'Initial team V/TO.' : 'Quarterly planning refresh.', savedBy: team.escalationUserIds[0] ?? 'system' };
+  return kind === 'vto' ? common as VtoRecord : { ...common, vtoId: `vto-${team.teamId}` } as VtoVersionRecord;
 }
 
 function issueAge(issue: IssueRecord, settings: IssueAgeSettings, at = Date.now()): IssueRecord {
@@ -312,6 +383,57 @@ function finalizeMeetingTiming(meeting: MeetingRecord, endedAt: string) {
 
 function assertText(value: string, field: string) {
   if (typeof value !== 'string' || !value.trim()) throw new RepositoryError('VALIDATION', `${field} is required.`);
+}
+
+function normalizedTextArray(value: unknown, field: string, minimum: number, maximum: number) {
+  if (!Array.isArray(value)) throw new RepositoryError('VALIDATION', `${field} must be a list.`);
+  const items = value.map((item) => typeof item === 'string' ? item.trim() : '');
+  if (items.length < minimum || items.length > maximum || items.some((item) => !item)) throw new RepositoryError('VALIDATION', `${field} must contain between ${minimum} and ${maximum} non-empty entries.`);
+  return items;
+}
+
+function normalizeVtoInput(input: SaveVtoInput): SaveVtoInput {
+  if (!input || typeof input !== 'object') throw new RepositoryError('VALIDATION', 'V/TO content is required.');
+  const strategy = input.marketingStrategy ?? {} as SaveVtoInput['marketingStrategy'];
+  const picture = input.threeYearPicture ?? {} as SaveVtoInput['threeYearPicture'];
+  const plan = input.oneYearPlan ?? {} as SaveVtoInput['oneYearPlan'];
+  const coreValues = normalizedTextArray(input.coreValues, 'Core Values', 3, 7);
+  const uniques = normalizedTextArray(strategy?.uniques, 'Three Uniques', 3, 3);
+  const measurables = normalizedTextArray(plan?.measurables, 'One-Year Measurables', 1, 7);
+  const goals = normalizedTextArray(plan?.goals, 'One-Year Goals', 1, 7);
+  assertText(input.coreFocusPurpose, 'Core Focus purpose');
+  assertText(input.coreFocusNiche, 'Core Focus niche');
+  assertText(input.tenYearTarget, '10-Year Target');
+  assertText(strategy?.targetMarket, 'Target Market');
+  assertText(strategy?.provenProcess, 'Proven Process');
+  assertText(strategy?.guarantee, 'Guarantee');
+  assertText(picture?.targetDate, '3-Year Picture target date');
+  assertDate(picture.targetDate, '3-Year Picture target date');
+  assertText(picture?.revenue, '3-Year Picture revenue');
+  assertText(picture?.profit, '3-Year Picture profit');
+  assertText(picture?.headcount, '3-Year Picture headcount');
+  assertText(picture?.description, '3-Year Picture description');
+  if (!Number.isInteger(plan?.year) || plan.year < 2000 || plan.year > 9999) throw new RepositoryError('VALIDATION', 'One-Year Plan year must be a four-digit year.');
+  assertText(plan.revenue, 'One-Year Plan revenue');
+  assertText(plan.profit, 'One-Year Plan profit');
+  assertText(input.effectiveDate, 'V/TO effective date');
+  assertDate(input.effectiveDate, 'V/TO effective date');
+  assertText(input.changeSummary, 'V/TO change summary');
+  if (!Array.isArray(input.quarterlyRockIds) || input.quarterlyRockIds.length > 7 || input.quarterlyRockIds.some((id) => typeof id !== 'string' || !id.trim())) throw new RepositoryError('VALIDATION', 'Quarterly Rocks must contain no more than seven valid Rock IDs.');
+  if (!Array.isArray(input.issueIds) || input.issueIds.length > 50 || input.issueIds.some((id) => typeof id !== 'string' || !id.trim())) throw new RepositoryError('VALIDATION', 'Issues List must contain valid Issue IDs.');
+  return {
+    coreValues,
+    coreFocusPurpose: input.coreFocusPurpose.trim(),
+    coreFocusNiche: input.coreFocusNiche.trim(),
+    tenYearTarget: input.tenYearTarget.trim(),
+    marketingStrategy: { targetMarket: strategy.targetMarket.trim(), uniques, provenProcess: strategy.provenProcess.trim(), guarantee: strategy.guarantee.trim() },
+    threeYearPicture: { targetDate: picture.targetDate.trim(), revenue: picture.revenue.trim(), profit: picture.profit.trim(), headcount: picture.headcount.trim(), description: picture.description.trim() },
+    oneYearPlan: { year: plan.year, revenue: plan.revenue.trim(), profit: plan.profit.trim(), measurables, goals },
+    quarterlyRockIds: [...new Set(input.quarterlyRockIds.map((id) => id.trim()))],
+    issueIds: [...new Set(input.issueIds.map((id) => id.trim()))],
+    effectiveDate: input.effectiveDate.trim(),
+    changeSummary: input.changeSummary.trim(),
+  };
 }
 
 function normalizeDate(value: string, field: string) {
@@ -534,12 +656,12 @@ function makeMembership(id: string, teamId: string, userId: string, role: TeamMe
   return { ...baseRecord(id, 'teamMembership'), kind: 'teamMembership', teamId, userId, role, active: true };
 }
 
-function makeRock(input: { id: string; teamId: string; title: string; ownerId: string; status?: RockRecord['status']; dueDate?: string; priority?: RockRecord['priority'] }): RockRecord {
-  return { ...baseRecord(input.id, 'rock', input.teamId), kind: 'rock', teamId: input.teamId, quarterId: '2026-q3', title: input.title, description: '', notes: '', ownerId: input.ownerId, status: input.status ?? 'on-track', dueDate: input.dueDate ?? '2026-09-30', priority: input.priority ?? 'medium' };
+function makeRock(input: { id: string; teamId: string; quarterId?: string; title: string; ownerId: string; status?: RockRecord['status']; dueDate?: string; priority?: RockRecord['priority'] }): RockRecord {
+  return { ...baseRecord(input.id, 'rock', input.teamId), kind: 'rock', teamId: input.teamId, quarterId: input.quarterId ?? '2026-q3', title: input.title, description: '', notes: '', ownerId: input.ownerId, status: input.status ?? 'on-track', dueDate: input.dueDate ?? '2026-09-30', priority: input.priority ?? 'medium' };
 }
 
-function makeTodo(input: { id: string; teamId: string; title: string; ownerId: string; status?: TodoRecord['status']; dueDate?: string; linkedRockTaskId?: string; sourceIssueId?: string }): TodoRecord {
-  return { ...baseRecord(input.id, 'todo', input.teamId), kind: 'todo', teamId: input.teamId, title: input.title, notes: '', ownerId: input.ownerId, dueDate: input.dueDate ?? '2026-09-05', status: input.status ?? 'open', origin: 'Team workspace', linkedRockTaskId: input.linkedRockTaskId, sourceIssueId: input.sourceIssueId, checklist: [], carryForwardCount: 0, flagged: false };
+function makeTodo(input: { id: string; teamId: string; quarterId?: string; title: string; ownerId: string; status?: TodoRecord['status']; dueDate?: string; linkedRockTaskId?: string; sourceIssueId?: string }): TodoRecord {
+  return { ...baseRecord(input.id, 'todo', input.teamId), kind: 'todo', teamId: input.teamId, quarterId: input.quarterId ?? '2026-q3', title: input.title, notes: '', ownerId: input.ownerId, dueDate: input.dueDate ?? '2026-09-05', status: input.status ?? 'open', origin: 'Team workspace', linkedRockTaskId: input.linkedRockTaskId, sourceIssueId: input.sourceIssueId, checklist: [], carryForwardCount: 0, flagged: false };
 }
 
 function makeScorecardMetric(input: { id: string; teamId: string; label: string; target: string; unit: string; ownerId: string }): ScorecardMetricRecord {
@@ -550,17 +672,17 @@ function makeScorecardResult(input: { id: string; metricId: string; teamId: stri
   return { ...baseRecord(input.id, 'scorecardResult', input.teamId), kind: 'scorecardResult', teamId: input.teamId, metricId: input.metricId, weekStartDate: input.weekStartDate, actual: input.actual, status: input.status, ...scorecardTrendFor(input.actual, input.priorActual) };
 }
 
-function makeIssue(input: { id: string; teamId: string; title: string; raisedById: string; ageInDays: number; horizon?: IssueRecord['horizon']; assignmentState?: IssueRecord['assignmentState']; currentTeamId?: string | null; status?: IssueRecord['status']; ownerId?: string }): IssueRecord {
+function makeIssue(input: { id: string; teamId: string; quarterId?: string; title: string; raisedById: string; ageInDays: number; horizon?: IssueRecord['horizon']; assignmentState?: IssueRecord['assignmentState']; currentTeamId?: string | null; status?: IssueRecord['status']; ownerId?: string }): IssueRecord {
   const record = baseRecord(input.id, 'issue', input.teamId);
   const createdAt = daysAgo(input.ageInDays);
   const status = input.status ?? 'open';
-  return { ...record, kind: 'issue', teamId: input.teamId, sourceTeamId: input.teamId, currentTeamId: input.currentTeamId === undefined ? input.teamId : input.currentTeamId, title: input.title, detail: '', priority: 1, status, horizon: input.horizon ?? 'short-term', assignmentState: input.assignmentState ?? 'assigned', raisedById: input.raisedById, ownerId: input.ownerId ?? input.raisedById, ageInDays: input.ageInDays, ageBand: issueAgeBand(input.ageInDays), meetingsPassed: 0, meetingBand: issueMeetingBand(0, status), escalationState: 'not-scheduled', escalationLevel: 0, createdAt, updatedAt: createdAt, updatedBy: input.raisedById, version: 1 };
+  return { ...record, kind: 'issue', teamId: input.teamId, quarterId: input.quarterId ?? '2026-q3', sourceTeamId: input.teamId, currentTeamId: input.currentTeamId === undefined ? input.teamId : input.currentTeamId, title: input.title, detail: '', priority: 1, status, horizon: input.horizon ?? 'short-term', assignmentState: input.assignmentState ?? 'assigned', raisedById: input.raisedById, ownerId: input.ownerId ?? input.raisedById, ageInDays: input.ageInDays, ageBand: issueAgeBand(input.ageInDays), meetingsPassed: 0, meetingBand: issueMeetingBand(0, status), escalationState: 'not-scheduled', escalationLevel: 0, createdAt, updatedAt: createdAt, updatedBy: input.raisedById, version: 1 };
 }
 
-function makeHeadline(input: { id: string; teamId: string; meetingId?: string; authorId: string; type: HeadlineRecord['type']; title: string; detail: string; issueId?: string; createdAt?: string }): HeadlineRecord {
+function makeHeadline(input: { id: string; teamId: string; quarterId?: string; meetingId?: string; authorId: string; type: HeadlineRecord['type']; title: string; detail: string; issueId?: string; createdAt?: string }): HeadlineRecord {
   const record = baseRecord(input.id, 'headline');
   const createdAt = input.createdAt ?? record.createdAt;
-  return { ...record, kind: 'headline', teamId: input.teamId, meetingId: input.meetingId, authorId: input.authorId, type: input.type, title: input.title, detail: input.detail, issueId: input.issueId, createdAt, updatedAt: createdAt, updatedBy: input.authorId };
+  return { ...record, kind: 'headline', teamId: input.teamId, quarterId: input.quarterId, meetingId: input.meetingId, authorId: input.authorId, type: input.type, title: input.title, detail: input.detail, issueId: input.issueId, createdAt, updatedAt: createdAt, updatedBy: input.authorId };
 }
 
 function meetingActionSummary(meeting: MeetingRecord, issues: IssueRecord[]): MeetingActionSummary {
@@ -574,6 +696,7 @@ function meetingActionSummary(meeting: MeetingRecord, issues: IssueRecord[]): Me
 
 export class MemoryWorkspaceRepository implements WorkspaceRepository {
   readonly environmentId: EnvironmentId;
+  protected quarters: QuarterRecord[];
   protected teams: TeamRecord[];
   protected users: UserProfile[];
   protected memberships: TeamMembership[];
@@ -589,12 +712,15 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
   protected summaryJobs: MeetingSummaryJobRecord[];
   protected metrics: ScorecardMetricRecord[];
   protected scorecardResults: ScorecardResultRecord[];
+  protected vtos: VtoRecord[];
+  protected vtoVersions: VtoVersionRecord[];
   protected audit: AuditEventRecord[];
   protected settings: IssueAgeSettings;
   protected settingsVersion = 1;
 
   constructor(environmentId: EnvironmentId = 'live') {
     this.environmentId = environmentId;
+    this.quarters = defaultQuarterRecords();
     this.teams = [
       makeTeam({ teamId: 'leadership', name: 'Leadership Team', shortName: 'Leadership', description: 'Company-level direction and visibility.', parentTeamId: null, nodeType: 'operational', meetingDay: 'Monday', meetingTime: '9:00 AM', accent: '#182b4b', initials: 'LT', escalationUserIds: ['ava-khan'] }),
       makeTeam({ teamId: 'professional-services', name: 'Professional Services', shortName: 'Prof Services', description: 'Professional Services business unit.', parentTeamId: 'leadership', nodeType: 'operational', accent: '#746cb5', initials: 'PS', escalationUserIds: ['ava-khan', 'marcus-lee'] }),
@@ -639,6 +765,18 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       makeIssue({ id: 'issue-cyber-owners', teamId: 'cybersecurity', title: 'Evidence ownership is unclear across service teams', raisedById: 'priya-shah', ageInDays: 18, assignmentState: 'unassigned', currentTeamId: null, ownerId: undefined }),
       makeIssue({ id: 'issue-transfer-pending', teamId: 'projects', title: 'The customer kickoff needs a cybersecurity review', raisedById: 'marcus-lee', ageInDays: 22, assignmentState: 'pending-transfer', currentTeamId: 'projects', ownerId: 'marcus-lee' }),
     ];
+    this.vtos = [];
+    this.vtoVersions = [];
+    for (const team of this.teams.filter((candidate) => candidate.nodeType === 'operational')) {
+      const content = emptyVtoContent(team.name);
+      content.quarterlyRockIds = this.rocks.filter((rock) => rock.teamId === team.teamId && rock.quarterId === '2026-q3').map((rock) => rock.id);
+      content.issueIds = this.issues.filter((issue) => issue.teamId === team.teamId && issue.assignmentState !== 'redirected').map((issue) => issue.id);
+      const firstVersion = makeVto(team, content, 1, 'vtoVersion') as VtoVersionRecord;
+      const current = makeVto(team, content, 2, 'vto') as VtoRecord;
+      const secondVersion = makeVto(team, content, 2, 'vtoVersion') as VtoVersionRecord;
+      this.vtos.push(current);
+      this.vtoVersions.push(firstVersion, secondVersion);
+    }
     this.transfers = [{
       ...baseRecord('transfer-projects-leadership', 'issueTransfer'), kind: 'issueTransfer', issueId: 'issue-transfer-pending', sourceTeamId: 'projects', destinationTeamId: 'leadership', requestedById: 'marcus-lee', requestedAt: daysAgo(2), status: 'pending', note: 'Confirm the right receiving team.', sourceIssueVersion: 1, version: 1,
     }];
@@ -693,6 +831,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     this.rocks = this.rocks.map((rock) => ({ ...rock, notes: sanitizeRichText(rock.notes) }));
     this.todos = this.todos.map((todo) => ({
       ...todo,
+      quarterId: todo.quarterId ?? quarterIdForDate(todo.dueDate, this.quarters),
       notes: sanitizeTodoNotes(todo.notes),
       checklist: Array.isArray(todo.checklist)
         ? todo.checklist
@@ -709,9 +848,9 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       carryForwardCount: todo.carryForwardCount ?? 0,
       flagged: todo.flagged ?? false,
     }));
-    this.issues = this.issues.map((issue) => ({ ...issue, detail: sanitizeRichText(issue.detail), idsNote: issue.idsNote ? sanitizeRichText(issue.idsNote) : undefined, meetingsPassed: issue.meetingsPassed ?? 0, meetingBand: issueMeetingBand(issue.meetingsPassed ?? 0, issue.status), escalationState: issue.escalationState ?? 'not-scheduled', escalationLevel: issue.escalationLevel ?? 0 }));
-    this.headlines = this.headlines.map((headline) => ({ ...headline, title: typeof headline.title === 'string' ? headline.title.trim() : '', detail: typeof headline.detail === 'string' ? sanitizeRichText(headline.detail) : '' })).filter((headline) => headline.teamId && headline.title && (headline.type === 'win' || headline.type === 'concern'));
-    this.meetings = this.meetings.map((meeting) => normalizedMeeting(this.team(meeting.teamId) ?? undefined, { ...meeting, sectionNotes: Object.fromEntries(Object.entries(meeting.sectionNotes ?? {}).map(([section, note]) => [section, sanitizeRichText(note)])), idsIssueIds: meeting.idsIssueIds ?? [], idsAddedIssueIds: meeting.idsAddedIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: (meeting.idsNotes ?? []).map((note) => ({ ...note, note: sanitizeRichText(note.note) })), agendaTotal: meetingSectionsFor(this.team(meeting.teamId) ?? { meetingSections: DEFAULT_MEETING_SECTIONS }).length }));
+    this.issues = this.issues.map((issue) => ({ ...issue, quarterId: issue.quarterId ?? quarterIdForDate(issue.createdAt, this.quarters), detail: sanitizeRichText(issue.detail), idsNote: issue.idsNote ? sanitizeRichText(issue.idsNote) : undefined, meetingsPassed: issue.meetingsPassed ?? 0, meetingBand: issueMeetingBand(issue.meetingsPassed ?? 0, issue.status), escalationState: issue.escalationState ?? 'not-scheduled', escalationLevel: issue.escalationLevel ?? 0 }));
+    this.headlines = this.headlines.map((headline) => ({ ...headline, quarterId: headline.quarterId ?? quarterIdForDate(headline.createdAt, this.quarters), title: typeof headline.title === 'string' ? headline.title.trim() : '', detail: typeof headline.detail === 'string' ? sanitizeRichText(headline.detail) : '' })).filter((headline) => headline.teamId && headline.title && (headline.type === 'win' || headline.type === 'concern'));
+    this.meetings = this.meetings.map((meeting) => normalizedMeeting(this.team(meeting.teamId) ?? undefined, { ...meeting, quarterId: meeting.quarterId ?? quarterIdForDate(meeting.scheduledDate, this.quarters), sectionNotes: Object.fromEntries(Object.entries(meeting.sectionNotes ?? {}).map(([section, note]) => [section, sanitizeRichText(note)])), idsIssueIds: meeting.idsIssueIds ?? [], idsAddedIssueIds: meeting.idsAddedIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: (meeting.idsNotes ?? []).map((note) => ({ ...note, note: sanitizeRichText(note.note) })), agendaTotal: meetingSectionsFor(this.team(meeting.teamId) ?? { meetingSections: DEFAULT_MEETING_SECTIONS }).length }));
     this.issues = this.issues.map((issue) => issueAge(issue, this.settings));
   }
 
@@ -808,12 +947,19 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     return teamIds;
   }
 
+  protected resolveQuarterId(requestedQuarterId: string | undefined, associatedDate: string | Date = new Date()) {
+    const resolved = requestedQuarterId ?? quarterIdForDate(associatedDate, this.quarters);
+    if (!resolved || !this.quarters.some((quarter) => quarter.id === resolved)) throw new RepositoryError('VALIDATION', 'Choose a valid quarter.');
+    return resolved;
+  }
+
   protected createUpcomingMeeting(team: TeamRecord, scheduledDate: string, template?: MeetingRecord, idsIssueIds: string[] = []): MeetingRecord {
     const sections = meetingSectionsFor(team);
     return {
       ...baseRecord(generatedId('meeting'), 'meeting', team.teamId),
       kind: 'meeting',
       teamId: team.teamId,
+      quarterId: quarterIdForDate(scheduledDate, this.quarters),
       label: `${team.shortName} L10`,
       dateLabel: meetingDateLabel(scheduledDate),
       scheduledDate,
@@ -874,7 +1020,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       criticalDays: this.settings.criticalDays,
       version: this.settings.version ?? this.settingsVersion,
     };
-    return clone([...this.teams, ...this.users, ...this.memberships, ...this.rocks, ...this.tasks, ...this.todos, ...this.issues, ...this.transfers, ...this.notifications, ...this.messages, ...this.headlines, ...this.meetings, ...this.summaryJobs, ...this.metrics, ...this.scorecardResults, ...this.audit, settings].map((record) => ({ ...record, environmentId: this.environmentId })));
+    return clone([...this.quarters, ...this.teams, ...this.users, ...this.memberships, ...this.rocks, ...this.tasks, ...this.todos, ...this.issues, ...this.transfers, ...this.notifications, ...this.messages, ...this.headlines, ...this.meetings, ...this.summaryJobs, ...this.metrics, ...this.scorecardResults, ...this.vtos, ...this.vtoVersions, ...this.audit, settings].map((record) => ({ ...record, environmentId: this.environmentId })));
   }
 
   async getTeamMembership(teamId: string, userId: string) {
@@ -935,10 +1081,51 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     const metrics = this.metrics.filter((metric) => metric.teamId === teamId);
     const scorecardResults = this.scorecardResults.filter((result) => result.teamId === teamId);
     const headlines = this.headlines.filter((headline) => headline.teamId === teamId);
-    return { environmentId: this.environmentId, team: clone(team), membership: clone(this.membership(teamId, userId) ? { teamId, role: this.membership(teamId, userId)!.role, active: true } : null), dashboard: dashboardFor(teamId, rocks, todos, issues), rocks: clone(rocks), tasks: clone(tasks), todos: clone(todos), issues: clone(issues), transfers: clone(transfers), notifications: clone(notifications), messages: clone(messages), meetings: clone(meetings), metrics: clone(metrics), scorecardResults: clone(scorecardResults), headlines: clone(headlines), etag: etagFor([...rocks, ...tasks, ...todos, ...issues, ...transfers, ...messages, ...meetings, ...metrics, ...scorecardResults, ...headlines]) };
+    const vto = this.vtos.find((candidate) => candidate.teamId === teamId) ?? null;
+    const vtoVersions = this.vtoVersions.filter((candidate) => candidate.teamId === teamId);
+    return { environmentId: this.environmentId, team: clone(team), membership: clone(this.membership(teamId, userId) ? { teamId, role: this.membership(teamId, userId)!.role, active: true } : null), dashboard: dashboardFor(teamId, rocks, todos, issues), rocks: clone(rocks), tasks: clone(tasks), todos: clone(todos), issues: clone(issues), transfers: clone(transfers), notifications: clone(notifications), messages: clone(messages), meetings: clone(meetings), metrics: clone(metrics), scorecardResults: clone(scorecardResults), headlines: clone(headlines), vto: clone(vto), vtoVersions: clone(vtoVersions), etag: etagFor([...rocks, ...tasks, ...todos, ...issues, ...transfers, ...messages, ...meetings, ...metrics, ...scorecardResults, ...headlines, ...(vto ? [vto] : []), ...vtoVersions]) };
   }
 
-  async getWorkspaceSnapshot(userId: string): Promise<WorkspaceSnapshot> {
+  async getVto(teamId: string, userId: string): Promise<VtoDocument> {
+    this.requireUser(userId);
+    this.requireRead(teamId, userId);
+    return clone({ current: this.vtos.find((vto) => vto.teamId === teamId) ?? null, versions: this.vtoVersions.filter((version) => version.teamId === teamId).sort((left, right) => right.versionNumber - left.versionNumber) });
+  }
+
+  async createHistoricalMeeting(input: CreateHistoricalMeetingInput, actorId: string) {
+    this.requireWrite(input.teamId, actorId);
+    const team = this.team(input.teamId);
+    if (!team) throw new RepositoryError('NOT_FOUND', 'Team not found.');
+    if (team.nodeType !== 'operational') throw new RepositoryError('VALIDATION', 'Grouping-only nodes cannot own L10 meetings.');
+    const scheduledDate = normalizeDate(input.scheduledDate, 'Meeting date');
+    const scheduledTime = typeof input.scheduledTime === 'string' ? input.scheduledTime.trim() : '';
+    if (!scheduledTime || !Number.isFinite(meetingScheduledAt({ scheduledDate, scheduledTime }))) throw new RepositoryError('VALIDATION', 'Meeting time must be a valid time.');
+    if (scheduledDate > new Date().toISOString().slice(0, 10)) throw new RepositoryError('VALIDATION', 'A historical meeting must be today or earlier.');
+    if (meetingScheduledAt({ scheduledDate, scheduledTime }) > Date.now()) throw new RepositoryError('VALIDATION', 'A historical meeting must have a time in the past.');
+    const quarterId = this.resolveQuarterId(input.quarterId, scheduledDate);
+    if (input.quarterId && quarterIdForDate(scheduledDate, this.quarters) !== input.quarterId) throw new RepositoryError('VALIDATION', 'The meeting date must fall within the selected quarter.');
+    if (this.meetings.some((meeting) => meeting.teamId === input.teamId && meeting.scheduledDate === scheduledDate && meeting.scheduledTime === scheduledTime)) throw new RepositoryError('CONFLICT', 'A meeting already exists for that team, date, and time.');
+    if (!Array.isArray(input.attendeeIds) || input.attendeeIds.length === 0) throw new RepositoryError('VALIDATION', 'Record at least one attendee.');
+    const activeMemberIds = new Set(this.memberships.filter((membership) => membership.teamId === input.teamId && membership.active && this.user(membership.userId)).map((membership) => membership.userId));
+    if (!activeMemberIds.has(input.facilitatorId)) throw new RepositoryError('VALIDATION', 'Facilitator must be an active member of the team.');
+    if (new Set(input.attendeeIds).size !== input.attendeeIds.length || input.attendeeIds.some((userId) => !activeMemberIds.has(userId))) throw new RepositoryError('VALIDATION', 'Every attendee must be a unique active member of the team.');
+    const rating = input.rating ?? 0;
+    if (rating !== 0 && !isValidMeetingRating(rating)) throw new RepositoryError('VALIDATION', 'Meeting rating must be 0 or a half-point value from 0.5 to 10.');
+    if (input.recap !== undefined && typeof input.recap !== 'string') throw new RepositoryError('VALIDATION', 'Meeting recap must be text.');
+    if (input.idsNote !== undefined && typeof input.idsNote !== 'string') throw new RepositoryError('VALIDATION', 'IDS notes must be text.');
+    const timestamp = nowIso();
+    const scheduledAt = meetingScheduledAt({ scheduledDate, scheduledTime });
+    const closedAt = new Date(Math.min(scheduledAt, Date.now())).toISOString();
+    const meeting: MeetingRecord = {
+      ...baseRecord(generatedId('meeting'), 'meeting', input.teamId),
+      kind: 'meeting', teamId: input.teamId, quarterId, label: `${team.shortName} L10`, dateLabel: meetingDateLabel(scheduledDate), scheduledDate, scheduledTime, recurrenceDate: undefined, weekStartDate: weekStartDateFor(scheduledDate), status: 'closed', facilitatorId: input.facilitatorId, attendeeIds: [...input.attendeeIds], lastRating: rating, agendaProgress: meetingSectionsFor(team).length, agendaTotal: meetingSectionsFor(team).length, idsSolved: 0, idsTotal: 0, recap: sanitizeRichText(input.recap), startedAt: new Date(Math.max(0, scheduledAt - meetingSectionsFor(team).reduce((total, section) => total + section.duration, 0) * 60_000)).toISOString(), closedAt, durationSeconds: undefined, sectionNotes: input.idsNote?.trim() ? { ids: sanitizeRichText(input.idsNote) } : {}, idsIssueIds: [], idsAddedIssueIds: [], createdTodoIds: [], idsNotes: [], aiSummaryStatus: 'not-generated', aiSummarySource: 'legacy', createdAt: timestamp, updatedAt: timestamp, updatedBy: actorId, version: 1,
+    };
+    this.meetings.push(meeting);
+    this.recordAudit(actorId, 'Recorded historical L10 meeting', meeting.id, `${team.name} · ${meeting.dateLabel}.`, 'meeting');
+    return clone(meeting);
+  }
+
+  async getWorkspaceSnapshot(userId: string, quarterId?: string): Promise<WorkspaceSnapshot> {
     const session = await this.getSessionContext(userId);
     if (!session) throw new RepositoryError('FORBIDDEN', 'The user is not active in this organization.');
     this.refreshDerivedState();
@@ -955,10 +1142,14 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     const headlines = this.headlines.filter((headline) => teamIds.has(headline.teamId));
     const meetings = this.meetings.filter((meeting) => teamIds.has(meeting.teamId));
     const metrics = this.metrics.filter((metric) => teamIds.has(metric.teamId));
-    const scorecardResults = this.scorecardResults.filter((result) => teamIds.has(result.teamId) && result.weekStartDate >= '2026-07-01' && result.weekStartDate <= '2026-09-30');
+    const scorecardResults = this.scorecardResults.filter((result) => teamIds.has(result.teamId));
+    const vtos = this.vtos.filter((vto) => teamIds.has(vto.teamId));
+    const vtoVersions = this.vtoVersions.filter((version) => teamIds.has(version.teamId));
     const notifications = this.notifications.filter((notification) => notification.recipientUserId === userId);
-    const quarterEnd = new Date('2026-09-30T23:59:59Z').getTime();
-    const daysRemaining = Math.max(0, Math.ceil((quarterEnd - Date.now()) / DAY));
+    const quarters = this.quarters.map((quarter) => quarterSummary(quarter));
+    const selectedId = quarterId ?? currentQuarterId(quarters);
+    const selectedQuarter = quarters.find((quarter) => quarter.id === selectedId);
+    if (!selectedQuarter) throw new RepositoryError('VALIDATION', 'The selected quarter does not exist.');
     return {
       environmentId: this.environmentId,
       user: clone(this.user(userId)!),
@@ -978,8 +1169,11 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       scorecardResults: clone(scorecardResults),
       headlines: clone(headlines),
       audit: clone(this.audit),
-      quarter: { id: '2026-q3', label: 'Q3 2026', theme: 'Make Q3 feel lighter.', startDate: '2026-07-01', endDate: '2026-09-30', daysRemaining },
-      etag: etagFor([...teams, ...memberships, ...rocks, ...tasks, ...todos, ...issues, ...transfers, ...messages, ...headlines, ...meetings, ...notifications, ...metrics, ...scorecardResults, ...this.audit]),
+      quarters: clone(quarters),
+      vtos: clone(vtos),
+      vtoVersions: clone(vtoVersions),
+      quarter: clone(selectedQuarter),
+      etag: etagFor([...this.quarters, ...teams, ...memberships, ...rocks, ...tasks, ...todos, ...issues, ...transfers, ...messages, ...headlines, ...meetings, ...notifications, ...metrics, ...scorecardResults, ...vtos, ...vtoVersions, ...this.audit]),
     };
   }
 
@@ -1311,11 +1505,13 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     assertText(input.title, 'Issue title');
     if (!this.user(input.raisedById)) throw new RepositoryError('FORBIDDEN', 'Issue creator is not an active organization user.');
     if (input.ownerId && !this.user(input.ownerId)) throw new RepositoryError('VALIDATION', 'Issue owner not found.');
+    const quarterId = this.resolveQuarterId(input.quarterId);
     const priority = input.priority ?? 1;
     if (!Number.isInteger(priority) || priority < 1 || priority > 5) throw new RepositoryError('VALIDATION', 'Issue priority must be between 1 and 5.');
     const issueId = input.id ?? generatedId('issue');
     if (this.issues.some((candidate) => candidate.id === issueId)) throw new RepositoryError('CONFLICT', 'An Issue with this identity already exists.');
     const issue = makeIssue({ id: issueId, teamId: input.teamId, title: input.title.trim(), raisedById: input.raisedById, ageInDays: 0, horizon: input.horizon, ownerId: input.ownerId ?? actorId });
+    issue.quarterId = quarterId;
     issue.detail = sanitizeRichText(input.detail);
     issue.priority = priority;
     issue.linkedRockId = input.linkedRockId;
@@ -1358,6 +1554,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       detail: typeof input.detail === 'string' ? sanitizeRichText(input.detail) : '',
       issueId: input.issueId,
     });
+    headline.quarterId = input.meetingId ? this.meetings.find((meeting) => meeting.id === input.meetingId)?.quarterId : this.resolveQuarterId(undefined);
     this.headlines.push(headline);
     this.recordAudit(actorId, 'Created Headline', headline.id, headline.title, 'team');
     return clone(headline);
@@ -1389,6 +1586,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       ownerId: metric.ownerId,
       linkedScorecardMetricId: metricId,
       linkedScorecardWeekStartDate: weekStartDate,
+      quarterId: quarterIdForDate(weekStartDate, this.quarters),
     }, actorId));
   }
 
@@ -1411,6 +1609,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       raisedById: actorId,
       ownerId: rock.ownerId,
       linkedRockId: rockId,
+      quarterId: rock.quarterId,
     }, actorId));
   }
 
@@ -1665,7 +1864,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     const followUpId = `todo-follow-up-${issue.id}`;
     let followUpCreated = false;
     if (input.createFollowUpTodo && !this.todos.some((todo) => todo.id === followUpId)) {
-      const followUp = makeTodo({ id: followUpId, teamId: issue.teamId, title: `Follow up on the solution: ${issue.title}`, ownerId: actorId, dueDate: new Date(Date.now() + 7 * DAY).toISOString().slice(0, 10), sourceIssueId: issue.id });
+      const followUp = makeTodo({ id: followUpId, teamId: issue.teamId, quarterId: issue.quarterId, title: `Follow up on the solution: ${issue.title}`, ownerId: actorId, dueDate: new Date(Date.now() + 7 * DAY).toISOString().slice(0, 10), sourceIssueId: issue.id });
       followUp.origin = `IDS · ${issue.title}`;
       followUp.updatedBy = actorId;
       this.todos.push(followUp);
@@ -1702,14 +1901,18 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     return clone(issueAge(issue, this.settings));
   }
 
-  async createRock(input: { teamId: string; title: string; description?: string; notes?: string; ownerId: string; dueDate?: string; priority?: RockRecord['priority'] }, actorId: string) {
+  async createRock(input: { teamId: string; quarterId?: string; title: string; description?: string; notes?: string; ownerId: string; dueDate?: string; priority?: RockRecord['priority'] }, actorId: string) {
     this.requireWrite(input.teamId, actorId);
     const team = this.team(input.teamId);
     if (!team) throw new RepositoryError('NOT_FOUND', 'Team not found.');
     if (team.nodeType !== 'operational') throw new RepositoryError('VALIDATION', 'Grouping-only nodes cannot own Rocks.');
     assertText(input.title, 'Rock title');
     if (!this.user(input.ownerId)) throw new RepositoryError('VALIDATION', 'Rock owner not found.');
-    const rock = makeRock({ id: generatedId('rock'), teamId: input.teamId, title: input.title.trim(), ownerId: input.ownerId, priority: input.priority, dueDate: input.dueDate });
+    const quarterId = this.resolveQuarterId(input.quarterId, input.dueDate ?? new Date());
+    const quarter = this.quarters.find((candidate) => candidate.id === quarterId)!;
+    const dueDate = normalizeDate(input.dueDate ?? quarter.endDate, 'Rock due date');
+    if (input.quarterId && quarterIdForDate(dueDate, this.quarters) !== input.quarterId) throw new RepositoryError('VALIDATION', 'The Rock due date must fall within the selected quarter.');
+    const rock = makeRock({ id: generatedId('rock'), teamId: input.teamId, quarterId, title: input.title.trim(), ownerId: input.ownerId, priority: input.priority, dueDate });
     rock.description = input.description?.trim() ?? '';
     rock.notes = sanitizeRichText(input.notes);
     rock.updatedBy = actorId;
@@ -1726,6 +1929,8 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     assertText(input.title, 'To-Do title');
     if (!this.user(input.ownerId)) throw new RepositoryError('VALIDATION', 'To-Do owner not found.');
     const dueDate = normalizeDate(input.dueDate, 'Due date');
+    const quarterId = this.resolveQuarterId(input.quarterId, dueDate);
+    if (input.quarterId && quarterIdForDate(dueDate, this.quarters) !== input.quarterId) throw new RepositoryError('VALIDATION', 'The To-Do due date must fall within the selected quarter.');
     if (input.linkedRockTaskId) {
       const linkedTask = this.tasks.find((task) => task.id === input.linkedRockTaskId);
       if (!linkedTask) throw new RepositoryError('NOT_FOUND', 'Linked Rock Task not found.');
@@ -1737,12 +1942,48 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       if (!sourceIssue) throw new RepositoryError('NOT_FOUND', 'Source Issue not found.');
       if ((sourceIssue.currentTeamId ?? sourceIssue.teamId) !== input.teamId) throw new RepositoryError('VALIDATION', 'Source Issue must belong to the same team.');
     }
-    const todo = makeTodo({ id: generatedId('todo'), teamId: input.teamId, title: input.title.trim(), ownerId: input.ownerId, dueDate, linkedRockTaskId: input.linkedRockTaskId, sourceIssueId: input.sourceIssueId });
+    const todo = makeTodo({ id: generatedId('todo'), teamId: input.teamId, quarterId, title: input.title.trim(), ownerId: input.ownerId, dueDate, linkedRockTaskId: input.linkedRockTaskId, sourceIssueId: input.sourceIssueId });
     todo.notes = sanitizeTodoNotes(input.notes);
     todo.updatedBy = actorId;
     this.todos.push(todo);
     this.recordAudit(actorId, 'Created To-Do', todo.id, todo.title, 'todo');
     return clone(todo);
+  }
+
+  async saveVto(teamId: string, input: SaveVtoInput, actorId: string, expectedVersion?: number) {
+    const membership = this.membership(teamId, actorId);
+    if (!membership || !canManageTeam(membership.role)) throw new RepositoryError('FORBIDDEN', 'Only a TeamLead or OrgAdmin can edit the team V/TO.');
+    const team = this.team(teamId);
+    if (!team) throw new RepositoryError('NOT_FOUND', 'Team not found.');
+    if (team.nodeType !== 'operational') throw new RepositoryError('VALIDATION', 'Grouping-only nodes cannot own a V/TO.');
+    const normalized = normalizeVtoInput(input);
+    for (const rockId of normalized.quarterlyRockIds) {
+      const rock = this.rocks.find((candidate) => candidate.id === rockId);
+      if (!rock || rock.teamId !== teamId) throw new RepositoryError('VALIDATION', 'Every V/TO Quarterly Rock must belong to this team.');
+    }
+    for (const issueId of normalized.issueIds) {
+      const issue = this.activeIssue(issueId);
+      if (!issue || issue.teamId !== teamId) throw new RepositoryError('VALIDATION', 'Every V/TO Issue must belong to this team.');
+    }
+    const current = this.vtos.find((candidate) => candidate.teamId === teamId);
+    if (current) assertExpectedVersion(current.version, expectedVersion);
+    else if (expectedVersion !== undefined) throw new RepositoryError('CONFLICT', 'This team V/TO does not exist yet. Refresh and try again.');
+    const timestamp = nowIso();
+    const versionNumber = (current?.versionNumber ?? this.vtoVersions.filter((version) => version.teamId === teamId).reduce((highest, version) => Math.max(highest, version.versionNumber), 0)) + 1;
+    const vtoId = `vto-${teamId}`;
+    const next: VtoRecord = {
+      ...(current ? clone(current) : baseRecord(vtoId, 'vto', teamId)),
+      kind: 'vto', teamId, ...clone(normalized), versionNumber, savedBy: actorId, updatedAt: timestamp, updatedBy: actorId, version: current ? current.version + 1 : 1,
+    };
+    const snapshot: VtoVersionRecord = {
+      ...baseRecord(`${vtoId}-version-${versionNumber}`, 'vtoVersion', teamId, versionNumber),
+      kind: 'vtoVersion', teamId, vtoId, ...clone(normalized), versionNumber, savedBy: actorId,
+    };
+    if (current) this.vtos = this.vtos.map((candidate) => candidate.teamId === teamId ? next : candidate);
+    else this.vtos.push(next);
+    this.vtoVersions.push(snapshot);
+    this.recordAudit(actorId, 'Updated team V/TO', vtoId, `${team.name} V/TO version ${versionNumber} saved.`, 'vto');
+    return clone(next);
   }
 
   async createRockTask(input: { rockId: string; title: string; notes?: string; assigneeId: string; assignedAt: string; startDate: string; dueDate: string }, actorId: string) {
@@ -1824,7 +2065,8 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       const existing = this.todos.find((todo) => todo.id === task.linkedTodoId);
       if (existing) return { task: clone(task), todo: clone(existing) };
     }
-    const todo = await this.createTodo({ teamId: task.teamId, title: task.title, notes: task.notes, ownerId: task.assigneeId, dueDate: task.dueDate }, actorId);
+    const rock = this.rocks.find((candidate) => candidate.id === task.rockId);
+    const todo = await this.createTodo({ teamId: task.teamId, quarterId: rock?.quarterId, title: task.title, notes: task.notes, ownerId: task.assigneeId, dueDate: task.dueDate }, actorId);
     const storedTodo = this.todos.find((item) => item.id === todo.id);
     if (!storedTodo) throw new RepositoryError('CONFLICT', 'The linked To-Do could not be created.');
     storedTodo.origin = `Rock Task · ${task.rockId}`;
@@ -2010,7 +2252,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     }
     assertText(input.title, 'Issue title');
     assertText(input.detail, 'Issue detail');
-    const issue = await this.createIssue({ teamId: message.toTeamId, title: input.title, detail: input.detail, priority: input.priority, horizon: input.horizon, ownerId: input.ownerId ?? actorId, raisedById: actorId }, actorId);
+    const issue = await this.createIssue({ teamId: message.toTeamId, quarterId: this.resolveQuarterId(undefined), title: input.title, detail: input.detail, priority: input.priority, horizon: input.horizon, ownerId: input.ownerId ?? actorId, raisedById: actorId }, actorId);
     const timestamp = nowIso();
     message.status = 'converted';
     message.convertedIssueId = issue.id;
@@ -2500,6 +2742,8 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
       const teamPartitions = await Promise.all(seededTeams.map((team) => this.query<WorkspaceRecord>('SELECT * FROM c WHERE c.pk = @pk', [{ name: '@pk', value: partitionFor('team', team.teamId) }], partitionFor('team', team.teamId))));
       const records = [...orgRecords, ...teamPartitions.flat()].map((record) => ({ ...record, environmentId: this.environmentId, cosmosEtag: record.cosmosEtag ?? (record as WorkspaceRecord & { _etag?: string })._etag }));
       const ofKind = <T extends WorkspaceRecord>(kind: T['kind']) => records.filter((record) => record.kind === kind) as T[];
+      this.quarters = ofKind<QuarterRecord>('quarter');
+      if (!this.quarters.length) this.quarters = defaultQuarterRecords();
       this.teams = ofKind<TeamRecord>('team');
       this.users = ofKind<UserProfile>('user');
       this.memberships = ofKind<TeamMembership>('teamMembership');
@@ -2519,6 +2763,8 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
       this.summaryJobs = ofKind<MeetingSummaryJobRecord>('meetingSummaryJob');
       this.metrics = ofKind<ScorecardMetricRecord>('scorecardMetric');
       this.scorecardResults = ofKind<ScorecardResultRecord>('scorecardResult');
+      this.vtos = ofKind<VtoRecord>('vto');
+      this.vtoVersions = ofKind<VtoVersionRecord>('vtoVersion');
       this.audit = ofKind<AuditEventRecord>('auditEvent');
       this.settingsRecord = ofKind<IssueAgeSettingsRecord>('issueAgeSettings')[0];
       this.settings = this.settingsRecord ? { agingDays: this.settingsRecord.agingDays, staleDays: this.settingsRecord.staleDays, criticalDays: this.settingsRecord.criticalDays, version: this.settingsRecord.version } : clone(DEFAULT_ISSUE_AGE_SETTINGS);
@@ -2538,7 +2784,7 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
   }
 
   private allRecords(): WorkspaceRecord[] {
-    const records: WorkspaceRecord[] = [...this.teams, ...this.users, ...this.memberships, ...this.rocks, ...this.tasks, ...this.todos, ...this.issues, ...this.transfers, ...this.notifications, ...this.messages, ...this.headlines, ...this.meetings, ...this.summaryJobs, ...this.metrics, ...this.scorecardResults, ...this.audit];
+    const records: WorkspaceRecord[] = [...this.quarters, ...this.teams, ...this.users, ...this.memberships, ...this.rocks, ...this.tasks, ...this.todos, ...this.issues, ...this.transfers, ...this.notifications, ...this.messages, ...this.headlines, ...this.meetings, ...this.summaryJobs, ...this.metrics, ...this.scorecardResults, ...this.vtos, ...this.vtoVersions, ...this.audit];
     if (this.settingsRecord) records.push(this.settingsRecord);
     return records;
   }
@@ -2742,12 +2988,13 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
     await this.maintainMeetingWindowsAndPersist();
     if (!this.team(teamId)) throw new RepositoryError('NOT_FOUND', 'Team not found.');
     this.requireRead(teamId, userId);
-    const [team, membership, rocks, tasks, todos, issues, transfers, notifications, messages, meetings, metrics, scorecardResults, headlines, settings] = await Promise.all([
+    const [team, membership, rocks, tasks, todos, issues, transfers, notifications, messages, meetings, metrics, scorecardResults, headlines, settings, vto, vtoVersions] = await Promise.all([
       this.orgRecords<TeamRecord>('team').then((items) => items.find((item) => item.teamId === teamId && item.active) ?? null),
       this.getTeamMembership(teamId, userId),
       this.teamRecords<RockRecord>(teamId, 'rock'), this.teamRecords<RockTaskRecord>(teamId, 'rockTask'), this.teamRecords<TodoRecord>(teamId, 'todo'), this.teamRecords<IssueRecord>(teamId, 'issue'), this.orgRecords<IssueTransferRecord>('issueTransfer'), this.orgRecords<NotificationRecord>('notification'),
       this.orgRecords<TeamMessageRecord>('message'), this.teamRecords<MeetingRecord>(teamId, 'meeting'), this.teamRecords<ScorecardMetricRecord>(teamId, 'scorecardMetric'), this.teamRecords<ScorecardResultRecord>(teamId, 'scorecardResult'),
       this.orgRecords<HeadlineRecord>('headline'), this.ageSettings(),
+      this.teamRecords<VtoRecord>(teamId, 'vto').then((items) => items[0] ?? null), this.teamRecords<VtoVersionRecord>(teamId, 'vtoVersion'),
     ]);
     if (!team) throw new RepositoryError('NOT_FOUND', 'Team not found.');
     const teamRocks = rocks.map((rock) => ({ ...rock, notes: sanitizeRichText(rock.notes) }));
@@ -2757,10 +3004,15 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
     const teamMessages = messages.filter((message) => message.fromTeamId === teamId || message.toTeamId === teamId);
     const teamHeadlines = headlines.filter((headline) => headline.teamId === teamId).map((headline) => ({ ...headline, detail: sanitizeRichText(headline.detail) }));
     const normalizedMeetings = meetings.map((meeting) => normalizedMeeting(team, meeting));
-    return this.publicValue({ environmentId: this.environmentId, team: clone(team), membership: membership ? { teamId, role: membership.role, active: membership.active } : null, dashboard: dashboardFor(teamId, teamRocks, todos, teamIssues), rocks: clone(teamRocks), tasks: clone(tasks), todos: clone(todos), issues: clone(teamIssues), transfers: clone(teamTransfers), notifications: clone(teamNotifications), messages: clone(teamMessages), meetings: clone(normalizedMeetings), metrics: clone(metrics), scorecardResults: clone(scorecardResults), headlines: clone(teamHeadlines), etag: etagFor([...teamRocks, ...tasks, ...todos, ...teamIssues, ...teamTransfers, ...teamMessages, ...normalizedMeetings, ...metrics, ...scorecardResults, ...teamHeadlines]) });
+    return this.publicValue({ environmentId: this.environmentId, team: clone(team), membership: membership ? { teamId, role: membership.role, active: membership.active } : null, dashboard: dashboardFor(teamId, teamRocks, todos, teamIssues), rocks: clone(teamRocks), tasks: clone(tasks), todos: clone(todos), issues: clone(teamIssues), transfers: clone(teamTransfers), notifications: clone(teamNotifications), messages: clone(teamMessages), meetings: clone(normalizedMeetings), metrics: clone(metrics), scorecardResults: clone(scorecardResults), headlines: clone(teamHeadlines), vto: clone(vto), vtoVersions: clone(vtoVersions), etag: etagFor([...teamRocks, ...tasks, ...todos, ...teamIssues, ...teamTransfers, ...teamMessages, ...normalizedMeetings, ...metrics, ...scorecardResults, ...teamHeadlines, ...(vto ? [vto] : []), ...vtoVersions]) });
   }
 
-  async getWorkspaceSnapshot(userId: string): Promise<WorkspaceSnapshot> {
+  async getVto(teamId: string, userId: string) {
+    await this.ensureLoaded();
+    return this.publicValue(await super.getVto(teamId, userId));
+  }
+
+  async getWorkspaceSnapshot(userId: string, quarterId?: string): Promise<WorkspaceSnapshot> {
     const session = await this.getSessionContext(userId);
     if (!session) throw new RepositoryError('FORBIDDEN', 'The user is not active in this organization.');
     const teamWorkspaces = await Promise.all(session.teams.map((team) => this.getTeamWorkspace(team.teamId, userId)));
@@ -2782,10 +3034,13 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
     const messages = unique(teamWorkspaces.flatMap((workspace) => workspace.messages));
     const meetings = unique(teamWorkspaces.flatMap((workspace) => workspace.meetings));
     const metrics = unique(teamWorkspaces.flatMap((workspace) => workspace.metrics));
-    const quarterStart = '2026-07-01';
+    const vtos = unique(teamWorkspaces.flatMap((workspace) => workspace.vto ? [workspace.vto] : []));
+    const vtoVersions = unique(teamWorkspaces.flatMap((workspace) => workspace.vtoVersions));
     const visibleTeamIds = new Set(teams.map((team) => team.teamId));
-    const quarterEnd = new Date('2026-09-30T23:59:59Z').getTime();
-    const scorecardResults = unique(teamWorkspaces.flatMap((workspace) => workspace.scorecardResults)).filter((result) => result.weekStartDate >= quarterStart && result.weekStartDate <= '2026-09-30');
+    const scorecardResults = unique(teamWorkspaces.flatMap((workspace) => workspace.scorecardResults));
+    const quarters = this.quarters.map((quarter) => quarterSummary(quarter));
+    const selectedQuarter = quarters.find((quarter) => quarter.id === (quarterId ?? currentQuarterId(quarters)));
+    if (!selectedQuarter) throw new RepositoryError('VALIDATION', 'The selected quarter does not exist.');
     return this.publicValue({
       environmentId: this.environmentId,
       user: clone((await this.getUser(userId))!),
@@ -2805,8 +3060,11 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
       scorecardResults: clone(scorecardResults.filter((result) => visibleTeamIds.has(result.teamId))),
       headlines: clone(headlines.filter((headline) => visibleTeamIds.has(headline.teamId ?? ''))),
       audit: clone(audit),
-      quarter: { id: '2026-q3', label: 'Q3 2026', theme: 'Make Q3 feel lighter.', startDate: '2026-07-01', endDate: '2026-09-30', daysRemaining: Math.max(0, Math.ceil((quarterEnd - Date.now()) / DAY)) },
-      etag: etagFor([...teams, ...users, ...memberships, ...rocks, ...tasks, ...todos, ...issues, ...transfers, ...notifications, ...messages, ...meetings, ...metrics, ...scorecardResults, ...headlines, ...audit]),
+      quarters: clone(quarters),
+      vtos: clone(vtos.filter((vto) => visibleTeamIds.has(vto.teamId))),
+      vtoVersions: clone(vtoVersions.filter((version) => visibleTeamIds.has(version.teamId))),
+      quarter: clone(selectedQuarter),
+      etag: etagFor([...this.quarters, ...teams, ...users, ...memberships, ...rocks, ...tasks, ...todos, ...issues, ...transfers, ...notifications, ...messages, ...meetings, ...metrics, ...scorecardResults, ...headlines, ...vtos, ...vtoVersions, ...audit]),
     });
   }
 
@@ -2814,6 +3072,9 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
     await this.maintainMeetingWindowsAndPersist();
     return this.publicValue(await super.getMeetingReview(userId, query));
   }
+
+  async saveVto(teamId: string, input: SaveVtoInput, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.saveVto(teamId, input, actorId, expectedVersion)); }
+  async createHistoricalMeeting(input: CreateHistoricalMeetingInput, actorId: string) { return this.withMutation(actorId, () => super.createHistoricalMeeting(input, actorId)); }
 
   async getMeeting(teamId: string, meetingId: string, userId: string) {
     await this.maintainMeetingWindowsAndPersist();
@@ -2941,7 +3202,7 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
   async parkIssue(issueId: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.parkIssue(issueId, actorId, expectedVersion)); }
   async solveIssue(issueId: string, input: SolveIssueInput, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.solveIssue(issueId, input, actorId, expectedVersion)); }
   async reopenIssue(issueId: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.reopenIssue(issueId, actorId, expectedVersion)); }
-  async createRock(input: { teamId: string; title: string; description?: string; notes?: string; ownerId: string; dueDate?: string; priority?: RockRecord['priority'] }, actorId: string) { return this.withMutation(actorId, () => super.createRock(input, actorId)); }
+  async createRock(input: { teamId: string; quarterId?: string; title: string; description?: string; notes?: string; ownerId: string; dueDate?: string; priority?: RockRecord['priority'] }, actorId: string) { return this.withMutation(actorId, () => super.createRock(input, actorId)); }
   async createTodo(input: CreateTodoInput, actorId: string) { return this.withMutation(actorId, () => super.createTodo(input, actorId)); }
   async createRockTask(input: { rockId: string; title: string; notes?: string; assigneeId: string; assignedAt: string; startDate: string; dueDate: string }, actorId: string) { return this.withMutation(actorId, () => super.createRockTask(input, actorId)); }
   async updateRockTask(taskId: string, input: Partial<Pick<RockTaskRecord, 'title' | 'notes' | 'assigneeId' | 'assignedAt' | 'startDate' | 'dueDate' | 'status'>>, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateRockTask(taskId, input, actorId, expectedVersion)); }

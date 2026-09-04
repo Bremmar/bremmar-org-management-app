@@ -24,6 +24,32 @@ test('team workspaces enforce direct membership while Leadership can drill down 
   await rejectsWithCode(repository.getTeamWorkspace('projects', 'priya-shah'), 'FORBIDDEN');
 });
 
+test('quarter snapshots support historical context, next-quarter Rocks, and versioned team V/TO edits', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const historical = await repository.getWorkspaceSnapshot('marcus-lee', '2026-q2');
+  assert.deepEqual({ id: historical.quarter.id, status: historical.quarter.status }, { id: '2026-q2', status: 'past' });
+
+  const nextQuarter = historical.quarters.find((quarter) => quarter.id === '2026-q4');
+  assert.ok(nextQuarter);
+  const rock = await repository.createRock({ teamId: 'projects', quarterId: nextQuarter.id, title: 'Prepare next-quarter planning', ownerId: 'marcus-lee', dueDate: nextQuarter.endDate, priority: 'high' }, 'marcus-lee');
+  assert.equal(rock.quarterId, '2026-q4');
+  await rejectsWithCode(repository.createRock({ teamId: 'projects', quarterId: nextQuarter.id, title: 'Mismatched due date', ownerId: 'marcus-lee', dueDate: '2026-09-30' }, 'marcus-lee'), 'VALIDATION');
+
+  const document = await repository.getVto('projects', 'marcus-lee');
+  assert.ok(document.current);
+  const current = document.current!;
+  const saved = await repository.saveVto('projects', { coreValues: [...current.coreValues], coreFocusPurpose: current.coreFocusPurpose, coreFocusNiche: current.coreFocusNiche, tenYearTarget: current.tenYearTarget, marketingStrategy: structuredClone(current.marketingStrategy), threeYearPicture: structuredClone(current.threeYearPicture), oneYearPlan: structuredClone(current.oneYearPlan), quarterlyRockIds: [rock.id], issueIds: [...current.issueIds], effectiveDate: '2026-10-01', changeSummary: 'Set the next-quarter priority.' }, 'marcus-lee', current.version);
+  assert.deepEqual({ versionNumber: saved.versionNumber, effectiveDate: saved.effectiveDate }, { versionNumber: current.versionNumber + 1, effectiveDate: '2026-10-01' });
+  assert.equal((await repository.getVto('projects', 'marcus-lee')).versions.some((version) => version.versionNumber === saved.versionNumber && version.quarterlyRockIds.includes(rock.id)), true);
+  await rejectsWithCode(repository.saveVto('projects', { coreValues: [...saved.coreValues], coreFocusPurpose: saved.coreFocusPurpose, coreFocusNiche: saved.coreFocusNiche, tenYearTarget: saved.tenYearTarget, marketingStrategy: structuredClone(saved.marketingStrategy), threeYearPicture: structuredClone(saved.threeYearPicture), oneYearPlan: structuredClone(saved.oneYearPlan), quarterlyRockIds: [...saved.quarterlyRockIds], issueIds: [...saved.issueIds], effectiveDate: saved.effectiveDate, changeSummary: 'Stale edit.' }, 'marcus-lee', current.version), 'CONFLICT');
+
+  const meeting = await repository.createHistoricalMeeting({ teamId: 'projects', scheduledDate: '2026-09-02', scheduledTime: '9:00 AM', facilitatorId: 'marcus-lee', attendeeIds: ['marcus-lee'], rating: 8.5, recap: 'Historical recap.', idsNote: 'Historical IDS decision.' }, 'marcus-lee');
+  assert.deepEqual({ status: meeting.status, quarterId: meeting.quarterId, rating: meeting.lastRating }, { status: 'closed', quarterId: '2026-q3', rating: 8.5 });
+  await rejectsWithCode(repository.createHistoricalMeeting({ teamId: 'projects', scheduledDate: '2026-09-02', scheduledTime: '9:00 AM', facilitatorId: 'marcus-lee', attendeeIds: ['marcus-lee'] }, 'marcus-lee'), 'CONFLICT');
+  await rejectsWithCode(repository.saveVto('projects', { coreValues: [...saved.coreValues], coreFocusPurpose: saved.coreFocusPurpose, coreFocusNiche: saved.coreFocusNiche, tenYearTarget: saved.tenYearTarget, marketingStrategy: structuredClone(saved.marketingStrategy), threeYearPicture: structuredClone(saved.threeYearPicture), oneYearPlan: structuredClone(saved.oneYearPlan), quarterlyRockIds: [...saved.quarterlyRockIds], issueIds: [...saved.issueIds], effectiveDate: saved.effectiveDate, changeSummary: 'Unauthorized edit.' }, 'priya-shah', saved.version), 'FORBIDDEN');
+  await rejectsWithCode(repository.createHistoricalMeeting({ teamId: 'projects', quarterId: '2026-q2', scheduledDate: '2026-09-03', scheduledTime: '9:00 AM', facilitatorId: 'marcus-lee', attendeeIds: ['marcus-lee'] }, 'marcus-lee'), 'VALIDATION');
+});
+
 test('PlatformAdmin can administer configuration without receiving work-data access', async () => {
   const repository = new MemoryWorkspaceRepository();
   const user = await repository.createUser({ name: 'Platform Only', email: 'platform-only@bremmar.com', accent: '#123456', platformAdmin: true }, 'ava-khan');

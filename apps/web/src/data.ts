@@ -16,6 +16,9 @@ import type {
   TeamMembership,
   Todo,
   User,
+  Vto,
+  VtoContent,
+  VtoVersion,
   Workspace,
 } from './types';
 
@@ -25,6 +28,14 @@ const daysAgo = (days: number) => new Date(now - days * DAY).toISOString();
 const today = new Date(now).toISOString().slice(0, 10);
 const currentWeekStartDate = weekStartDateFor(new Date(now));
 const previousWeekStartDate = weekStartDateFor(new Date(new Date(currentWeekStartDate).getTime() - 7 * DAY));
+
+const quarters = [
+  { id: '2026-q1', label: 'Q1 2026', theme: 'Make the foundation visible.', startDate: '2026-01-01', endDate: '2026-03-31', status: 'past' as const, daysRemaining: 0 },
+  { id: '2026-q2', label: 'Q2 2026', theme: 'Create useful momentum.', startDate: '2026-04-01', endDate: '2026-06-30', status: 'past' as const, daysRemaining: 0 },
+  { id: '2026-q3', label: 'Q3 2026', theme: 'Make Q3 feel lighter.', startDate: '2026-07-01', endDate: '2026-09-30', status: 'current' as const, daysRemaining: 28 },
+  { id: '2026-q4', label: 'Q4 2026', theme: 'Finish the year with focus.', startDate: '2026-10-01', endDate: '2026-12-31', status: 'upcoming' as const, daysRemaining: 0, daysUntilStart: 27 },
+  { id: '2027-q1', label: 'Q1 2027', theme: 'Turn clarity into traction.', startDate: '2027-01-01', endDate: '2027-03-31', status: 'upcoming' as const, daysRemaining: 0, daysUntilStart: 119 },
+];
 
 export const defaultAgeBand = (ageInDays: number): IssueAgeBand => {
   if (ageInDays >= 30) return 'critical';
@@ -160,6 +171,16 @@ const rocks: Rock[] = [
     dueDate: '2026-09-12', priority: 'high', createdAt: daysAgo(70), updatedAt: daysAgo(5), version: 4,
     tasks: [makeTask({ id: 'task-first-response', rockId: 'rock-service-delivery', teamId: 'service-delivery', title: 'Publish the response standard', notes: '', assigneeId: 'jon-bell', assignedAt: daysAgo(40), startDate: '2026-07-28', dueDate: '2026-08-29', status: 'done' })],
   },
+  {
+    id: 'rock-q2-customer-handoff', teamId: 'leadership', quarterId: '2026-q2', title: 'Clarify the customer handoff path',
+    description: 'Document the handoff from signed agreement to first value.', notes: 'Completed in the Q2 planning cycle.', ownerId: 'ava-khan', status: 'complete',
+    dueDate: '2026-06-30', priority: 'high', createdAt: daysAgo(100), updatedAt: daysAgo(85), version: 2, tasks: [],
+  },
+  {
+    id: 'rock-q2-project-retro', teamId: 'projects', quarterId: '2026-q2', title: 'Run the project delivery retrospective',
+    description: 'Turn the Q2 delivery lessons into a repeatable kickoff improvement.', notes: 'The findings informed the current-quarter kickoff Rock.', ownerId: 'marcus-lee', status: 'complete',
+    dueDate: '2026-06-26', priority: 'medium', createdAt: daysAgo(105), updatedAt: daysAgo(90), version: 1, tasks: [],
+  },
 ];
 
 const todos: Todo[] = [
@@ -186,6 +207,9 @@ const todos: Todo[] = [
   },
   {
     id: 'todo-response', teamId: 'service-delivery', title: 'Review the first-response standard after one week', notes: '', ownerId: 'jon-bell', dueDate: '2026-09-04', status: 'done', origin: 'Rock · Improve first-response consistency', linkedRockTaskId: 'task-first-response', checklist: [], createdAt: daysAgo(10), updatedAt: daysAgo(5), version: 2, carryForwardCount: 0, flagged: false,
+  },
+  {
+    id: 'todo-q2-handoff', teamId: 'leadership', quarterId: '2026-q2', title: 'Share the Q2 handoff learnings', notes: '', ownerId: 'ava-khan', dueDate: '2026-06-26', status: 'done', origin: 'Leadership L10 · Q2 close', checklist: [], createdAt: daysAgo(82), updatedAt: daysAgo(80), version: 1, carryForwardCount: 0, flagged: false,
   },
 ];
 
@@ -233,6 +257,10 @@ const issues: Issue[] = [
   makeIssue({
     id: 'issue-solved', teamId: 'service-delivery', sourceTeamId: 'service-delivery', currentTeamId: 'service-delivery', title: 'First-response ownership was unclear',
     detail: 'The team agreed a response standard and published the rota.', priority: 4, status: 'solved', horizon: 'short-term', assignmentState: 'assigned', raisedById: 'jon-bell', ownerId: 'jon-bell', ageInDays: 9, idsNote: 'Decision preserved in the meeting history.',
+  }),
+  makeIssue({
+    id: 'issue-q2-planning', teamId: 'leadership', quarterId: '2026-q2', sourceTeamId: 'leadership', currentTeamId: 'leadership', title: 'Q2 planning inputs arrived from too many places',
+    detail: 'The team agreed to use one planning brief before the next quarterly reset.', priority: 2, status: 'solved', horizon: 'long-term', assignmentState: 'assigned', raisedById: 'ava-khan', ownerId: 'ava-khan', ageInDays: 80, idsNote: 'Decision: start V/TO and Rock planning from the same brief.',
   }),
 ];
 
@@ -311,16 +339,55 @@ const scorecardResults: ScorecardResult[] = [
 const headlines: Headline[] = [
   { id: 'headline-win', teamId: 'leadership', authorId: 'ava-khan', type: 'win', title: 'The onboarding pilot has a clear first customer', detail: 'Projects and Service Delivery agreed the first pilot path in one conversation.', createdAt: daysAgo(1) },
   { id: 'headline-risk', teamId: 'cybersecurity', authorId: 'priya-shah', type: 'concern', title: 'A customer assurance request needs an owner', detail: 'The request is not blocked, but it needs an explicit decision this week.', createdAt: daysAgo(2), issueId: 'issue-cyber-owners' },
+  { id: 'headline-q2-win', teamId: 'leadership', quarterId: '2026-q2', authorId: 'ava-khan', type: 'win', title: 'Q2 handoff lessons became a shared playbook', detail: 'The teams agreed the first version of the customer handoff path.', createdAt: '2026-06-24T12:00:00.000Z' },
 ];
 
-const meetings: MeetingInstance[] = teams.map((team) => {
+const currentMeetings: MeetingInstance[] = teams.map((team) => {
   const scheduledDate = meetingDateFor(team, new Date(now));
   return {
-    id: `meeting-${team.id}-${currentWeekStartDate}`, teamId: team.id, label: `${team.shortName} L10`, dateLabel: meetingDateLabel(scheduledDate), scheduledDate, scheduledTime: team.meetingTime, weekStartDate: weekStartDateFor(scheduledDate), status: 'upcoming',
+    id: `meeting-${team.id}-${currentWeekStartDate}`, teamId: team.id, quarterId: '2026-q3', label: `${team.shortName} L10`, dateLabel: meetingDateLabel(scheduledDate), scheduledDate, scheduledTime: team.meetingTime, weekStartDate: weekStartDateFor(scheduledDate), status: 'upcoming',
     facilitatorId: memberships.find((membership) => membership.teamId === team.id && membership.role === 'TeamLead')?.userId ?? 'ava-khan',
     attendeeIds: memberships.filter((membership) => membership.teamId === team.id && membership.active).map((membership) => membership.userId),
     lastRating: 0, agendaProgress: 0, agendaTotal: team.meetingSections.filter((section) => section.enabled).length, idsSolved: 0, idsTotal: issues.filter((issue) => issue.teamId === team.id && issue.status !== 'solved').length, recap: '', sectionNotes: {}, idsIssueIds: [], idsAddedIssueIds: [], createdTodoIds: [], idsNotes: [], version: 1,
   };
+});
+
+const historicalMeetings: MeetingInstance[] = teams.filter((team) => team.nodeType === 'operational').map((team) => {
+  const scheduledDate = team.id === 'projects' ? '2026-06-23' : '2026-06-22';
+  const facilitatorId = memberships.find((membership) => membership.teamId === team.id && membership.role === 'TeamLead')?.userId ?? 'ava-khan';
+  const attendeeIds = memberships.filter((membership) => membership.teamId === team.id && membership.active).map((membership) => membership.userId);
+  const historicalIssue = issues.find((issue) => issue.teamId === team.id && issue.quarterId === '2026-q2');
+  return {
+    id: `meeting-${team.id}-2026-q2-history`, teamId: team.id, quarterId: '2026-q2', label: `${team.shortName} L10`, dateLabel: meetingDateLabel(scheduledDate), scheduledDate, scheduledTime: team.meetingTime, weekStartDate: weekStartDateFor(scheduledDate), status: 'closed',
+    facilitatorId, attendeeIds, lastRating: 8.5, agendaProgress: team.meetingSections.filter((section) => section.enabled).length, agendaTotal: team.meetingSections.filter((section) => section.enabled).length, idsSolved: historicalIssue ? 1 : 0, idsTotal: historicalIssue ? 1 : 0,
+    recap: `${team.name} reviewed the Q2 commitments and agreed the next-quarter focus.`, sectionNotes: { conclude: 'Carry the agreed learning into the next quarterly plan.' }, idsIssueIds: historicalIssue ? [historicalIssue.id] : [], idsAddedIssueIds: [], createdTodoIds: [], idsNotes: historicalIssue ? [{ id: `note-${team.id}-q2`, meetingId: `meeting-${team.id}-2026-q2-history`, issueId: historicalIssue.id, authorId: facilitatorId, note: 'Decision recorded during the Q2 retrospective.', createdAt: '2026-06-22T12:00:00.000Z' }] : [], version: 1,
+  };
+});
+
+const meetings: MeetingInstance[] = [...currentMeetings, ...historicalMeetings];
+
+const vtoContentFor = (team: Team): VtoContent => ({
+  coreValues: ['Be useful', 'Be clear', 'Own the outcome'],
+  coreFocusPurpose: `Help ${team.name} make meaningful progress for customers and colleagues.`,
+  coreFocusNiche: `${team.name} work that turns priorities into dependable outcomes.`,
+  tenYearTarget: `A trusted, high-performing ${team.name} function.`,
+  marketingStrategy: { targetMarket: 'Bremmar teams and their customers.', uniques: ['Practical', 'Clear', 'Accountable'], provenProcess: 'Align · Prioritise · Execute · Review', guarantee: 'Every commitment has a clear owner and next step.' },
+  threeYearPicture: { targetDate: '2029-12-31', revenue: 'To be agreed', profit: 'To be agreed', headcount: 'To be agreed', description: `${team.name} is known for dependable delivery and visible traction.` },
+  oneYearPlan: { year: 2026, revenue: 'To be agreed', profit: 'To be agreed', measurables: ['Commitments completed on time', 'Issues solved in the week'], goals: ['Create a repeatable operating rhythm', 'Make customer outcomes visible'] },
+  quarterlyRockIds: rocks.filter((rock) => rock.teamId === team.id && rock.quarterId === '2026-q3').map((rock) => rock.id),
+  issueIds: issues.filter((issue) => issue.teamId === team.id && issue.assignmentState !== 'redirected').map((issue) => issue.id),
+});
+
+const vtos: Vto[] = teams.filter((team) => team.nodeType === 'operational').map((team) => ({
+  id: `vto-${team.id}`, teamId: team.id, ...vtoContentFor(team), versionNumber: 2, effectiveDate: '2026-07-01', changeSummary: 'Quarterly planning refresh.', savedBy: team.escalationUserIds[0] ?? 'ava-khan', createdAt: '2026-04-01T12:00:00.000Z', updatedAt: daysAgo(2), version: 2,
+}));
+
+const vtoVersions: VtoVersion[] = vtos.flatMap((vto) => {
+  const priorContent = { ...vto, quarterlyRockIds: rocks.filter((rock) => rock.teamId === vto.teamId && rock.quarterId === '2026-q2').map((rock) => rock.id) };
+  return [
+    { ...priorContent, id: `${vto.id}-version-1`, vtoId: vto.id, teamId: vto.teamId, versionNumber: 1, effectiveDate: '2026-04-01', changeSummary: 'Initial V/TO for the Q2 planning cycle.', savedBy: vto.savedBy, createdAt: '2026-04-01T12:00:00.000Z', updatedAt: '2026-04-01T12:00:00.000Z', version: 1 },
+    { ...vto, id: `${vto.id}-version-2`, vtoId: vto.id, teamId: vto.teamId, versionNumber: 2, effectiveDate: vto.effectiveDate, changeSummary: vto.changeSummary, createdAt: vto.updatedAt, updatedAt: vto.updatedAt, version: 2 },
+  ];
 });
 
 const activity: AuditEvent[] = [
@@ -328,12 +395,14 @@ const activity: AuditEvent[] = [
   { id: 'audit-issue-unassigned', actorId: 'jon-bell', action: 'Rejected transfer', target: 'issue-cyber-owners', detail: 'Returned the Issue to Cybersecurity unassigned.', createdAt: daysAgo(8), type: 'transfer' },
   { id: 'audit-rock-note', actorId: 'ava-khan', action: 'Updated Rock notes', target: 'rock-playbook', detail: 'Added guidance for the first-week checklist.', createdAt: daysAgo(1), type: 'rock' },
   { id: 'audit-team-seed', actorId: 'ava-khan', action: 'Created workspace hierarchy', target: 'organization', detail: 'Seeded the Leadership, Professional Services, and Managed Services structure.', createdAt: daysAgo(20), type: 'team' },
+  { id: 'audit-vto-seed', actorId: 'ava-khan', action: 'Updated team V/TO', target: 'vto-leadership', detail: 'Leadership Team V/TO version 2 saved.', createdAt: daysAgo(2), type: 'vto' },
 ];
 
 export const initialWorkspace: Workspace = {
   environment: 'live',
   currentUser: users[0],
-  quarter: { id: '2026-q3', label: 'Q3 2026', theme: 'Make Q3 feel lighter.', startDate: '2026-07-01', endDate: '2026-09-30', daysRemaining: 28 },
+  quarter: quarters[2],
+  quarters,
   settings: { agingDays: 7, staleDays: 14, criticalDays: 30 },
   teams,
   users,
@@ -348,6 +417,8 @@ export const initialWorkspace: Workspace = {
   scorecardResults,
   headlines,
   meetings,
+  vtos,
+  vtoVersions,
   activity,
 };
 

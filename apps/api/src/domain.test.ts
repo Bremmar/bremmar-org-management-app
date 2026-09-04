@@ -1,11 +1,24 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { averageMeetingRating, canAcceptTransfer, canAdministerPlatform, canManageTeam, canWriteTeam, isValidMeetingRating, issueAgeBand, meetingReviewStatus, meetingScheduledAt, nextConfiguredMeetingDateAfter, nextMeetingDateAfter, nextMeetingDateFor, nextTodoStatus, partitionFor, validateAgeSettings, validateHierarchy } from './domain.js';
+import { averageMeetingRating, canAcceptTransfer, canAdministerPlatform, canManageTeam, canWriteTeam, currentQuarterId, isValidMeetingRating, issueAgeBand, meetingReviewStatus, meetingScheduledAt, nextConfiguredMeetingDateAfter, nextMeetingDateAfter, nextMeetingDateFor, nextTodoStatus, partitionFor, quarterIdForDate, quarterSummary, validateAgeSettings, validateHierarchy } from './domain.js';
 import type { MeetingRecord, TeamRecord } from './domain.js';
 
 test('team partitions are stable and explicit', () => {
   assert.equal(partitionFor('org', 'bremmar'), 'org');
   assert.equal(partitionFor('team', 'leadership'), 'team:leadership');
+});
+
+test('quarter summaries distinguish historical, current, and upcoming planning periods', () => {
+  const quarters = [
+    { id: '2026-q2', label: 'Q2 2026', theme: 'Learn', startDate: '2026-04-01', endDate: '2026-06-30' },
+    { id: '2026-q3', label: 'Q3 2026', theme: 'Build', startDate: '2026-07-01', endDate: '2026-09-30' },
+    { id: '2026-q4', label: 'Q4 2026', theme: 'Scale', startDate: '2026-10-01', endDate: '2026-12-31' },
+  ];
+  const summaries = quarters.map((quarter) => quarterSummary(quarter, '2026-09-04T12:00:00Z'));
+  assert.deepEqual(summaries.map((quarter) => quarter.status), ['past', 'current', 'upcoming']);
+  assert.equal(currentQuarterId(summaries), '2026-q3');
+  assert.equal(quarterIdForDate('2026-05-12', quarters), '2026-q2');
+  assert.equal(quarterIdForDate('2027-01-01', quarters), undefined);
 });
 
 test('meeting recurrence supports weekly and month-end monthly schedules', () => {
