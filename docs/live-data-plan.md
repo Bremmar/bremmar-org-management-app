@@ -209,6 +209,9 @@ The Functions API exposes typed server contracts for:
   server-generated timestamp.
 - `PATCH /api/teams/{teamId}/meetings/{meetingId}` — reschedule the current
   open meeting occurrence with `If-Match` concurrency protection.
+- `POST /api/teams/{teamId}/meetings/generate` — replace future unstarted/open
+  occurrences with the next four meetings from the team’s saved cadence; the
+  operation preserves started, completed, and skipped history and is audited.
 - `POST /api/teams/{teamId}/meetings/{meetingId}/skip` — persist a categorized
   skipped occurrence and refill the rolling cadence window.
 - `PATCH /api/teams/{teamId}/meetings/{meetingId}/notes` — save a section note

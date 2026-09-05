@@ -1073,7 +1073,11 @@ img { max-width: 100%; }
 
 .meeting-occurrence-heading h2 { margin: 6px 0 0; color: #33435b; font-size: 18px; }
 
-.meeting-occurrence-heading > span { color: #8a98aa; font-size: 12px; }
+.meeting-occurrence-heading-actions { display: flex; align-items: center; gap: 10px; }
+
+.meeting-occurrence-heading-actions > span { color: #8a98aa; font-size: 12px; }
+
+.meeting-occurrence-heading-actions .button { min-height: 34px; padding: 0 11px; font-size: 12px; }
 
 .meeting-occurrence-list { display: flex; flex-direction: column; }
 
@@ -2366,6 +2370,7 @@ img { max-width: 100%; }
   .meeting-notes-actions .button { width: 100%; }
   .meeting-action-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .meeting-occurrence-heading, .history-toolbar { align-items: flex-start; flex-direction: column; }
+  .meeting-occurrence-heading-actions { width: 100%; justify-content: space-between; flex-wrap: wrap; }
   .meeting-occurrence-row { align-items: flex-start; flex-wrap: wrap; padding: 11px 15px; }
   .meeting-occurrence-main { width: 100%; }
   .meeting-occurrence-actions { width: 100%; padding-left: 100px; }

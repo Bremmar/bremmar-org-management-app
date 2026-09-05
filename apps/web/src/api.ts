@@ -110,6 +110,7 @@ export interface WorkspaceApi {
   markNotificationRead(notificationId: string): Promise<Workspace>;
   updateProfile(input: Pick<Partial<User>, 'name' | 'email' | 'avatarDataUrl'>): Promise<Workspace>;
   updateMeetingSchedule(teamId: string, meetingId: string, input: { scheduledDate: string; scheduledTime: string }, expectedVersion?: number): Promise<Workspace>;
+  generateMeetings(teamId: string): Promise<Workspace>;
   startMeeting(teamId: string, meetingId: string, expectedVersion?: number, facilitatorId?: string): Promise<Workspace>;
   createTeam(input: Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials'> & { meetingSections?: MeetingSectionConfig[]; escalationUserIds?: string[] }): Promise<Workspace>;
   updateTeam(teamId: string, input: Partial<Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds'>>, expectedVersion?: number): Promise<Workspace>;
@@ -208,6 +209,15 @@ function validateMeetingConfiguration(cadence: Team['meetingCadence'], meetingDa
   const normalizedDay = meetingDay.trim().toLowerCase();
   if (cadence === 'monthly' && !/^(?:[1-9]|[12]\d|3[01])$/.test(normalizedDay)) throw new WorkspaceApiError('VALIDATION', 'Monthly meeting date must be a day number from 1 to 31.');
   if (cadence === 'weekly' && !weekdayNames.has(normalizedDay)) throw new WorkspaceApiError('VALIDATION', 'Weekly meeting day must be Sunday through Saturday.');
+}
+
+function nextConfiguredMeetingDateOnOrAfter(team: Pick<Team, 'meetingCadence' | 'meetingDay' | 'meetingTime'>, at = new Date()) {
+  const current = new Date(at);
+  const currentDate = meetingDateFor(team, current);
+  const currentScheduledAt = meetingScheduledAt({ scheduledDate: currentDate, scheduledTime: team.meetingTime });
+  return Number.isFinite(currentScheduledAt) && currentScheduledAt > current.getTime()
+    ? currentDate
+    : nextConfiguredMeetingDateAfter(team, currentDate, current);
 }
 
 function validateMeetingSections(sections: MeetingSectionConfig[] | undefined) {
@@ -1727,6 +1737,39 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     return this.result();
   }
 
+  async generateMeetings(teamId: string) {
+    this.requireWrite(teamId);
+    const team = this.workspace.teams.find((candidate) => candidate.id === teamId && candidate.active);
+    if (!team) throw new WorkspaceApiError('NOT_FOUND', 'Team not found.');
+    if (team.nodeType !== 'operational') throw new WorkspaceApiError('VALIDATION', 'Grouping-only teams cannot own L10 meetings.');
+    validateMeetingConfiguration(team.meetingCadence, team.meetingDay, team.meetingTime);
+
+    const now = Date.now();
+    const futureMeetings = this.workspace.meetings
+      .filter((meeting) => meeting.teamId === teamId && meeting.status === 'upcoming' && Number.isFinite(meetingScheduledAt(meeting)) && meetingScheduledAt(meeting) > now)
+      .sort((left, right) => meetingScheduledAt(left) - meetingScheduledAt(right));
+    const template = futureMeetings[0] ?? this.workspace.meetings
+      .filter((meeting) => meeting.teamId === teamId)
+      .sort((left, right) => meetingScheduledAt(left) - meetingScheduledAt(right))
+      .at(-1);
+    const deletedIds = new Set(futureMeetings.map((meeting) => meeting.id));
+    this.workspace.meetings = this.workspace.meetings.filter((meeting) => !deletedIds.has(meeting.id));
+
+    let cursor = nextConfiguredMeetingDateOnOrAfter(team, new Date(now));
+    const created: Workspace['meetings'] = [];
+    while (created.length < 4) {
+      while (this.workspace.meetings.some((meeting) => meeting.teamId === teamId && (meeting.recurrenceDate ?? meeting.scheduledDate) === cursor)) {
+        cursor = nextConfiguredMeetingDateAfter(team, cursor, cursor);
+      }
+      created.push(this.createUpcomingMeeting(team, cursor, template));
+      this.workspace.meetings.push(created.at(-1)!);
+      cursor = nextConfiguredMeetingDateAfter(team, cursor, cursor);
+    }
+
+    this.audit('Generated L10 meetings', teamId, `Replaced ${futureMeetings.length} future open occurrences with four ${team.meetingCadence} L10 meetings from the saved cadence.`, 'meeting');
+    return this.result();
+  }
+
   async skipMeeting(teamId: string, meetingId: string, reason: MeetingSkipReason, note = '', expectedVersion?: number) {
     this.requireWrite(teamId);
     const meeting = this.workspace.meetings.find((item) => item.id === meetingId && item.teamId === teamId);
@@ -2204,6 +2247,7 @@ export class HttpWorkspaceApi implements WorkspaceApi {
   async getMeeting(teamId: string, meetingId: string) { return this.request<Workspace['meetings'][number]>(`/teams/${teamId}/meetings/${meetingId}`); }
   async startMeeting(teamId: string, meetingId: string, expectedVersion?: number, facilitatorId?: string) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/start`, 'POST', facilitatorId ? { facilitatorId } : undefined, expectedVersion, { refresh: true }); }
   async updateMeetingSchedule(teamId: string, meetingId: string, input: { scheduledDate: string; scheduledTime: string }, expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}`, 'PATCH', input, expectedVersion); }
+  async generateMeetings(teamId: string) { return this.mutate(`/teams/${teamId}/meetings/generate`, 'POST', undefined, undefined, { refresh: true }); }
   async skipMeeting(teamId: string, meetingId: string, reason: MeetingSkipReason, note = '', expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/skip`, 'POST', { reason, note }, expectedVersion, { refresh: true }); }
   async requestMeetingSummary(teamId: string, meetingId: string, expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/ai-summary/retry`, 'POST', undefined, expectedVersion, { refresh: true }); }
   async cancelMeetingSummary(teamId: string, meetingId: string, expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/ai-summary/cancel`, 'POST', undefined, expectedVersion, { refresh: true }); }

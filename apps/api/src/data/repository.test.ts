@@ -321,6 +321,35 @@ test('team cadence is persisted and the current meeting can be moved with optimi
   assert.equal(after.meetings.find((item) => item.status === 'upcoming')?.scheduledTime, '10:00 AM');
 });
 
+test('generating meetings replaces future open occurrences from the saved cadence and preserves history', async () => {
+  const repository = new MemoryWorkspaceRepository();
+  const created = await repository.createTeam({ name: 'Generated Operations', shortName: 'Generated Ops', description: 'A generated cadence team.', parentTeamId: 'leadership', nodeType: 'operational', meetingCadence: 'monthly', meetingDay: '31', meetingTime: '10:00 AM', accent: '#4c8f86', initials: 'GO', meetingSections: DEFAULT_MEETING_SECTIONS, escalationUserIds: ['ava-khan'] }, 'ava-khan');
+  await repository.upsertMembership({ userId: 'ava-khan', teamId: created.teamId, role: 'TeamLead' }, 'ava-khan');
+
+  let before = await repository.getTeamWorkspace(created.teamId, 'ava-khan');
+  const current = before.meetings.find((meeting) => meeting.status === 'upcoming')!;
+  const closed = await repository.startMeeting(created.teamId, current.id, 'ava-khan', current.version);
+  await repository.closeMeeting(created.teamId, closed.id, 'Keep this history.', 9, 'ava-khan', closed.version);
+  before = await repository.getTeamWorkspace(created.teamId, 'ava-khan');
+  const futureOpenIds = before.meetings.filter((meeting) => meeting.status === 'upcoming' && meetingScheduledAt(meeting) > Date.now()).map((meeting) => meeting.id);
+
+  const result = await repository.generateMeetings(created.teamId, 'ava-khan');
+  assert.equal(result.deletedCount, futureOpenIds.length);
+  assert.equal(result.createdCount, 4);
+  assert.equal(result.meetings.length, 4);
+  assert.ok(result.meetings.every((meeting) => meeting.scheduledTime === '10:00 AM' && meeting.status === 'upcoming'));
+  assert.equal(new Set(result.meetings.map((meeting) => meeting.scheduledDate)).size, 4);
+  assert.ok(result.meetings.every((meeting, index, meetings) => index === 0 || meeting.scheduledDate > meetings[index - 1].scheduledDate));
+
+  const after = await repository.getTeamWorkspace(created.teamId, 'ava-khan');
+  assert.equal(after.meetings.filter((meeting) => meeting.status === 'upcoming' && meetingScheduledAt(meeting) > Date.now()).length, 4);
+  assert.equal(futureOpenIds.some((id) => after.meetings.some((meeting) => meeting.id === id)), false);
+  assert.equal(after.meetings.some((meeting) => meeting.id === closed.id && meeting.status === 'closed'), true);
+  assert.equal(repository.exportWorkspaceRecords().some((record) => record.kind === 'auditEvent' && 'target' in record && record.target === created.teamId && 'action' in record && record.action === 'Generated L10 meetings'), true);
+
+  await rejectsWithCode(repository.generateMeetings(created.teamId, 'marcus-lee'), 'FORBIDDEN');
+});
+
 test('new-team writes fall back to ordinary Cosmos creates when transactional batches are rejected', async () => {
   const seed = new MemoryWorkspaceRepository().exportWorkspaceRecords();
   const created: WorkspaceRecord[] = [];

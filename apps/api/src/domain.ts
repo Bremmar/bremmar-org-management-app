@@ -356,6 +356,12 @@ export interface MeetingRecord extends WorkspaceRecord {
   aiSummarySource?: 'close' | 'legacy';
 }
 
+export interface MeetingGenerationResult {
+  deletedCount: number;
+  createdCount: number;
+  meetings: MeetingRecord[];
+}
+
 export interface MeetingSummaryContext {
   meetingId: string;
   teamId: string;

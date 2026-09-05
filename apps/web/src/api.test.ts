@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ageBandFor, HttpWorkspaceApi, LocalWorkspaceApi } from './api';
 import { initialWorkspace } from './data';
-import { defaultMeetingSections } from './types';
+import { defaultMeetingSections, meetingScheduledAt } from './types';
 import type { TeamMessage, TeamMembership, Workspace } from './types';
 import { sanitizeTodoNotes } from './richText';
 import { pendingTeamMessagesFor } from './App';
@@ -127,6 +127,25 @@ describe('LocalWorkspaceApi', () => {
     workspace = await api.closeMeeting(team.id, 'Monthly review complete.', 9);
     expect(workspace.meetings.filter((candidate) => candidate.teamId === team.id && candidate.status === 'upcoming')).toHaveLength(4);
     expect(workspace.meetings.find((candidate) => candidate.teamId === team.id && candidate.status === 'upcoming')?.scheduledTime).toBe('10:00 AM');
+  });
+
+  it('regenerates future open meetings from the saved cadence while preserving history', async () => {
+    const api = new LocalWorkspaceApi();
+    let workspace = await api.createTeam({ name: 'Generated Operations', shortName: 'Generated Ops', description: 'A generated cadence team.', parentTeamId: 'leadership', nodeType: 'operational', meetingCadence: 'monthly', meetingDay: '31', meetingTime: '10:00 AM', accent: '#4c8f86', initials: 'GO' });
+    const team = workspace.teams.find((candidate) => candidate.id === 'generated-operations')!;
+    workspace = await api.upsertMembership({ userId: 'ava-khan', teamId: team.id, role: 'TeamLead' });
+    const current = workspace.meetings.find((meeting) => meeting.teamId === team.id && meeting.status === 'upcoming')!;
+    workspace = await api.closeMeeting(team.id, 'Keep this history.', 9, current.id);
+    const futureOpenIds = workspace.meetings.filter((meeting) => meeting.teamId === team.id && meeting.status === 'upcoming' && meetingScheduledAt(meeting) > Date.now()).map((meeting) => meeting.id);
+
+    workspace = await api.generateMeetings(team.id);
+    const generated = workspace.meetings.filter((meeting) => meeting.teamId === team.id && meeting.status === 'upcoming' && meetingScheduledAt(meeting) > Date.now());
+    expect(generated).toHaveLength(4);
+    expect(generated.every((meeting) => meeting.scheduledTime === '10:00 AM')).toBe(true);
+    expect(new Set(generated.map((meeting) => meeting.scheduledDate)).size).toBe(4);
+    expect(futureOpenIds.some((id) => workspace.meetings.some((meeting) => meeting.id === id))).toBe(false);
+    expect(workspace.meetings.some((meeting) => meeting.id === current.id && meeting.status === 'closed')).toBe(true);
+    expect(workspace.activity.some((event) => event.action === 'Generated L10 meetings' && event.target === team.id)).toBe(true);
   });
 
   it('uses the configured age bands and preserves age after rejection', async () => {

@@ -131,6 +131,20 @@ async function updateMeetingScheduleHandler(request: HttpRequest, _context: Invo
   }
 }
 
+async function generateMeetingsHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
+  const scope = await requestScope(request);
+  if (isResponse(scope)) return scope;
+  const { principal, repository } = scope;
+  const teamId = request.params.teamId;
+  if (!teamId) return { status: 422, jsonBody: { error: 'teamId is required', code: 'VALIDATION' } };
+  try {
+    const result = await repository.generateMeetings(teamId, principal.userId);
+    return responseWithEtag(result, `W/\"${result.meetings.reduce((highest, meeting) => Math.max(highest, meeting.version), 0)}\"`);
+  } catch (error) {
+    return repositoryErrorResponse(error);
+  }
+}
+
 async function skipMeetingHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
   const scope = await requestScope(request);
   if (isResponse(scope)) return scope;
@@ -272,6 +286,7 @@ app.http('addMeetingIssueNote', { methods: ['POST'], authLevel: 'anonymous', rou
 app.http('meetingReview', { methods: ['GET'], authLevel: 'anonymous', route: 'meetings/review', handler: meetingReviewHandler });
 app.http('getMeeting', { methods: ['GET'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}', handler: getMeetingHandler });
 app.http('updateMeetingSchedule', { methods: ['PATCH'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}', handler: updateMeetingScheduleHandler });
+app.http('generateMeetings', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/generate', handler: generateMeetingsHandler });
 app.http('updateMeetingSectionNote', { methods: ['PATCH'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/notes', handler: updateMeetingSectionNoteHandler });
 app.http('selectMeetingIssues', { methods: ['PATCH'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/ids/selection', handler: selectMeetingIssuesHandler });
 app.http('reorderMeetingIssues', { methods: ['PATCH'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/ids/order', handler: reorderMeetingIssuesHandler });

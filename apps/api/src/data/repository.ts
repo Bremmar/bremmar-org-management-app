@@ -32,6 +32,7 @@ import {
   type MeetingActionSummary,
   type MeetingAttendeeRating,
   type MeetingAiSummary,
+  type MeetingGenerationResult,
   type MeetingReviewPage,
   type MeetingReviewQuery,
   type MeetingSkipReason,
@@ -211,6 +212,7 @@ export interface WorkspaceRepository {
   markMessageRead(messageId: string, userId: string, expectedVersion?: number): Promise<TeamMessageRecord>;
   createIssueFromMessage(input: { messageId: string; title: string; detail: string; priority?: number; horizon?: IssueRecord['horizon']; ownerId?: string }, actorId: string): Promise<IssueRecord>;
   updateMeetingSchedule(teamId: string, meetingId: string, input: { scheduledDate: string; scheduledTime: string }, actorId: string, expectedVersion?: number): Promise<MeetingRecord>;
+  generateMeetings(teamId: string, actorId: string): Promise<MeetingGenerationResult>;
   skipMeeting(teamId: string, meetingId: string, reason: MeetingSkipReason, note: string, actorId: string, expectedVersion?: number): Promise<MeetingRecord>;
   closeMeeting(teamId: string, meetingId: string, recap: string, rating: number, actorId: string, expectedVersion?: number, attendeeRatings?: MeetingAttendeeRating[]): Promise<MeetingRecord>;
   getMeetingSummaryJob(teamId: string, meetingId: string, userId: string): Promise<MeetingSummaryJobRecord | null>;
@@ -379,6 +381,15 @@ function meetingDateFor(team: Pick<TeamRecord, 'meetingCadence' | 'meetingDay'>,
   const offset = weekdayOffsets[team.meetingDay.trim().toLowerCase()];
   weekStart.setUTCDate(weekStart.getUTCDate() + (offset ?? 0));
   return weekStart.toISOString().slice(0, 10);
+}
+
+function nextConfiguredMeetingDateOnOrAfter(team: Pick<TeamRecord, 'meetingCadence' | 'meetingDay' | 'meetingTime'>, at = new Date()) {
+  const current = new Date(at);
+  const currentDate = meetingDateFor(team, current);
+  const currentScheduledAt = meetingScheduledAt({ scheduledDate: currentDate, scheduledTime: team.meetingTime });
+  return Number.isFinite(currentScheduledAt) && currentScheduledAt > current.getTime()
+    ? currentDate
+    : nextConfiguredMeetingDateAfter(team, currentDate, current);
 }
 
 function meetingDateLabel(scheduledDate: string) {
@@ -2120,6 +2131,41 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     return clone(meeting);
   }
 
+  async generateMeetings(teamId: string, actorId: string): Promise<MeetingGenerationResult> {
+    this.requireWrite(teamId, actorId);
+    const team = this.team(teamId);
+    if (!team) throw new RepositoryError('NOT_FOUND', 'Team not found.');
+    if (team.nodeType !== 'operational') throw new RepositoryError('VALIDATION', 'Grouping-only teams cannot own L10 meetings.');
+    assertMeetingConfiguration(team.meetingCadence, team.meetingDay, team.meetingTime);
+
+    const now = Date.now();
+    const futureMeetings = this.meetings
+      .filter((meeting) => meeting.teamId === teamId && meeting.status === 'upcoming' && Number.isFinite(meetingScheduledAt(meeting)) && meetingScheduledAt(meeting) > now)
+      .sort((left, right) => meetingScheduledAt(left) - meetingScheduledAt(right));
+    const template = futureMeetings[0] ?? this.meetings
+      .filter((meeting) => meeting.teamId === teamId)
+      .sort((left, right) => meetingScheduledAt(left) - meetingScheduledAt(right))
+      .at(-1);
+    const deletedIds = new Set(futureMeetings.map((meeting) => meeting.id));
+    this.meetings = this.meetings.filter((meeting) => !deletedIds.has(meeting.id));
+
+    const created: MeetingRecord[] = [];
+    let cursor = nextConfiguredMeetingDateOnOrAfter(team, new Date(now));
+    while (created.length < 4) {
+      while (this.meetings.some((meeting) => meeting.teamId === teamId && (meeting.recurrenceDate ?? meeting.scheduledDate) === cursor)) {
+        cursor = nextConfiguredMeetingDateAfter(team, cursor, cursor);
+      }
+      const meeting = this.createUpcomingMeeting(team, cursor, template);
+      meeting.updatedBy = actorId;
+      created.push(meeting);
+      this.meetings.push(meeting);
+      cursor = nextConfiguredMeetingDateAfter(team, cursor, cursor);
+    }
+
+    this.recordAudit(actorId, 'Generated L10 meetings', teamId, `Replaced ${futureMeetings.length} future open occurrences with four ${team.meetingCadence} L10 meetings from the saved cadence.`, 'meeting');
+    return { deletedCount: futureMeetings.length, createdCount: created.length, meetings: clone(created) };
+  }
+
   async closeMeeting(teamId: string, meetingId: string, recap: string, rating: number, actorId: string, expectedVersion?: number, attendeeRatings?: MeetingAttendeeRating[]) {
     const membership = this.requireWrite(teamId, actorId);
     const team = this.team(teamId);
@@ -2932,6 +2978,7 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
     }
   }
   async updateMeetingSchedule(teamId: string, meetingId: string, input: { scheduledDate: string; scheduledTime: string }, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateMeetingSchedule(teamId, meetingId, input, actorId, expectedVersion)); }
+  async generateMeetings(teamId: string, actorId: string) { return this.withMutation(actorId, () => super.generateMeetings(teamId, actorId)); }
   async skipMeeting(teamId: string, meetingId: string, reason: MeetingSkipReason, note: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.skipMeeting(teamId, meetingId, reason, note, actorId, expectedVersion)); }
   async requestMeetingSummary(teamId: string, meetingId: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.requestMeetingSummary(teamId, meetingId, actorId, expectedVersion)); }
   async cancelMeetingSummary(teamId: string, meetingId: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.cancelMeetingSummary(teamId, meetingId, actorId, expectedVersion)); }

@@ -87,9 +87,14 @@ recurrence preserves the selected day of month and clamps month-end meetings
 to the last valid day. Four upcoming occurrences are kept for every
 operational team. Every occurrence stores its `scheduledDate`, `scheduledTime`,
 and nominal `recurrenceDate`; a one-off move changes only the selected open
-occurrence. Team editors can update it through:
+occurrence. The Meeting prep and Live L10 screens also provide a Generate
+meetings action. It removes future unstarted/open occurrences for that team,
+preserves started, completed, and skipped history, and creates the next four
+occurrences from the saved cadence day/date, frequency, and time. Team editors
+can update or generate it through:
 
 - `PATCH /api/teams/{teamId}/meetings/{meetingId}`
+- `POST /api/teams/{teamId}/meetings/generate`
 - `POST /api/teams/{teamId}/meetings/{meetingId}/skip`
 - `POST /api/teams/{teamId}/meetings/{meetingId}/start`
 - `PATCH /api/teams/{teamId}/meetings/{meetingId}/section`
