@@ -126,6 +126,18 @@ export function quarterIdForDate(value: string | Date, quarters: readonly Pick<Q
   return quarters.find((quarter) => date >= quarter.startDate && date <= quarter.endDate)?.id;
 }
 
+export function quarterIdForRecord(record: { quarterId?: string; scheduledDate?: string; dueDate?: string; createdAt?: string }, quarters: readonly Pick<Quarter, 'id' | 'startDate' | 'endDate'>[]) {
+  const knownQuarterIds = new Set(quarters.map((quarter) => quarter.id));
+  if (record.quarterId && knownQuarterIds.has(record.quarterId)) return record.quarterId;
+  const date = record.scheduledDate ?? record.dueDate ?? record.createdAt;
+  if (!date) return undefined;
+  try {
+    return quarterIdForDate(date, quarters);
+  } catch {
+    return undefined;
+  }
+}
+
 export interface VtoMarketingStrategy {
   targetMarket: string;
   uniques: string[];

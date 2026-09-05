@@ -167,6 +167,9 @@ Issues remain visible in the active IDS queue until they are solved. Historical
 L10 backfill is available from Past meetings for a selected past or current
 quarter; it records the date, time, facilitator, attendees, rating, recap, IDS
 notes, and an audit event without changing the live meeting cadence.
+The planning-quarter selector scopes quarter history and planning records; Live
+L10 and Meeting prep continue to use the team’s rolling meeting window, including
+occurrences that cross a quarter boundary.
 
 Vision / Traction is a team-owned document rather than a quarter record. It
 implements the eight EOS V/TO questions:

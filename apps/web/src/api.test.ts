@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ageBandFor, HttpWorkspaceApi, LocalWorkspaceApi } from './api';
 import { initialWorkspace } from './data';
-import { defaultMeetingSections, meetingScheduledAt } from './types';
+import { defaultMeetingSections, meetingScheduledAt, quarterIdForDate } from './types';
 import type { TeamMessage, TeamMembership, Workspace } from './types';
 import { sanitizeTodoNotes } from './richText';
 import { pendingTeamMessagesFor } from './App';
@@ -143,6 +143,7 @@ describe('LocalWorkspaceApi', () => {
     expect(generated).toHaveLength(4);
     expect(generated.every((meeting) => meeting.scheduledTime === '10:00 AM')).toBe(true);
     expect(new Set(generated.map((meeting) => meeting.scheduledDate)).size).toBe(4);
+    expect(generated.every((meeting) => meeting.quarterId === quarterIdForDate(meeting.scheduledDate!, workspace.quarters))).toBe(true);
     expect(futureOpenIds.some((id) => workspace.meetings.some((meeting) => meeting.id === id))).toBe(false);
     expect(workspace.meetings.some((meeting) => meeting.id === current.id && meeting.status === 'closed')).toBe(true);
     expect(workspace.activity.some((event) => event.action === 'Generated L10 meetings' && event.target === team.id)).toBe(true);
@@ -671,6 +672,45 @@ describe('LocalWorkspaceApi', () => {
     expect(updated.quarter).toMatchObject({ id: '2026-q2', status: 'past' });
     expect(workspace.quarter.id).toBe('2026-q2');
     expect(updated.meetings.find((candidate) => candidate.scheduledDate === '2026-06-29')).toMatchObject({ status: 'closed', quarterId: '2026-q2' });
+  });
+
+  it('maps missing and malformed HTTP meeting quarter IDs from their scheduled dates', async () => {
+    const api = new HttpWorkspaceApi();
+    const cached = structuredClone(initialWorkspace) as Workspace;
+    const legacyMeeting = { ...cached.meetings[0], id: 'legacy-http-meeting', quarterId: undefined, scheduledDate: '2026-09-21', weekStartDate: '2026-09-21' };
+    const malformedMeeting = { ...cached.meetings[1], id: 'malformed-http-meeting', quarterId: '2026-10-05', scheduledDate: '2026-10-05', weekStartDate: '2026-10-05' };
+    const snapshot = {
+      environmentId: cached.environment,
+      user: cached.currentUser,
+      teams: cached.teams,
+      users: cached.users,
+      memberships: cached.memberships,
+      settings: cached.settings,
+      rocks: cached.rocks.map(({ tasks: _tasks, ...rock }) => rock),
+      tasks: cached.rocks.flatMap((rock) => rock.tasks),
+      todos: cached.todos,
+      issues: cached.issues,
+      transfers: cached.transfers,
+      notifications: cached.notifications,
+      messages: cached.messages,
+      meetings: [legacyMeeting, malformedMeeting],
+      metrics: cached.metrics,
+      scorecardResults: cached.scorecardResults,
+      headlines: cached.headlines,
+      audit: cached.activity,
+      quarter: cached.quarter,
+      quarters: cached.quarters,
+      etag: 'W/"meeting-quarter-regression"',
+    };
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify(snapshot), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    try {
+      const workspace = await api.getWorkspace();
+      expect(workspace.meetings.find((meeting) => meeting.id === legacyMeeting.id)?.quarterId).toBe('2026-q3');
+      expect(workspace.meetings.find((meeting) => meeting.id === malformedMeeting.id)?.quarterId).toBe('2026-q4');
+    } finally {
+      fetchMock.mockRestore();
+    }
   });
 
   it('merges a simple HTTP mutation response without requesting the full workspace again', async () => {

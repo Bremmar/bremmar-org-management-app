@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Container } from '@azure/cosmos';
 import { CosmosWorkspaceRepository, MemoryWorkspaceRepository, RepositoryError } from './repository.js';
-import { DEFAULT_MEETING_SECTIONS, issueMeetingBand, meetingScheduledAt, type MeetingAiSummary, type MeetingRecord, type MeetingSkipReason, type WorkspaceRecord } from '../domain.js';
+import { DEFAULT_MEETING_SECTIONS, issueMeetingBand, meetingScheduledAt, quarterIdForDate, type MeetingAiSummary, type MeetingRecord, type MeetingSkipReason, type WorkspaceRecord } from '../domain.js';
 import { sanitizeTodoNotes } from '../richText.js';
 
 async function rejectsWithCode(operation: Promise<unknown>, code: RepositoryError['code']) {
@@ -365,6 +365,8 @@ test('generating meetings replaces future open occurrences from the saved cadenc
   assert.equal(result.meetings.length, 4);
   assert.ok(result.meetings.every((meeting) => meeting.scheduledTime === '10:00 AM' && meeting.status === 'upcoming'));
   assert.equal(new Set(result.meetings.map((meeting) => meeting.scheduledDate)).size, 4);
+  const quarterCatalog = (await repository.getWorkspaceSnapshot('ava-khan')).quarters;
+  assert.ok(result.meetings.every((meeting) => meeting.quarterId === quarterIdForDate(meeting.scheduledDate, quarterCatalog)));
   assert.ok(result.meetings.every((meeting, index, meetings) => index === 0 || meeting.scheduledDate > meetings[index - 1].scheduledDate));
 
   const after = await repository.getTeamWorkspace(created.teamId, 'ava-khan');
@@ -374,6 +376,20 @@ test('generating meetings replaces future open occurrences from the saved cadenc
   assert.equal(repository.exportWorkspaceRecords().some((record) => record.kind === 'auditEvent' && 'target' in record && record.target === created.teamId && 'action' in record && record.action === 'Generated L10 meetings'), true);
 
   await rejectsWithCode(repository.generateMeetings(created.teamId, 'marcus-lee'), 'FORBIDDEN');
+});
+
+test('Cosmos team reads derive a quarter for legacy meetings without one', async () => {
+  const seed = new MemoryWorkspaceRepository().exportWorkspaceRecords().map((record) => record.kind === 'meeting' && record.teamId === 'leadership' ? { ...record, quarterId: undefined } : record);
+  const container = {
+    items: {
+      query: (_spec: unknown, options?: { partitionKey?: string }) => ({ fetchAll: async () => ({ resources: seed.filter((record) => !options?.partitionKey || record.pk === options.partitionKey) }) }),
+    },
+  } as unknown as Container;
+  const repository = new CosmosWorkspaceRepository(container);
+
+  const workspace = await repository.getTeamWorkspace('leadership', 'ava-khan');
+  const legacyMeeting = workspace.meetings.find((meeting) => meeting.teamId === 'leadership');
+  assert.equal(legacyMeeting?.quarterId, '2026-q3');
 });
 
 test('new-team writes fall back to ordinary Cosmos creates when transactional batches are rejected', async () => {

@@ -3,7 +3,8 @@ import type { ChangeEvent, FormEvent, ReactNode } from 'react';
 import { workspaceApi, WorkspaceApiError, type SolveIssueInput } from './api';
 import { buildInfo } from './buildInfo';
 import { initialWorkspace, workspaceToday } from './data';
-import { averageMeetingRating, defaultMeetingSections, isValidMeetingRating, meetingReviewStatus, meetingScheduledAt, meetingSectionConfigsFor, meetingSectionsFor, quarterIdForDate, rockMilestoneCounts, weekStartDateFor } from './types';
+import { rollingMeetingsForTeam, meetingsForQuarter } from './meetingSelectors';
+import { averageMeetingRating, defaultMeetingSections, isValidMeetingRating, meetingReviewStatus, meetingScheduledAt, meetingSectionConfigsFor, meetingSectionsFor, quarterIdForRecord, rockMilestoneCounts, weekStartDateFor } from './types';
 import { sanitizeTodoNotes } from './richText';
 import type {
   CompanyOverview,
@@ -148,17 +149,6 @@ function teamPath(workspace: Workspace, teamId: string) {
   return parts.join(' / ');
 }
 
-function quarterIdForRecord(record: { quarterId?: string; scheduledDate?: string; dueDate?: string; createdAt?: string }, quarters: Quarter[]) {
-  if (record.quarterId) return record.quarterId;
-  const date = record.scheduledDate ?? record.dueDate ?? record.createdAt;
-  if (!date) return undefined;
-  try {
-    return quarterIdForDate(date, quarters);
-  } catch {
-    return undefined;
-  }
-}
-
 function descendantIds(workspace: Workspace, teamId: string): string[] {
   const children = workspace.teams.filter((team) => team.parentTeamId === teamId).map((team) => team.id);
   return children.flatMap((child) => [child, ...descendantIds(workspace, child)]);
@@ -260,7 +250,7 @@ function App() {
   const activeTeam = teamFor(workspace, accessibleTeamId);
   const currentRole = roleFor(workspace, activeTeam.id);
   const readOnly = !hasWorkspaceAccess || !canWrite(workspace, activeTeam.id);
-  const teamMeetings = useMemo(() => workspace.meetings.filter((meeting) => meeting.teamId === activeTeam.id && quarterIdForRecord(meeting, workspace.quarters) === workspace.quarter.id), [workspace.meetings, workspace.quarters, workspace.quarter.id, activeTeam.id]);
+  const teamMeetings = useMemo(() => rollingMeetingsForTeam(workspace.meetings, activeTeam.id), [workspace.meetings, activeTeam.id]);
   const sortedTeamMeetings = useMemo(() => [...teamMeetings].sort((left, right) => meetingScheduledAt(left) - meetingScheduledAt(right)), [teamMeetings]);
   const selectedMeeting = teamMeetings.find((meeting) => meeting.id === selectedMeetingId);
   const recapMeeting = teamMeetings.find((meeting) => meeting.id === recapMeetingId);
@@ -1034,7 +1024,7 @@ function MeetingHistoryView({ workspace, teams, team: activeTeam, onRequestSumma
   const [filter, setFilter] = useState<'attention' | 'completed' | 'skipped' | 'all'>('completed');
   const [teamFilter, setTeamFilter] = useState('all');
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const quarterMeetings = useMemo(() => workspace.meetings.filter((meeting) => quarterIdForRecord(meeting, workspace.quarters) === workspace.quarter.id), [workspace.meetings, workspace.quarters, workspace.quarter.id]);
+  const quarterMeetings = useMemo(() => meetingsForQuarter(workspace.meetings, workspace.quarters, workspace.quarter.id), [workspace.meetings, workspace.quarters, workspace.quarter.id]);
   const items = useMemo(() => quarterMeetings.map((meeting) => { const team = teamFor(workspace, meeting.teamId); return { meeting, team, reviewStatus: meetingReviewStatus(meeting, team) }; }).filter(({ team, reviewStatus }) => teams.some((candidate) => candidate.id === team.id) && (teamFilter === 'all' || team.id === teamFilter) && (filter === 'attention' ? reviewStatus === 'missed' || reviewStatus === 'overdue' : filter === 'completed' ? reviewStatus === 'closed' : filter === 'skipped' ? reviewStatus === 'skipped' : true)).sort((left, right) => meetingScheduledAt(right.meeting) - meetingScheduledAt(left.meeting)), [filter, teamFilter, teams, quarterMeetings, workspace]);
   const selected = items.find((item) => item.meeting.id === selectedId) ?? items[0];
   useEffect(() => {
@@ -1043,7 +1033,14 @@ function MeetingHistoryView({ workspace, teams, team: activeTeam, onRequestSumma
   }, [selected, selectedId]);
   const counts = useMemo(() => ({ attention: quarterMeetings.filter((meeting) => { const team = teamFor(workspace, meeting.teamId); const status = meetingReviewStatus(meeting, team); return teams.some((candidate) => candidate.id === team.id) && (status === 'missed' || status === 'overdue'); }).length, completed: quarterMeetings.filter((meeting) => teams.some((team) => team.id === meeting.teamId) && meeting.status === 'closed').length, skipped: quarterMeetings.filter((meeting) => teams.some((team) => team.id === meeting.teamId) && meeting.status === 'skipped').length }), [teams, quarterMeetings, workspace]);
   const canAddHistorical = activeTeam.nodeType === 'operational' && workspace.quarter.status !== 'upcoming' && canWrite(workspace, activeTeam.id);
-  return <><PageHeader eyebrow={`${workspace.quarter.label.toUpperCase()} · MEETING HISTORY`} title="Review the room over time." description="Quarter history keeps Rocks, Issues, To-Dos, Headlines, and L10 records together. Select another quarter above to review or backfill it." actions={<div className="history-header-actions">{canAddHistorical && <Button variant="secondary" onClick={onAddHistorical}>Record historical L10</Button>}<div className="history-filter-buttons">{([['attention', `Attention · ${counts.attention}`], ['completed', `Completed · ${counts.completed}`], ['skipped', `Skipped · ${counts.skipped}`], ['all', 'All records']] as const).map(([value, label]) => <button className={`history-filter-button ${filter === value ? 'history-filter-active' : ''}`} key={value} onClick={() => setFilter(value)}>{label}</button>)}</div></div>} /><div className="history-toolbar card-surface"><label>Team<select value={teamFilter} onChange={(event) => setTeamFilter(event.target.value)}><option value="all">All accessible teams</option>{teams.filter((team) => team.nodeType === 'operational').map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label><span>{items.length} {items.length === 1 ? 'meeting' : 'meetings'} in {workspace.quarter.label}</span></div><div className="meeting-history-layout card-surface"><div className="history-list">{items.map(({ meeting, team, reviewStatus }) => <button className={`history-list-row ${selected?.meeting.id === meeting.id ? 'history-list-selected' : ''}`} key={meeting.id} onClick={() => setSelectedId(meeting.id)}><span className="history-list-date"><strong>{formatDate(meeting.scheduledDate ?? '')}</strong><small>{meeting.scheduledTime ?? team.meetingTime}</small></span><span className="history-list-copy"><strong>{team.shortName} L10</strong><small>{meeting.startedAt ? `Started ${formatTime(meeting.startedAt)}` : meeting.status === 'skipped' ? 'Skipped occurrence' : 'No start recorded'}</small></span><StatusPill status={reviewStatus} /></button>)}{items.length === 0 && <EmptyState title={filter === 'attention' ? 'No missed or overdue meetings' : 'No meetings in this view'} detail={filter === 'attention' ? 'The cadence is caught up across the teams you can review.' : 'Try another history filter or team.'} />}</div><div className="history-detail">{selected ? <MeetingHistoryDetail workspace={workspace} item={selected} canRetry={canManageMeetingSummary(workspace, selected.team.id)} onRequestSummary={() => onRequestSummary(selected.team.id, selected.meeting.id, selected.meeting.version)} onCancelSummary={() => onCancelSummary(selected.team.id, selected.meeting.id, selected.meeting.version)} onOpenMeeting={() => onOpenMeeting(selected.team.id, selected.meeting.id)} /> : <EmptyState title="Select a meeting" detail="Choose a meeting from the history list to review its record." />}</div></div></>;
+  const emptyState = filter === 'attention'
+    ? { title: 'No missed or overdue meetings', detail: 'The cadence is caught up across the teams you can review.' }
+    : filter === 'completed'
+      ? { title: `No completed meetings in ${workspace.quarter.label}`, detail: 'Try another quarter or choose All records to review the rolling occurrences.' }
+      : filter === 'skipped'
+        ? { title: `No skipped meetings in ${workspace.quarter.label}`, detail: 'Try another history filter or team.' }
+        : { title: `No meetings in ${workspace.quarter.label}`, detail: 'Try another quarter, history filter, or team.' };
+  return <><PageHeader eyebrow={`${workspace.quarter.label.toUpperCase()} · MEETING HISTORY`} title="Review the room over time." description="Quarter history keeps Rocks, Issues, To-Dos, Headlines, and L10 records together. Select another quarter above to review or backfill it." actions={<div className="history-header-actions">{canAddHistorical && <Button variant="secondary" onClick={onAddHistorical}>Record historical L10</Button>}<div className="history-filter-buttons">{([['attention', `Attention · ${counts.attention}`], ['completed', `Completed · ${counts.completed}`], ['skipped', `Skipped · ${counts.skipped}`], ['all', 'All records']] as const).map(([value, label]) => <button className={`history-filter-button ${filter === value ? 'history-filter-active' : ''}`} key={value} onClick={() => setFilter(value)}>{label}</button>)}</div></div>} /><div className="history-toolbar card-surface"><label>Team<select value={teamFilter} onChange={(event) => setTeamFilter(event.target.value)}><option value="all">All accessible teams</option>{teams.filter((team) => team.nodeType === 'operational').map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label><span>{items.length} {items.length === 1 ? 'meeting' : 'meetings'} in {workspace.quarter.label}</span></div><div className="meeting-history-layout card-surface"><div className="history-list">{items.map(({ meeting, team, reviewStatus }) => <button className={`history-list-row ${selected?.meeting.id === meeting.id ? 'history-list-selected' : ''}`} key={meeting.id} onClick={() => setSelectedId(meeting.id)}><span className="history-list-date"><strong>{formatDate(meeting.scheduledDate ?? '')}</strong><small>{meeting.scheduledTime ?? team.meetingTime}</small></span><span className="history-list-copy"><strong>{team.shortName} L10</strong><small>{meeting.startedAt ? `Started ${formatTime(meeting.startedAt)}` : meeting.status === 'skipped' ? 'Skipped occurrence' : 'No start recorded'}</small></span><StatusPill status={reviewStatus} /></button>)}{items.length === 0 && <EmptyState title={emptyState.title} detail={emptyState.detail} />}</div><div className="history-detail">{selected ? <MeetingHistoryDetail workspace={workspace} item={selected} canRetry={canManageMeetingSummary(workspace, selected.team.id)} onRequestSummary={() => onRequestSummary(selected.team.id, selected.meeting.id, selected.meeting.version)} onCancelSummary={() => onCancelSummary(selected.team.id, selected.meeting.id, selected.meeting.version)} onOpenMeeting={() => onOpenMeeting(selected.team.id, selected.meeting.id)} /> : <EmptyState title="Select a meeting" detail="Choose a meeting from the history list to review its record." />}</div></div></>;
 }
 
 function MeetingHistoryDetail({ workspace, item, canRetry, onRequestSummary, onCancelSummary, onOpenMeeting }: { workspace: Workspace; item: { meeting: Workspace['meetings'][number]; team: Team; reviewStatus: string }; canRetry: boolean; onRequestSummary: () => Promise<boolean>; onCancelSummary: () => Promise<boolean>; onOpenMeeting: () => void }) {

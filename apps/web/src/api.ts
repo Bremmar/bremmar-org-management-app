@@ -1,5 +1,5 @@
 import { defaultAgeBand, initialWorkspace, testWorkspace } from './data';
-import { averageMeetingRating, defaultMeetingSections, isValidMeetingRating, meetingDateFor, meetingDateLabel, meetingReviewStatus, meetingScheduledAt, meetingSectionConfigsFor, meetingSectionsFor, nextConfiguredMeetingDateAfter, normalizeMeeting, issueMeetingBand, quarterIdForDate, rockMilestoneCounts, scorecardTrendFor, weekStartDateFor } from './types';
+import { averageMeetingRating, defaultMeetingSections, isValidMeetingRating, meetingDateFor, meetingDateLabel, meetingReviewStatus, meetingScheduledAt, meetingSectionConfigsFor, meetingSectionsFor, nextConfiguredMeetingDateAfter, normalizeMeeting, issueMeetingBand, quarterIdForDate, quarterIdForRecord, rockMilestoneCounts, scorecardTrendFor, weekStartDateFor } from './types';
 import { richTextToPlainText, sanitizeRichText, sanitizeTodoNotes } from './richText';
 import type {
   CompanyOverview,
@@ -2156,16 +2156,12 @@ function mapSnapshot(snapshot: ApiSnapshot): Workspace {
   const teams = snapshot.teams.map(serverTeam);
   const quarters = snapshot.quarters?.length ? snapshot.quarters : [snapshot.quarter];
   const selectedQuarter = quarters.find((quarter) => quarter.id === snapshot.quarter.id) ?? snapshot.quarter;
-  const quarterIdForRecord = (value: string | undefined) => {
-    if (value) return value;
-    try {
-      return quarterIdForDate(value ?? '', quarters);
-    } catch {
-      return undefined;
-    }
-  };
   const tasksByRock = new Map<string, RockTask[]>();
   for (const task of snapshot.tasks) tasksByRock.set(task.rockId, [...(tasksByRock.get(task.rockId) ?? []), task]);
+  const normalizedMeetings = snapshot.meetings.map((meeting) => {
+    const normalized = normalizeMeeting(meeting, teams.find((team) => team.id === meeting.teamId));
+    return { ...normalized, quarterId: quarterIdForRecord(normalized, quarters) };
+  });
   return {
     environment: snapshot.environmentId,
     currentUser: snapshot.user,
@@ -2176,15 +2172,15 @@ function mapSnapshot(snapshot: ApiSnapshot): Workspace {
     users: snapshot.users,
     memberships: snapshot.memberships.map(serverMembership),
     rocks: snapshot.rocks.map((rock) => ({ ...stripLegacyRockProgress(rock), id: rock.id, notes: sanitizeRichText(rock.notes), tasks: tasksByRock.get(rock.id) ?? [] })),
-    todos: snapshot.todos.map((todo) => ({ ...todo, quarterId: quarterIdForRecord(todo.quarterId) ?? quarterIdForRecord(todo.dueDate), notes: sanitizeTodoNotes(todo.notes), checklist: normalizedChecklist(todo, snapshot.users, snapshot.memberships) })),
-    issues: snapshot.issues.map((issue) => ({ ...issue, quarterId: quarterIdForRecord(issue.quarterId) ?? quarterIdForRecord(issue.createdAt), detail: sanitizeRichText(issue.detail), idsNote: issue.idsNote ? sanitizeRichText(issue.idsNote) : undefined, meetingsPassed: issue.meetingsPassed ?? 0, meetingBand: issueMeetingBand(issue.meetingsPassed ?? 0, issue.status), escalationState: issue.escalationState ?? 'not-scheduled', escalationLevel: issue.escalationLevel ?? 0 })),
+    todos: snapshot.todos.map((todo) => ({ ...todo, quarterId: quarterIdForRecord(todo, quarters), notes: sanitizeTodoNotes(todo.notes), checklist: normalizedChecklist(todo, snapshot.users, snapshot.memberships) })),
+    issues: snapshot.issues.map((issue) => ({ ...issue, quarterId: quarterIdForRecord(issue, quarters), detail: sanitizeRichText(issue.detail), idsNote: issue.idsNote ? sanitizeRichText(issue.idsNote) : undefined, meetingsPassed: issue.meetingsPassed ?? 0, meetingBand: issueMeetingBand(issue.meetingsPassed ?? 0, issue.status), escalationState: issue.escalationState ?? 'not-scheduled', escalationLevel: issue.escalationLevel ?? 0 })),
     messages: snapshot.messages,
     transfers: snapshot.transfers,
     notifications: snapshot.notifications,
     metrics: snapshot.metrics,
     scorecardResults: snapshot.scorecardResults ?? [],
-    headlines: (snapshot.headlines ?? []).map((headline) => ({ ...headline, quarterId: quarterIdForRecord(headline.quarterId) ?? quarterIdForRecord(headline.createdAt), title: typeof headline.title === 'string' ? headline.title.trim() : '', detail: typeof headline.detail === 'string' ? headline.detail.trim() : '' })),
-    meetings: snapshot.meetings.map((meeting) => normalizeMeeting({ ...meeting, quarterId: quarterIdForRecord(meeting.quarterId) ?? quarterIdForRecord(meeting.scheduledDate) }, teams.find((team) => team.id === meeting.teamId))),
+    headlines: (snapshot.headlines ?? []).map((headline) => ({ ...headline, quarterId: quarterIdForRecord(headline, quarters), title: typeof headline.title === 'string' ? headline.title.trim() : '', detail: typeof headline.detail === 'string' ? headline.detail.trim() : '' })),
+    meetings: normalizedMeetings,
     vtos: snapshot.vtos ?? [],
     vtoVersions: snapshot.vtoVersions ?? [],
     activity: snapshot.audit.map(mapAuditEvent),

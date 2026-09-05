@@ -518,7 +518,7 @@ function meetingDateLabel(scheduledDate: string) {
   return new Date(`${scheduledDate}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' }).replace(', ', ' · ');
 }
 
-function normalizedMeeting(team: TeamRecord | undefined, meeting: MeetingRecord): MeetingRecord {
+function normalizedMeeting(team: TeamRecord | undefined, meeting: MeetingRecord, quarters?: readonly Pick<QuarterRecord, 'id' | 'startDate' | 'endDate'>[]): MeetingRecord {
   const fallbackTeam = team ?? { meetingCadence: 'weekly' as const, meetingDay: 'Monday', meetingTime: '9:00 AM' };
   let scheduledDate = meeting.scheduledDate;
   try {
@@ -528,8 +528,14 @@ function normalizedMeeting(team: TeamRecord | undefined, meeting: MeetingRecord)
     scheduledDate = meetingDateFor(fallbackTeam, meeting.weekStartDate ?? new Date());
   }
   const scheduledTime = meeting.scheduledTime?.trim() || fallbackTeam.meetingTime || '9:00 AM';
+  const quarterId = quarters
+    ? meeting.quarterId && quarters.some((quarter) => quarter.id === meeting.quarterId)
+      ? meeting.quarterId
+      : quarterIdForDate(scheduledDate, quarters)
+    : meeting.quarterId;
   return {
     ...meeting,
+    quarterId,
     scheduledDate,
     scheduledTime,
     recurrenceDate: meeting.recurrenceDate ?? scheduledDate,
@@ -861,7 +867,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     }));
     this.issues = this.issues.map((issue) => ({ ...issue, quarterId: issue.quarterId ?? quarterIdForDate(issue.createdAt, this.quarters), detail: sanitizeRichText(issue.detail), idsNote: issue.idsNote ? sanitizeRichText(issue.idsNote) : undefined, meetingsPassed: issue.meetingsPassed ?? 0, meetingBand: issueMeetingBand(issue.meetingsPassed ?? 0, issue.status), escalationState: issue.escalationState ?? 'not-scheduled', escalationLevel: issue.escalationLevel ?? 0 }));
     this.headlines = this.headlines.map((headline) => ({ ...headline, quarterId: headline.quarterId ?? quarterIdForDate(headline.createdAt, this.quarters), title: typeof headline.title === 'string' ? headline.title.trim() : '', detail: typeof headline.detail === 'string' ? sanitizeRichText(headline.detail) : '' })).filter((headline) => headline.teamId && headline.title && (headline.type === 'win' || headline.type === 'concern'));
-    this.meetings = this.meetings.map((meeting) => normalizedMeeting(this.team(meeting.teamId) ?? undefined, { ...meeting, quarterId: meeting.quarterId ?? quarterIdForDate(meeting.scheduledDate, this.quarters), sectionNotes: Object.fromEntries(Object.entries(meeting.sectionNotes ?? {}).map(([section, note]) => [section, sanitizeRichText(note)])), idsIssueIds: meeting.idsIssueIds ?? [], idsAddedIssueIds: meeting.idsAddedIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: (meeting.idsNotes ?? []).map((note) => ({ ...note, note: sanitizeRichText(note.note) })), agendaTotal: meetingSectionsFor(this.team(meeting.teamId) ?? { meetingSections: DEFAULT_MEETING_SECTIONS }).length }));
+    this.meetings = this.meetings.map((meeting) => normalizedMeeting(this.team(meeting.teamId) ?? undefined, { ...meeting, quarterId: meeting.quarterId ?? quarterIdForDate(meeting.scheduledDate, this.quarters), sectionNotes: Object.fromEntries(Object.entries(meeting.sectionNotes ?? {}).map(([section, note]) => [section, sanitizeRichText(note)])), idsIssueIds: meeting.idsIssueIds ?? [], idsAddedIssueIds: meeting.idsAddedIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: (meeting.idsNotes ?? []).map((note) => ({ ...note, note: sanitizeRichText(note.note) })), agendaTotal: meetingSectionsFor(this.team(meeting.teamId) ?? { meetingSections: DEFAULT_MEETING_SECTIONS }).length }), this.quarters);
     this.issues = this.issues.map((issue) => issueAge(issue, this.settings));
   }
 
@@ -2853,7 +2859,7 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
     const fresh = (await this.teamRecords<MeetingRecord>(teamId, 'meeting')).find((meeting) => meeting.id === meetingId);
     if (!fresh) return;
     const team = this.teams.find((candidate) => candidate.teamId === teamId);
-    const normalized = normalizedMeeting(team, fresh);
+    const normalized = normalizedMeeting(team, fresh, this.quarters);
     const index = this.meetings.findIndex((meeting) => meeting.id === meetingId && meeting.teamId === teamId);
     if (index >= 0) this.meetings[index] = normalized;
     else this.meetings.push(normalized);
@@ -3049,7 +3055,7 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
     const teamNotifications = notifications.filter((notification) => notification.recipientUserId === userId && (!notification.teamId || notification.teamId === teamId));
     const teamMessages = messages.filter((message) => message.fromTeamId === teamId || message.toTeamId === teamId);
     const teamHeadlines = headlines.filter((headline) => headline.teamId === teamId).map((headline) => ({ ...headline, detail: sanitizeRichText(headline.detail) }));
-    const normalizedMeetings = meetings.map((meeting) => normalizedMeeting(team, meeting));
+    const normalizedMeetings = meetings.map((meeting) => normalizedMeeting(team, meeting, this.quarters));
     return this.publicValue({ environmentId: this.environmentId, team: clone(team), membership: membership ? { teamId, role: membership.role, active: membership.active } : null, dashboard: dashboardFor(teamId, teamRocks, todos, teamIssues), rocks: clone(teamRocks), tasks: clone(tasks), todos: clone(todos), issues: clone(teamIssues), transfers: clone(teamTransfers), notifications: clone(teamNotifications), messages: clone(teamMessages), meetings: clone(normalizedMeetings), metrics: clone(metrics), scorecardResults: clone(scorecardResults), headlines: clone(teamHeadlines), vto: clone(vto), vtoVersions: clone(vtoVersions), etag: etagFor([...teamRocks, ...tasks, ...todos, ...teamIssues, ...teamTransfers, ...teamMessages, ...normalizedMeetings, ...metrics, ...scorecardResults, ...teamHeadlines, ...(vto ? [vto] : []), ...vtoVersions]) });
   }
 
