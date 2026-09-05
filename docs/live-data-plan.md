@@ -142,15 +142,19 @@ operational work has been resolved or moved.
   Issue can be reopened only through the standalone Issues workflow; reopening
   restores it to `open`, preserves prior resolution notes, increments its
   version, and records an audit event.
-- Closing stores a manual/action recap plus an immutable close-time
-  `MeetingSummaryContext` in the meeting's `team:{teamId}` partition and queues
-  a `meetingSummaryJob`. The existing AI Function receives the snapshot over
-  signed HTTP and returns a signed, timestamped result. Jobs move through
-  `queued`, `generating`, `ready`, `failed`, or `cancelled`; attempt matching and terminal
-  state checks reject replayed callbacks. Structured summaries store an
-  executive summary, decisions, commitments, risks, and next focus. Retrying
-  is limited to direct team editors after failure, while legacy closed meetings
-  can be generated on demand without mutating EOS records.
+- Closing stores the facilitator-entered `manualRecap`, a manual/action recap,
+  and an immutable close-time `MeetingSummaryContext` in the meeting's
+  `team:{teamId}` partition and queues a `meetingSummaryJob`. The context
+  includes display names and exact attendee ratings alongside internal IDs so
+  the AI Function never needs to resolve a GUID into a person’s name. The
+  existing AI Function receives the snapshot over signed HTTP and returns a
+  signed, timestamped result. Jobs move through `queued`, `generating`, `ready`,
+  `failed`, or `cancelled`; attempt matching and terminal state checks reject
+  replayed callbacks. Structured summaries store an executive summary,
+  decisions, commitments, risks, and next focus. The web recap shows the exact
+  individual ratings separately from the generated prose. Retrying is limited
+  to direct team editors after failure, while legacy closed meetings can be
+  generated on demand without mutating EOS records.
 - Issue health is meeting-based: an unresolved Issue is neutral at 0 meetings,
   green at 1, yellow at 2, orange at 3, and red at 4 or more. When a meeting
   closes, every unresolved active Issue in that team that existed before the

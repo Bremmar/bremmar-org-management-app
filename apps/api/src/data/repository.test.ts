@@ -734,12 +734,19 @@ test('L10 starts store the facilitator, record section and overall timing, and r
   assert.deepEqual(closed.attendeeRatings, ratings);
   assert.equal(closed.lastRating, 9);
   assert.match(closed.recap, /Meeting rating: 9\/10 average/);
-  assert.match(closed.recap, /Facilitator ID: marcus-lee/);
+  assert.match(closed.recap, /Facilitator: Marcus Lee/);
+  assert.match(closed.recap, /Attendees: .*Marcus Lee/);
+  assert.match(closed.recap, /Attendee ratings: .*Marcus Lee/);
+  assert.doesNotMatch(closed.recap, /marcus-lee|ava-khan/);
+  assert.equal(closed.manualRecap, 'The team left with clear owners.');
 
   workspace = await repository.getTeamWorkspace('leadership', 'marcus-lee');
   const job = await repository.getMeetingSummaryJob('leadership', meeting.id, 'marcus-lee');
   assert.equal(job?.contextSnapshot.facilitatorId, 'marcus-lee');
+  assert.equal(job?.contextSnapshot.facilitatorName, 'Marcus Lee');
+  assert.equal(job?.contextSnapshot.attendees?.find((attendee) => attendee.id === 'marcus-lee')?.name, 'Marcus Lee');
   assert.deepEqual(job?.contextSnapshot.attendeeRatings, ratings);
+  assert.equal(job?.contextSnapshot.manualRecap, 'The team left with clear owners.');
   assert.equal(workspace.meetings.find((candidate) => candidate.id === meeting.id)?.status, 'closed');
 });
 
@@ -844,11 +851,11 @@ test('meeting close snapshots context and moves AI summaries through queued, gen
   const generating = await repository.updateMeetingSummaryDispatch(queuedJob!.id, 'generating', undefined, 'ai-worker');
   assert.equal(generating.status, 'generating');
   assert.equal((await repository.getMeeting('projects', closed.id, 'marcus-lee')).aiSummaryStatus, 'generating');
-  const summary: MeetingAiSummary = { executiveSummary: 'The team aligned delivery ownership and the next customer milestone.', decisions: ['Keep one accountable owner for each implementation handoff.'], commitments: ['Publish the revised kickoff checklist.'], risks: ['The next milestone depends on security review timing.'], nextFocus: ['Review the first pilot outcome next week.'], generatedAt: new Date().toISOString(), source: 'close' };
+  const summary: MeetingAiSummary = { executiveSummary: 'marcus-lee aligned delivery ownership and the next customer milestone.', decisions: ['marcus-lee will keep one accountable owner for each implementation handoff.'], commitments: ['Publish the revised kickoff checklist.'], risks: ['The next milestone depends on security review timing.'], nextFocus: ['Review the first pilot outcome next week.'], generatedAt: new Date().toISOString(), source: 'close' };
   const ready = await repository.completeMeetingSummary(queuedJob!.id, 'ready', summary, undefined, 1);
   assert.equal(ready.aiSummaryStatus, 'ready');
-  assert.equal(ready.aiSummary?.executiveSummary, summary.executiveSummary);
-  assert.deepEqual(ready.aiSummary?.decisions, summary.decisions);
+  assert.equal(ready.aiSummary?.executiveSummary, 'Marcus Lee aligned delivery ownership and the next customer milestone.');
+  assert.deepEqual(ready.aiSummary?.decisions, ['Marcus Lee will keep one accountable owner for each implementation handoff.']);
   await rejectsWithCode(repository.completeMeetingSummary(queuedJob!.id, 'ready', summary, undefined, 1), 'CONFLICT');
 
   const regenerated = await repository.requestMeetingSummary('projects', closed.id, 'marcus-lee', ready.version);

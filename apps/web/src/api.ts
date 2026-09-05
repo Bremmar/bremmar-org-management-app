@@ -273,10 +273,13 @@ function meetingRecap(workspace: Workspace, team: Team, meeting: Workspace['meet
   const issues = workspace.issues.filter((issue) => issue.teamId === team.id && issue.assignmentState !== 'redirected');
   const ids = meeting.idsIssueIds.map((id) => issues.find((issue) => issue.id === id)).filter((issue): issue is Issue => Boolean(issue));
   const lines = [`${team.name} L10 recap · ${meeting.dateLabel} · week of ${meeting.weekStartDate ?? weekStartDateFor(new Date())}`, ''];
-  const facilitator = workspace.users.find((user) => user.id === meeting.facilitatorId)?.name ?? meeting.facilitatorId;
+  const facilitator = workspace.users.find((user) => user.id === meeting.facilitatorId)?.name ?? 'Unknown participant';
+  const attendees = meeting.attendeeIds.map((attendeeId) => workspace.users.find((user) => user.id === attendeeId)?.name ?? 'Unknown participant');
+  const normalizedManualNotes = richTextToPlainText(manualNotes).trim();
   lines.push(`Facilitator: ${facilitator}`);
+  lines.push(`Attendees: ${attendees.join(', ') || 'No attendees recorded.'}`);
   if (meeting.durationSeconds !== undefined) lines.push(`Meeting duration: ${Math.floor(meeting.durationSeconds / 60)}m ${meeting.durationSeconds % 60}s`);
-  if (meeting.attendeeRatings?.length) lines.push(`Meeting rating: ${meeting.lastRating}/10 average · Attendee ratings: ${meeting.attendeeRatings.map((entry) => `${workspace.users.find((user) => user.id === entry.attendeeId)?.name ?? entry.attendeeId} ${entry.rating}/10`).join('; ')}`);
+  if (meeting.attendeeRatings?.length) lines.push(`Meeting rating: ${meeting.lastRating}/10 average · Attendee ratings: ${meeting.attendeeRatings.map((entry) => `${workspace.users.find((user) => user.id === entry.attendeeId)?.name ?? 'Unknown participant'} ${entry.rating}/10`).join('; ')}`);
   lines.push('');
   for (const section of sections) {
     const note = richTextToPlainText(meeting.sectionNotes[section.id]);
@@ -297,7 +300,7 @@ function meetingRecap(workspace: Workspace, team: Team, meeting: Workspace['meet
   const actions = meeting.actionSummary ?? meetingActionSummary(workspace, meeting);
   lines.push(`Actions: ${actions.todosCreated} To-Dos created · ${actions.issuesReviewedInIds} Issues reviewed in IDS · ${actions.issuesAddedToIds} Issues added to IDS · ${actions.issuesSolved} Issues solved.`);
   if (meeting.createdTodoIds.length) lines.push(`Created To-Dos: ${meeting.createdTodoIds.map((id) => todos.find((todo) => todo.id === id)?.title ?? id).join('; ')}`);
-  if (manualNotes.trim()) lines.push(`Facilitator notes: ${manualNotes.trim()}`);
+  if (normalizedManualNotes) lines.push(`Facilitator notes: ${normalizedManualNotes}`);
   return lines.join('\n');
 }
 
@@ -2076,6 +2079,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
       idsSolved: 0,
       idsTotal: 0,
       recap: sanitizeRichText(input.recap ?? ''),
+      manualRecap: richTextToPlainText(input.recap),
       startedAt: new Date(scheduledAt - sections.reduce((total, section) => total + section.duration, 0) * 60_000).toISOString(),
       closedAt: new Date(scheduledAt).toISOString(),
       sectionNotes: input.idsNote?.trim() ? { ids: sanitizeRichText(input.idsNote) } : {},
@@ -2122,6 +2126,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     meeting.idsTotal = meeting.idsIssueIds.length;
     meeting.idsSolved = meeting.idsIssueIds.filter((issueId) => this.workspace.issues.find((issue) => issue.id === issueId)?.status === 'solved').length;
     meeting.actionSummary = meetingActionSummary(this.workspace, meeting);
+    meeting.manualRecap = richTextToPlainText(recap);
     meeting.recap = meetingRecap(this.workspace, activeTeam, meeting, recap);
     meeting.aiSummaryStatus = 'queued';
     meeting.aiSummaryRequestedAt = timestamp;

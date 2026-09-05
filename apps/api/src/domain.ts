@@ -355,6 +355,13 @@ export interface MeetingAttendeeRating {
   rating: number;
 }
 
+/** Named participant data supplied to the AI worker; IDs remain internal metadata. */
+export interface MeetingParticipantSnapshot {
+  id: string;
+  name: string;
+  rating?: number;
+}
+
 /** Member ratings use the same 0.5–10 scale as the L10 rating control. */
 export function isValidMeetingRating(value: unknown): value is number {
   return typeof value === 'number'
@@ -411,6 +418,8 @@ export interface MeetingRecord extends WorkspaceRecord {
   idsSolved: number;
   idsTotal: number;
   recap: string;
+  /** The exact facilitator-entered close-time recap, kept separate from the generated record snapshot. */
+  manualRecap?: string;
   startedAt?: string;
   closedAt?: string;
   durationSeconds?: number;
@@ -450,12 +459,15 @@ export interface MeetingSummaryContext {
   scheduledDate: string;
   scheduledTime: string;
   facilitatorId: string;
+  facilitatorName?: string;
   startedAt?: string;
   closedAt: string;
   durationSeconds?: number;
   sectionDurations?: Partial<Record<MeetingSection, number>>;
   attendeeIds: string[];
+  attendees?: MeetingParticipantSnapshot[];
   attendeeRatings?: MeetingAttendeeRating[];
+  manualRecap?: string;
   recap: string;
   sectionNotes: Partial<Record<MeetingSection, string>>;
   idsNotes: MeetingIssueNoteRecord[];

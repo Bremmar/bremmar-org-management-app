@@ -35,6 +35,7 @@ import {
   type MeetingActionSummary,
   type MeetingAttendeeRating,
   type MeetingAiSummary,
+  type MeetingParticipantSnapshot,
   type MeetingGenerationResult,
   type MeetingReviewPage,
   type MeetingReviewQuery,
@@ -571,18 +572,26 @@ function meetingHeadlinesFor(headlines: HeadlineRecord[], meeting: MeetingRecord
   return headlines.filter((headline) => headline.teamId === meeting.teamId && (!headline.meetingId || headline.meetingId === meeting.id));
 }
 
+function participantNameFor(users: readonly UserProfile[], userId: string | undefined) {
+  return users.find((user) => user.id === userId)?.name?.trim() || (userId ? 'Unknown participant' : 'Not recorded');
+}
+
 function milestoneCountsFor(rockId: string, tasks: RockTaskRecord[]) {
   const milestones = tasks.filter((task) => task.rockId === rockId);
   const completed = milestones.filter((task) => task.status === 'done').length;
   return { completed, remaining: milestones.length - completed };
 }
 
-function meetingRecap(team: TeamRecord, meeting: MeetingRecord, rocks: RockRecord[], tasks: RockTaskRecord[], todos: TodoRecord[], issues: IssueRecord[], manualNotes: string, metrics: ScorecardMetricRecord[] = [], results: ScorecardResultRecord[] = [], headlines: HeadlineRecord[] = []) {
+function meetingRecap(team: TeamRecord, meeting: MeetingRecord, rocks: RockRecord[], tasks: RockTaskRecord[], todos: TodoRecord[], issues: IssueRecord[], manualNotes: string, metrics: ScorecardMetricRecord[] = [], results: ScorecardResultRecord[] = [], headlines: HeadlineRecord[] = [], users: readonly UserProfile[] = []) {
   const ids = meeting.idsIssueIds.map((id) => issues.find((issue) => issue.id === id)).filter((issue): issue is IssueRecord => Boolean(issue));
+  const facilitator = participantNameFor(users, meeting.facilitatorId);
+  const attendees = meeting.attendeeIds.map((attendeeId) => participantNameFor(users, attendeeId));
+  const normalizedManualNotes = richTextToPlainText(manualNotes).trim();
   const lines = [`${team.name} L10 recap · ${meeting.dateLabel} · week of ${meeting.weekStartDate}`, ''];
-  lines.push(`Facilitator ID: ${meeting.facilitatorId}`);
+  lines.push(`Facilitator: ${facilitator}`);
+  lines.push(`Attendees: ${attendees.join(', ') || 'No attendees recorded.'}`);
   if (meeting.durationSeconds !== undefined) lines.push(`Meeting duration: ${Math.floor(meeting.durationSeconds / 60)}m ${meeting.durationSeconds % 60}s`);
-  if (meeting.attendeeRatings?.length) lines.push(`Meeting rating: ${meeting.lastRating}/10 average · Attendee ratings: ${meeting.attendeeRatings.map((entry) => `${entry.attendeeId} ${entry.rating}/10`).join('; ')}`);
+  if (meeting.attendeeRatings?.length) lines.push(`Meeting rating: ${meeting.lastRating}/10 average · Attendee ratings: ${meeting.attendeeRatings.map((entry) => `${participantNameFor(users, entry.attendeeId)} ${entry.rating}/10`).join('; ')}`);
   lines.push('');
   for (const [section, note] of Object.entries(meeting.sectionNotes)) {
     const plainNote = richTextToPlainText(note);
@@ -603,11 +612,12 @@ function meetingRecap(team: TeamRecord, meeting: MeetingRecord, rocks: RockRecor
   lines.push(`Actions: ${actions.todosCreated} To-Dos created · ${actions.issuesReviewedInIds} Issues reviewed in IDS · ${actions.issuesAddedToIds} Issues added to IDS · ${actions.issuesSolved} Issues solved.`);
   if (meeting.createdTodoIds.length) lines.push(`Created To-Dos: ${meeting.createdTodoIds.map((id) => todos.find((todo) => todo.id === id)?.title ?? id).join('; ')}`);
   if (meeting.idsNotes.length) lines.push(`Meeting IDS notes: ${meeting.idsNotes.map((note) => richTextToPlainText(note.note)).join(' | ')}`);
-  if (manualNotes.trim()) lines.push(`Facilitator notes: ${manualNotes.trim()}`);
+  if (normalizedManualNotes) lines.push(`Facilitator notes: ${normalizedManualNotes}`);
   return lines.join('\n');
 }
 
-function meetingSummaryContext(team: TeamRecord, meeting: MeetingRecord, rocks: RockRecord[], tasks: RockTaskRecord[], todos: TodoRecord[], issues: IssueRecord[], metrics: ScorecardMetricRecord[], results: ScorecardResultRecord[], headlines: Array<{ title: string; type: 'win' | 'concern'; detail: string }> = []): MeetingSummaryContext {
+function meetingSummaryContext(team: TeamRecord, meeting: MeetingRecord, rocks: RockRecord[], tasks: RockTaskRecord[], todos: TodoRecord[], issues: IssueRecord[], metrics: ScorecardMetricRecord[], results: ScorecardResultRecord[], headlines: Array<{ title: string; type: 'win' | 'concern'; detail: string }> = [], users: readonly UserProfile[] = []): MeetingSummaryContext {
+  const ratings = new Map((meeting.attendeeRatings ?? []).map((entry) => [entry.attendeeId, entry.rating]));
   return {
     meetingId: meeting.id,
     teamId: team.teamId,
@@ -615,12 +625,19 @@ function meetingSummaryContext(team: TeamRecord, meeting: MeetingRecord, rocks: 
     scheduledDate: meeting.scheduledDate,
     scheduledTime: meeting.scheduledTime,
     facilitatorId: meeting.facilitatorId,
+    facilitatorName: participantNameFor(users, meeting.facilitatorId),
     startedAt: meeting.startedAt,
     closedAt: meeting.closedAt ?? meeting.updatedAt,
     durationSeconds: meeting.durationSeconds,
     sectionDurations: clone(meeting.sectionDurations ?? {}),
     attendeeIds: [...meeting.attendeeIds],
+    attendees: meeting.attendeeIds.map((attendeeId): MeetingParticipantSnapshot => ({
+      id: attendeeId,
+      name: participantNameFor(users, attendeeId),
+      ...(ratings.has(attendeeId) ? { rating: ratings.get(attendeeId) } : {}),
+    })),
     attendeeRatings: meeting.attendeeRatings ? clone(meeting.attendeeRatings) : undefined,
+    manualRecap: meeting.manualRecap ?? '',
     recap: meeting.recap,
     sectionNotes: clone(meeting.sectionNotes),
     idsNotes: clone(meeting.idsNotes),
@@ -634,6 +651,25 @@ function meetingSummaryContext(team: TeamRecord, meeting: MeetingRecord, rocks: 
       return { label: metric.label, target: metric.target, actual: result?.actual, status: result?.status };
     }),
   };
+}
+
+function participantNamesForContext(context: MeetingSummaryContext, users: readonly UserProfile[]) {
+  const names = new Map<string, string>();
+  const add = (id: string | undefined, name: string | undefined) => {
+    const normalizedId = id?.trim();
+    const normalizedName = name?.trim();
+    if (normalizedId && normalizedName && normalizedId !== normalizedName && normalizedName !== 'Unknown participant') names.set(normalizedId, normalizedName);
+  };
+  add(context.facilitatorId, context.facilitatorName ?? participantNameFor(users, context.facilitatorId));
+  context.attendees?.forEach((attendee) => add(attendee.id, attendee.name ?? participantNameFor(users, attendee.id)));
+  context.attendeeIds.forEach((attendeeId) => add(attendeeId, participantNameFor(users, attendeeId)));
+  return names;
+}
+
+function replaceKnownParticipantIds(value: string, names: ReadonlyMap<string, string>) {
+  return [...names.entries()]
+    .sort(([left], [right]) => right.length - left.length)
+    .reduce((current, [id, name]) => current.split(id).join(name), value);
 }
 
 function makeTeam(input: Partial<TeamRecord> & { teamId: string; name: string; shortName: string; parentTeamId: string | null; nodeType: TeamRecord['nodeType'] }): TeamRecord {
@@ -1154,7 +1190,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     const closedAt = new Date(Math.min(scheduledAt, Date.now())).toISOString();
     const meeting: MeetingRecord = {
       ...baseRecord(generatedId('meeting'), 'meeting', input.teamId),
-      kind: 'meeting', teamId: input.teamId, quarterId, label: `${team.shortName} L10`, dateLabel: meetingDateLabel(scheduledDate), scheduledDate, scheduledTime, recurrenceDate: undefined, weekStartDate: weekStartDateFor(scheduledDate), status: 'closed', facilitatorId: input.facilitatorId, attendeeIds: [...input.attendeeIds], lastRating: rating, agendaProgress: meetingSectionsFor(team).length, agendaTotal: meetingSectionsFor(team).length, idsSolved: 0, idsTotal: 0, recap: sanitizeRichText(input.recap), startedAt: new Date(Math.max(0, scheduledAt - meetingSectionsFor(team).reduce((total, section) => total + section.duration, 0) * 60_000)).toISOString(), closedAt, durationSeconds: undefined, sectionNotes: input.idsNote?.trim() ? { ids: sanitizeRichText(input.idsNote) } : {}, idsIssueIds: [], idsAddedIssueIds: [], createdTodoIds: [], idsNotes: [], aiSummaryStatus: 'not-generated', aiSummarySource: 'legacy', createdAt: timestamp, updatedAt: timestamp, updatedBy: actorId, version: 1,
+      kind: 'meeting', teamId: input.teamId, quarterId, label: `${team.shortName} L10`, dateLabel: meetingDateLabel(scheduledDate), scheduledDate, scheduledTime, recurrenceDate: undefined, weekStartDate: weekStartDateFor(scheduledDate), status: 'closed', facilitatorId: input.facilitatorId, attendeeIds: [...input.attendeeIds], lastRating: rating, agendaProgress: meetingSectionsFor(team).length, agendaTotal: meetingSectionsFor(team).length, idsSolved: 0, idsTotal: 0, recap: sanitizeRichText(input.recap), manualRecap: richTextToPlainText(input.recap), startedAt: new Date(Math.max(0, scheduledAt - meetingSectionsFor(team).reduce((total, section) => total + section.duration, 0) * 60_000)).toISOString(), closedAt, durationSeconds: undefined, sectionNotes: input.idsNote?.trim() ? { ids: sanitizeRichText(input.idsNote) } : {}, idsIssueIds: [], idsAddedIssueIds: [], createdTodoIds: [], idsNotes: [], aiSummaryStatus: 'not-generated', aiSummarySource: 'legacy', createdAt: timestamp, updatedAt: timestamp, updatedBy: actorId, version: 1,
     };
     this.meetings.push(meeting);
     this.recordAudit(actorId, 'Recorded historical L10 meeting', meeting.id, `${team.name} · ${meeting.dateLabel}.`, 'meeting');
@@ -2466,7 +2502,8 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     meeting.lastRating = averageMeetingRating(ratings) ?? Math.min(10, Math.max(0, rating));
     if (attendeeRatings !== undefined) meeting.attendeeRatings = ratings.map((entry) => ({ ...entry }));
     meeting.actionSummary = meetingActionSummary(meeting, teamIssues);
-    meeting.recap = meetingRecap(team, meeting, teamRocks, teamTasks, teamTodos, teamIssues, recap, this.metrics, this.scorecardResults, this.headlines);
+    meeting.manualRecap = richTextToPlainText(recap);
+    meeting.recap = meetingRecap(team, meeting, teamRocks, teamTasks, teamTodos, teamIssues, recap, this.metrics, this.scorecardResults, this.headlines, this.users);
     meeting.aiSummaryStatus = 'queued';
     meeting.aiSummaryRequestedAt = timestamp;
     meeting.aiSummarySource = 'close';
@@ -2477,7 +2514,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     meeting.version += 1;
     this.advanceIssueEscalations(team, meeting, timestamp);
     const carriedIssueIds = meeting.idsIssueIds.filter((issueId) => this.activeIssue(issueId)?.status !== 'solved');
-    const contextSnapshot = meetingSummaryContext(team, meeting, teamRocks, teamTasks, teamTodos, teamIssues, this.metrics, this.scorecardResults, meetingHeadlinesFor(this.headlines, meeting));
+    const contextSnapshot = meetingSummaryContext(team, meeting, teamRocks, teamTasks, teamTodos, teamIssues, this.metrics, this.scorecardResults, meetingHeadlinesFor(this.headlines, meeting), this.users);
     const existingJob = this.summaryJobs.find((job) => job.id === meeting.aiSummaryJobId);
     if (!existingJob) {
       this.summaryJobs.push({
@@ -2523,7 +2560,9 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     const tasks = this.tasks.filter((task) => task.teamId === teamId);
     const todos = this.todos.filter((todo) => todo.teamId === teamId);
     const issues = this.issues.filter((issue) => issue.teamId === teamId && issue.assignmentState !== 'redirected');
-    const contextSnapshot = existingJob?.contextSnapshot ?? meetingSummaryContext(team, meeting, rocks, tasks, todos, issues, this.metrics, this.scorecardResults, meetingHeadlinesFor(this.headlines, meeting));
+    const contextSnapshot = existingJob?.contextSnapshot?.facilitatorName && existingJob.contextSnapshot.attendees
+      ? existingJob.contextSnapshot
+      : meetingSummaryContext(team, meeting, rocks, tasks, todos, issues, this.metrics, this.scorecardResults, meetingHeadlinesFor(this.headlines, meeting), this.users);
     const jobId = meeting.aiSummaryJobId ?? `summary-${meeting.id}`;
     const currentJob = this.summaryJobs.find((job) => job.id === jobId);
     const attempt = (currentJob?.attempt ?? 0) + 1;
@@ -2580,7 +2619,9 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     if (job.status === 'ready' || job.status === 'failed' || job.status === 'cancelled') throw new RepositoryError('CONFLICT', 'This AI summary job has already completed.');
     if (status === 'ready' && (!summary || typeof summary.executiveSummary !== 'string' || !summary.executiveSummary.trim() || !Array.isArray(summary.decisions) || !Array.isArray(summary.commitments) || !Array.isArray(summary.risks) || !Array.isArray(summary.nextFocus))) throw new RepositoryError('VALIDATION', 'A ready AI summary must include all structured sections.');
     const timestamp = nowIso();
-    const normalizedSummary = status === 'ready' && summary ? { ...clone(summary), executiveSummary: summary.executiveSummary.trim(), decisions: summary.decisions.map((item) => String(item).trim()).filter(Boolean), commitments: summary.commitments.map((item) => String(item).trim()).filter(Boolean), risks: summary.risks.map((item) => String(item).trim()).filter(Boolean), nextFocus: summary.nextFocus.map((item) => String(item).trim()).filter(Boolean), generatedAt: summary.generatedAt || timestamp, source: job.source } : undefined;
+    const participantNames = participantNamesForContext(job.contextSnapshot, this.users);
+    const normalizeSummaryText = (value: unknown) => replaceKnownParticipantIds(String(value).trim(), participantNames);
+    const normalizedSummary = status === 'ready' && summary ? { ...clone(summary), executiveSummary: normalizeSummaryText(summary.executiveSummary), decisions: summary.decisions.map(normalizeSummaryText).filter(Boolean), commitments: summary.commitments.map(normalizeSummaryText).filter(Boolean), risks: summary.risks.map(normalizeSummaryText).filter(Boolean), nextFocus: summary.nextFocus.map(normalizeSummaryText).filter(Boolean), generatedAt: summary.generatedAt || timestamp, source: job.source } : undefined;
     Object.assign(job, { status, completedAt: timestamp, lastError: error?.trim() || undefined, updatedAt: timestamp, updatedBy: 'ai-worker', version: job.version + 1 });
     Object.assign(meeting, { aiSummaryStatus: status, aiSummary: normalizedSummary, aiSummaryGeneratedAt: normalizedSummary?.generatedAt, aiSummaryError: error?.trim() || undefined, aiSummarySource: job.source, updatedAt: timestamp, updatedBy: 'ai-worker', version: meeting.version + 1 });
     this.recordAudit('ai-worker', status === 'ready' ? 'Stored meeting AI summary' : 'Meeting AI summary failed', meeting.id, status === 'ready' ? 'AI summary stored from the signed worker callback.' : (error?.trim() || 'The AI worker reported a failed summary.'), 'meeting');

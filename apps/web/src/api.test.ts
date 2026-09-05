@@ -574,6 +574,8 @@ describe('LocalWorkspaceApi', () => {
     expect(closed.sectionDurations?.scorecard).toBeGreaterThanOrEqual(80);
     expect(closed.attendeeRatings).toEqual(ratings);
     expect(closed.recap).toContain('Facilitator: Marcus Lee');
+    expect(closed.recap).toContain('Attendees:');
+    expect(closed.manualRecap).toBe('The team left with clear owners.');
 
     const issueWorkspace = await api.getWorkspace();
     const issueIds = issueWorkspace.issues.filter((issue) => issue.teamId === 'leadership').slice(0, 1).map((issue) => issue.id);

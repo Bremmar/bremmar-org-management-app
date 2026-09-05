@@ -494,6 +494,8 @@ export interface MeetingInstance {
   idsSolved: number;
   idsTotal: number;
   recap: string;
+  /** The exact facilitator-entered close-time recap, separate from the generated record snapshot. */
+  manualRecap?: string;
   startedAt?: string;
   closedAt?: string;
   /** Total wall-clock seconds from start to close. */
