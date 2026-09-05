@@ -513,6 +513,18 @@ describe('LocalWorkspaceApi', () => {
     expect((await api.getMeetingReview({ status: 'skipped', teamId: 'leadership' })).items.some((item) => item.meeting.id === skipped.id)).toBe(true);
   });
 
+  it('requires the current facilitator to resume a live meeting while preserving explicit reassignment', async () => {
+    const seed = structuredClone(initialWorkspace);
+    seed.currentUser = seed.users.find((user) => user.id === 'ava-khan')!;
+    const meeting = seed.meetings.find((candidate) => candidate.teamId === 'leadership' && candidate.status === 'upcoming')!;
+    Object.assign(meeting, { status: 'in-progress' as const, facilitatorId: 'marcus-lee' });
+    const api = new LocalWorkspaceApi(seed);
+
+    await expect(api.startMeeting('leadership', meeting.id, meeting.version)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    const changed = await api.startMeeting('leadership', meeting.id, meeting.version, 'ava-khan');
+    expect(changed.meetings.find((candidate) => candidate.id === meeting.id)?.facilitatorId).toBe('ava-khan');
+  });
+
   it('lets a TeamLead rate a meeting for another facilitator and carries parked Issues forward', async () => {
     const api = new LocalWorkspaceApi();
     let workspace = await api.getWorkspace();

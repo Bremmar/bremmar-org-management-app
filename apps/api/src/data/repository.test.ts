@@ -756,6 +756,7 @@ test('TeamLeads can change an in-progress facilitator while Members cannot', asy
   const workspace = await repository.getTeamWorkspace('leadership', 'ava-khan');
   const meeting = workspace.meetings.find((candidate) => candidate.status === 'upcoming')!;
   const started = await repository.startMeeting('leadership', meeting.id, 'ava-khan', meeting.version, 'marcus-lee');
+  await rejectsWithCode(repository.startMeeting('leadership', meeting.id, 'ava-khan', started.version), 'FORBIDDEN');
   const changed = await repository.startMeeting('leadership', meeting.id, 'ava-khan', started.version, 'ava-khan');
 
   assert.equal(changed.facilitatorId, 'ava-khan');

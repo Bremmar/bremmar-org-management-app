@@ -3,7 +3,7 @@ import type { ChangeEvent, FormEvent, ReactNode } from 'react';
 import { workspaceApi, WorkspaceApiError, type SolveIssueInput } from './api';
 import { buildInfo } from './buildInfo';
 import { initialWorkspace, workspaceToday } from './data';
-import { rollingMeetingsForTeam, meetingsForQuarter } from './meetingSelectors';
+import { canResumeMeeting, rollingMeetingsForTeam, meetingsForQuarter } from './meetingSelectors';
 import { averageMeetingRating, defaultMeetingSections, isValidMeetingRating, meetingReviewStatus, meetingScheduledAt, meetingSectionConfigsFor, meetingSectionsFor, quarterIdForRecord, rockMilestoneCounts, weekStartDateFor } from './types';
 import { sanitizeTodoNotes } from './richText';
 import type {
@@ -619,16 +619,36 @@ function App() {
     return refresh(workspaceApi.upsertScorecardResult(metricId, weekStartDate, input, result?.version), 'Weekly result saved.');
   };
 
-  const closeMeeting = async (recap: string, rating: number, attendeeRatings: MeetingAttendeeRating[]) => {
+  const closeMeeting = (recap: string, rating: number, attendeeRatings: MeetingAttendeeRating[]) => {
     if (!currentMeeting) return;
     const closedMeetingId = currentMeeting.id;
-    const saved = await refresh(workspaceApi.closeMeeting(activeTeam.id, recap, rating, closedMeetingId, attendeeRatings), 'Meeting closed. Your recap is saved to history.');
-    if (saved) {
-      setMeetingRunning(false);
-      setMeetingClosed(true);
-      setSelectedMeetingId(closedMeetingId);
-      setRecapMeetingId(closedMeetingId);
-    }
+    const generation = environmentGeneration.current;
+    setMeetingRunning(false);
+    setMeetingClosed(true);
+    setSelectedMeetingId(closedMeetingId);
+    setRecapMeetingId(closedMeetingId);
+    notify('Meeting closed. Saving the recap…');
+
+    void workspaceApi.closeMeeting(activeTeam.id, recap, rating, closedMeetingId, attendeeRatings)
+      .then((next) => {
+        if (generation !== environmentGeneration.current) return;
+        setWorkspace(next);
+        notify('Meeting closed. Your recap is saved to history.');
+      })
+      .catch(async (error) => {
+        // A lost connection after the write is ambiguous. Check the latest
+        // workspace before putting the meeting back into the live flow.
+        const latest = await workspaceApi.getWorkspace().catch(() => undefined);
+        if (generation !== environmentGeneration.current) return;
+        if (latest) {
+          setWorkspace(latest);
+          if (latest.meetings.find((meeting) => meeting.id === closedMeetingId)?.status === 'closed') return;
+        }
+        setMeetingClosed(false);
+        setRecapMeetingId(null);
+        setMeetingRunning(true);
+        notify(error instanceof WorkspaceApiError ? error.message : 'The meeting could not be closed. Try again.');
+      });
   };
 
   const toggleMeetingRunning = async () => {
@@ -654,13 +674,25 @@ function App() {
     if (readOnly || !['upcoming', 'in-progress'].includes(meeting.status)) return;
     const firstSection = activeAgenda[0]?.id ?? 'conclude';
     setMeetingSection(meeting.status === 'in-progress' && meeting.activeSection && activeAgenda.some((item) => item.id === meeting.activeSection) ? meeting.activeSection : firstSection);
+    if (meeting.status === 'in-progress') {
+      if (canResumeMeeting(meeting, workspace.currentUser.id)) setMeetingRunning(true);
+      return;
+    }
+    setModal({ type: 'meeting-start', meetingId: meeting.id });
+  };
+
+  const changeMeetingFacilitator = (meeting: Workspace['meetings'][number]) => {
+    if (readOnly || meeting.status !== 'in-progress' || !canManageMeeting(workspace, activeTeam.id)) return;
+    setSelectedMeetingId(meeting.id);
+    setMeetingClosed(false);
+    setRecapMeetingId(null);
     setModal({ type: 'meeting-start', meetingId: meeting.id });
   };
 
   const submitStartMeeting = async (meetingId: string, facilitatorId?: string) => {
     const meeting = workspace.meetings.find((candidate) => candidate.id === meetingId);
     if (!meeting) return;
-    const saved = await refresh(workspaceApi.startMeeting(activeTeam.id, meetingId, meeting.version, facilitatorId), 'Meeting started.');
+    const saved = await refresh(workspaceApi.startMeeting(activeTeam.id, meetingId, meeting.version, facilitatorId), meeting.status === 'in-progress' ? 'Meeting facilitator changed.' : 'Meeting started.');
     if (saved) {
       setMeetingSection(activeAgenda[0]?.id ?? 'conclude');
       setMeetingRunning(true);
@@ -782,7 +814,7 @@ function App() {
           return <MeetingSetupView team={activeTeam} readOnly={readOnly} onNavigate={navigate} onGenerateMeetings={generateMeetings} />;
         }
         if (meetingClosed && currentMeeting.status === 'closed') return <MeetingRecapView workspace={workspace} team={activeTeam} meeting={currentMeeting} canRetry={canManageMeetingSummary(workspace, activeTeam.id)} onRequestSummary={() => requestMeetingSummary(activeTeam.id, currentMeeting.id, currentMeeting.version)} onCancelSummary={() => cancelMeetingSummary(activeTeam.id, currentMeeting.id, currentMeeting.version)} onBack={() => { setMeetingClosed(false); setRecapMeetingId(null); setSelectedMeetingId(null); navigate('meeting'); }} />;
-        return <MeetingViewV2 {...common} agenda={activeAgenda} rocks={activeRocks} todos={activeTodos} issues={activeIssues} metrics={activeMetrics} scorecardResults={activeScorecardResults} headlines={activeHeadlines} meeting={currentMeeting} occurrences={sortedTeamMeetings} selectedMeetingId={currentMeeting.id} section={meetingSection} clockNow={clockNow} running={meetingRunning} closed={meetingClosed || currentMeeting.status === 'closed' || currentMeeting.status === 'skipped'} pendingTransfers={pendingForTeam} pendingSourceTransfers={pendingFromTeam} pendingMessages={pendingTeamMessages} canManageSchedule={!readOnly} onSelectMeeting={selectMeetingOccurrence} onStartMeeting={startMeetingOccurrence} onSkipMeeting={(meeting) => setModal({ type: 'meeting-skip', meetingId: meeting.id })} onRescheduleMeeting={(meeting) => setModal({ type: 'meeting-schedule', meetingId: meeting.id })} onGenerateMeetings={generateMeetings} onSelectSection={setMeetingSection} onTransitionSection={transitionMeetingSection} onToggleRunning={toggleMeetingRunning} onUpdateRock={updateRockStatus} onUpdateTodo={updateTodoStatus} onStartIssue={startIssue} onParkIssue={parkIssue} onOpenIssue={(issueId, meetingReadOnly) => setModal({ type: 'issue-detail', issueId, meetingId: currentMeeting.id, readOnly: meetingReadOnly })} onOpenTodo={(todoId, meetingReadOnly) => setModal({ type: 'todo-detail', todoId, readOnly: meetingReadOnly })} onSolveIssue={solveIssue} onOpenMessage={openMessage} onMarkMessageRead={markMessageRead} onCreateIssueFromMessage={(messageId) => setModal({ type: 'message-issue', messageId })} onCreateIssueFromScorecard={createScorecardIssue} onCreateIssueFromRock={createRockIssue} onSaveSectionNote={saveMeetingSectionNote} onSelectMeetingIssues={selectMeetingIssues} onSaveIssueNote={saveMeetingIssueNote} onReorderIssues={reorderMeetingIssues} onCreateHeadline={createHeadline} onAccept={acceptTransfer} onReject={(id) => setModal({ type: 'reject', transferId: id })} onCancel={cancelTransfer} onClose={closeMeeting} onEditSchedule={() => setModal({ type: 'meeting-schedule', meetingId: currentMeeting.id })} onNavigate={(view) => { if (view === 'scorecard') setScorecardWeekStartDate(meetingWeekStartDate); navigate(view); }} />;
+        return <MeetingViewV2 {...common} agenda={activeAgenda} rocks={activeRocks} todos={activeTodos} issues={activeIssues} metrics={activeMetrics} scorecardResults={activeScorecardResults} headlines={activeHeadlines} meeting={currentMeeting} occurrences={sortedTeamMeetings} selectedMeetingId={currentMeeting.id} section={meetingSection} clockNow={clockNow} running={meetingRunning} closed={meetingClosed || currentMeeting.status === 'closed' || currentMeeting.status === 'skipped'} pendingTransfers={pendingForTeam} pendingSourceTransfers={pendingFromTeam} pendingMessages={pendingTeamMessages} canManageSchedule={!readOnly} onSelectMeeting={selectMeetingOccurrence} onStartMeeting={startMeetingOccurrence} onChangeFacilitator={changeMeetingFacilitator} onSkipMeeting={(meeting) => setModal({ type: 'meeting-skip', meetingId: meeting.id })} onRescheduleMeeting={(meeting) => setModal({ type: 'meeting-schedule', meetingId: meeting.id })} onGenerateMeetings={generateMeetings} onSelectSection={setMeetingSection} onTransitionSection={transitionMeetingSection} onToggleRunning={toggleMeetingRunning} onUpdateRock={updateRockStatus} onUpdateTodo={updateTodoStatus} onStartIssue={startIssue} onParkIssue={parkIssue} onOpenIssue={(issueId, meetingReadOnly) => setModal({ type: 'issue-detail', issueId, meetingId: currentMeeting.id, readOnly: meetingReadOnly })} onOpenTodo={(todoId, meetingReadOnly) => setModal({ type: 'todo-detail', todoId, readOnly: meetingReadOnly })} onSolveIssue={solveIssue} onOpenMessage={openMessage} onMarkMessageRead={markMessageRead} onCreateIssueFromMessage={(messageId) => setModal({ type: 'message-issue', messageId })} onCreateIssueFromScorecard={createScorecardIssue} onCreateIssueFromRock={createRockIssue} onSaveSectionNote={saveMeetingSectionNote} onSelectMeetingIssues={selectMeetingIssues} onSaveIssueNote={saveMeetingIssueNote} onReorderIssues={reorderMeetingIssues} onCreateHeadline={createHeadline} onAccept={acceptTransfer} onReject={(id) => setModal({ type: 'reject', transferId: id })} onCancel={cancelTransfer} onClose={closeMeeting} onEditSchedule={() => setModal({ type: 'meeting-schedule', meetingId: currentMeeting.id })} onNavigate={(view) => { if (view === 'scorecard') setScorecardWeekStartDate(meetingWeekStartDate); navigate(view); }} />;
       case 'meeting-history':
         return <MeetingHistoryView workspace={workspace} teams={accessibleTeams} team={activeTeam} onRequestSummary={requestMeetingSummary} onCancelSummary={cancelMeetingSummary} onOpenMeeting={(teamId, meetingId) => { const target = workspace.meetings.find((meeting) => meeting.teamId === teamId && meeting.id === meetingId); const closed = target?.status === 'closed'; setSelectedTeamId(teamId); setSelectedMeetingId(meetingId); setMeetingClosed(closed); setRecapMeetingId(closed ? meetingId : null); navigate('meeting'); }} onAddHistorical={() => setModal({ type: 'historical-meeting' })} />;
       case 'vto':
@@ -968,18 +1000,18 @@ function ProgressBar({ value, tone = 'brand' }: { value: number; tone?: 'brand' 
   return <div className={`progress-track progress-${tone}`}><span style={{ width: `${Math.min(100, Math.max(0, value))}%` }} /></div>;
 }
 
-function Button({ children, variant = 'primary', onClick, type = 'button', disabled = false, className = '', form }: { children: ReactNode; variant?: 'primary' | 'secondary' | 'quiet' | 'danger'; onClick?: () => void; type?: 'button' | 'submit'; disabled?: boolean; className?: string; form?: string }) {
-  return <button type={type} form={form} className={`button button-${variant} ${className}`} onClick={onClick} disabled={disabled}>{children}</button>;
+function Button({ children, variant = 'primary', onClick, type = 'button', disabled = false, className = '', form, title }: { children: ReactNode; variant?: 'primary' | 'secondary' | 'quiet' | 'danger'; onClick?: () => void; type?: 'button' | 'submit'; disabled?: boolean; className?: string; form?: string; title?: string }) {
+  return <button type={type} form={form} className={`button button-${variant} ${className}`} onClick={onClick} disabled={disabled} title={title}>{children}</button>;
 }
 
 function PageHeader({ eyebrow, title, description, actions }: { eyebrow: string; title: string; description?: string; actions?: ReactNode }) {
   return <div className="page-header"><div><span className="eyebrow">{eyebrow}</span><h1>{title}</h1>{description && <p>{description}</p>}</div>{actions && <div className="page-header-actions">{actions}</div>}</div>;
 }
 
-function MeetingOccurrencePanel({ team, occurrences, selectedMeetingId, canManageSchedule, onSelect, onStart, onSkip, onReschedule, onGenerate }: { team: Team; occurrences: Workspace['meetings']; selectedMeetingId: string; canManageSchedule: boolean; onSelect: (meetingId: string) => void; onStart: (meeting: Workspace['meetings'][number]) => void; onSkip: (meeting: Workspace['meetings'][number]) => void; onReschedule: (meeting: Workspace['meetings'][number]) => void; onGenerate: () => void }) {
+function MeetingOccurrencePanel({ team, occurrences, selectedMeetingId, currentUserId, canManageSchedule, canChangeFacilitator, onSelect, onStart, onChangeFacilitator, onSkip, onReschedule, onGenerate }: { team: Team; occurrences: Workspace['meetings']; selectedMeetingId: string; currentUserId: string; canManageSchedule: boolean; canChangeFacilitator: boolean; onSelect: (meetingId: string) => void; onStart: (meeting: Workspace['meetings'][number]) => void; onChangeFacilitator: (meeting: Workspace['meetings'][number]) => void; onSkip: (meeting: Workspace['meetings'][number]) => void; onReschedule: (meeting: Workspace['meetings'][number]) => void; onGenerate: () => void }) {
   const listed = occurrences.filter((meeting) => meeting.status !== 'closed').sort((left, right) => meetingScheduledAt(left) - meetingScheduledAt(right)).slice(0, 8);
   const futureUpcomingCount = occurrences.filter((meeting) => meeting.status === 'upcoming' && meetingReviewStatus(meeting, team) === 'upcoming').length;
-  return <section className="meeting-occurrence-panel card-surface"><div className="meeting-occurrence-heading"><div><span className="section-kicker">MEETING OCCURRENCES</span><h2>Choose the L10 to open</h2></div><div className="meeting-occurrence-heading-actions"><span>{futureUpcomingCount} upcoming in the rolling window</span>{canManageSchedule && <Button variant="secondary" onClick={onGenerate}>Generate meetings</Button>}</div></div><div className="meeting-occurrence-list">{listed.map((meeting) => { const reviewStatus = meetingReviewStatus(meeting, team); const open = meeting.status === 'upcoming' || meeting.status === 'in-progress'; return <div className={`meeting-occurrence-row ${selectedMeetingId === meeting.id ? 'meeting-occurrence-selected' : ''}`} key={meeting.id}><button className="meeting-occurrence-main" onClick={() => onSelect(meeting.id)}><span className="occurrence-date"><strong>{formatDate(meeting.scheduledDate ?? '')}</strong><small>{meeting.scheduledTime ?? team.meetingTime}</small></span><span className="occurrence-copy"><strong>{meeting.label}</strong><small>{meeting.startedAt ? `Started ${formatTime(meeting.startedAt)}` : meeting.status === 'skipped' ? 'Not started' : 'Ready to start'}</small></span><StatusPill status={reviewStatus} /></button><div className="meeting-occurrence-actions">{canManageSchedule && open && <Button variant={meeting.status === 'in-progress' ? 'secondary' : 'primary'} onClick={() => onStart(meeting)}>{meeting.status === 'in-progress' ? 'Resume' : 'Start'}</Button>}{canManageSchedule && meeting.status === 'upcoming' && <><Button variant="quiet" onClick={() => onSkip(meeting)}>Skip</Button><Button variant="quiet" onClick={() => onReschedule(meeting)}>Reschedule</Button></>}</div></div>; })}{listed.length === 0 && <EmptyState title="No open meeting occurrences" detail="Completed meetings are available in Past meetings." />}</div></section>;
+  return <section className="meeting-occurrence-panel card-surface"><div className="meeting-occurrence-heading"><div><span className="section-kicker">MEETING OCCURRENCES</span><h2>Choose the L10 to open</h2></div><div className="meeting-occurrence-heading-actions"><span>{futureUpcomingCount} upcoming in the rolling window</span>{canManageSchedule && <Button variant="secondary" onClick={onGenerate}>Generate meetings</Button>}</div></div><div className="meeting-occurrence-list">{listed.map((meeting) => { const reviewStatus = meetingReviewStatus(meeting, team); const open = meeting.status === 'upcoming' || meeting.status === 'in-progress'; const canResume = canResumeMeeting(meeting, currentUserId); return <div className={`meeting-occurrence-row ${selectedMeetingId === meeting.id ? 'meeting-occurrence-selected' : ''}`} key={meeting.id}><button className="meeting-occurrence-main" onClick={() => onSelect(meeting.id)}><span className="occurrence-date"><strong>{formatDate(meeting.scheduledDate ?? '')}</strong><small>{meeting.scheduledTime ?? team.meetingTime}</small></span><span className="occurrence-copy"><strong>{meeting.label}</strong><small>{meeting.startedAt ? `Started ${formatTime(meeting.startedAt)}` : meeting.status === 'skipped' ? 'Not started' : 'Ready to start'}</small></span><StatusPill status={reviewStatus} /></button><div className="meeting-occurrence-actions">{canManageSchedule && open && <><Button variant={meeting.status === 'in-progress' ? 'secondary' : 'primary'} onClick={() => onStart(meeting)} disabled={!canResume} title={!canResume ? 'Another facilitator owns this live meeting.' : undefined}>{meeting.status === 'in-progress' ? 'Resume' : 'Start'}</Button>{meeting.status === 'in-progress' && !canResume && canChangeFacilitator && <Button variant="quiet" onClick={() => onChangeFacilitator(meeting)}>Change facilitator</Button>}</>}{canManageSchedule && meeting.status === 'upcoming' && <><Button variant="quiet" onClick={() => onSkip(meeting)}>Skip</Button><Button variant="quiet" onClick={() => onReschedule(meeting)}>Reschedule</Button></>}</div></div>; })}{listed.length === 0 && <EmptyState title="No open meeting occurrences" detail="Completed meetings are available in Past meetings." />}</div></section>;
 }
 
 function MeetingAiSummaryPanel({ meeting, canRetry, onRequestSummary, onCancelSummary }: { meeting: Workspace['meetings'][number]; canRetry: boolean; onRequestSummary: () => Promise<boolean>; onCancelSummary: () => Promise<boolean> }) {
@@ -1158,11 +1190,11 @@ function MeetingStartModal({ workspace, team, meeting, onClose, onSubmit }: { wo
   const canChangeFacilitator = canManageMeeting(workspace, team.id);
   const [facilitatorId, setFacilitatorId] = useState(fallback);
   return <ModalShell title={meeting.status === 'in-progress' ? 'Update the L10 facilitator' : 'Start the L10'} description={meeting.status === 'in-progress' ? 'A TeamLead or OrgAdmin can change who owns the live flow and meeting closeout.' : 'Choose the facilitator for this meeting. They will own the live flow and meeting closeout.'} onClose={onClose}>
-    <form className="modal-form" onSubmit={(event) => { event.preventDefault(); if (facilitatorId) onSubmit(meeting.status === 'in-progress' && !canChangeFacilitator ? undefined : facilitatorId); }}>
+    <form className="modal-form" onSubmit={(event) => { event.preventDefault(); if (facilitatorId) onSubmit(facilitatorId); }}>
       <div className="meeting-start-preview"><span className="section-kicker">{team.name.toUpperCase()}</span><strong>{meeting.label}</strong><span>{meetingDateTimeLabel(meeting)}</span></div>
       <label>Facilitator<select value={facilitatorId} onChange={(event) => setFacilitatorId(event.target.value)} required disabled={meeting.status === 'in-progress' && !canChangeFacilitator}>{teamUsers.map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
       <small className="form-help">The facilitator is stored on the meeting and shown in the recap and meeting history. The facilitator, a TeamLead, or an OrgAdmin can enter individual ratings at Conclude.</small>
-      <ModalActions onClose={onClose} submitLabel={meeting.status === 'in-progress' ? canChangeFacilitator ? 'Save facilitator' : 'Resume meeting' : 'Start meeting'} />
+      <ModalActions onClose={onClose} submitLabel={meeting.status === 'in-progress' ? 'Save facilitator' : 'Start meeting'} />
     </form>
   </ModalShell>;
 }
@@ -1411,6 +1443,7 @@ interface MeetingViewV2Props {
   canManageSchedule: boolean;
   onSelectMeeting: (meetingId: string) => void;
   onStartMeeting: (meeting: Workspace['meetings'][number]) => void;
+  onChangeFacilitator: (meeting: Workspace['meetings'][number]) => void;
   onSkipMeeting: (meeting: Workspace['meetings'][number]) => void;
   onRescheduleMeeting: (meeting: Workspace['meetings'][number]) => void;
   onGenerateMeetings: () => void;
@@ -1442,7 +1475,7 @@ interface MeetingViewV2Props {
   onNavigate: (view: ViewId) => void;
 }
 
-function MeetingViewV2({ workspace, team, readOnly, agenda, rocks, todos, issues, metrics, scorecardResults, headlines, meeting, occurrences, selectedMeetingId, section, clockNow, running, closed, pendingTransfers, pendingSourceTransfers, pendingMessages, canManageSchedule, onSelectMeeting, onStartMeeting, onSkipMeeting, onRescheduleMeeting, onGenerateMeetings, onSelectSection, onTransitionSection, onToggleRunning, onUpdateRock, onUpdateTodo, onOpenIssue, onOpenTodo, onOpenMessage, onMarkMessageRead, onCreateIssueFromMessage, onStartIssue, onParkIssue, onSolveIssue, onCreateIssueFromScorecard, onCreateIssueFromRock, onSaveSectionNote, onSelectMeetingIssues, onSaveIssueNote, onReorderIssues, onCreateHeadline, onAccept, onReject, onCancel, onClose, onEditSchedule, onNavigate }: MeetingViewV2Props) {
+function MeetingViewV2({ workspace, team, readOnly, agenda, rocks, todos, issues, metrics, scorecardResults, headlines, meeting, occurrences, selectedMeetingId, section, clockNow, running, closed, pendingTransfers, pendingSourceTransfers, pendingMessages, canManageSchedule, onSelectMeeting, onStartMeeting, onChangeFacilitator, onSkipMeeting, onRescheduleMeeting, onGenerateMeetings, onSelectSection, onTransitionSection, onToggleRunning, onUpdateRock, onUpdateTodo, onOpenIssue, onOpenTodo, onOpenMessage, onMarkMessageRead, onCreateIssueFromMessage, onStartIssue, onParkIssue, onSolveIssue, onCreateIssueFromScorecard, onCreateIssueFromRock, onSaveSectionNote, onSelectMeetingIssues, onSaveIssueNote, onReorderIssues, onCreateHeadline, onAccept, onReject, onCancel, onClose, onEditSchedule, onNavigate }: MeetingViewV2Props) {
   const [recap, setRecap] = useState(meeting.recap);
   const [attendeeRatings, setAttendeeRatings] = useState<Record<string, number>>(() => Object.fromEntries((meeting.attendeeRatings ?? []).map((entry) => [entry.attendeeId, entry.rating])));
   const [idsStage, setIdsStage] = useState<IdsStage>('select');
@@ -1490,10 +1523,10 @@ function MeetingViewV2({ workspace, team, readOnly, agenda, rocks, todos, issues
   return <>
     <div className="meeting-page-header">
       <div><span className="eyebrow">{team.name.toUpperCase()} · {workspace.quarter.label}</span><h1>{skipped ? 'Meeting skipped.' : recordClosed ? 'Meeting complete.' : 'Run the room.'}</h1><p>{skipped ? 'This occurrence is preserved in history and the team cadence continues.' : recordClosed ? 'The meeting record is saved. The team can now execute the recap.' : 'Keep the reporting crisp. Put the real work where it belongs: IDS.'}</p><span className="meeting-facilitator">Facilitator · {meeting.facilitatorId ? userFor(workspace, meeting.facilitatorId).name : 'Not selected'}</span></div>
-      <div className="meeting-header-actions"><div className={`meeting-status ${recordClosed ? 'meeting-status-closed' : ''}`}><span className="meeting-status-dot" />{skipped ? 'Skipped' : recordClosed ? 'Closed' : running ? 'In progress' : 'Ready to start'}</div>{!meetingReadOnly && meeting.status === 'in-progress' && canChangeFacilitator && <Button variant="secondary" onClick={() => onStartMeeting(meeting)}>Change facilitator</Button>}{!meetingReadOnly && <Button variant="secondary" onClick={onEditSchedule}>Change date & time</Button>}<Button variant="secondary" onClick={() => onNavigate('overview')}>Exit meeting</Button></div>
+      <div className="meeting-header-actions"><div className={`meeting-status ${recordClosed ? 'meeting-status-closed' : ''}`}><span className="meeting-status-dot" />{skipped ? 'Skipped' : recordClosed ? 'Closed' : running ? 'In progress' : 'Ready to start'}</div>{!meetingReadOnly && meeting.status === 'in-progress' && canChangeFacilitator && <Button variant="secondary" onClick={() => onChangeFacilitator(meeting)}>Change facilitator</Button>}{!meetingReadOnly && <Button variant="secondary" onClick={onEditSchedule}>Change date & time</Button>}<Button variant="secondary" onClick={() => onNavigate('overview')}>Exit meeting</Button></div>
     </div>
     <TransferNotice workspace={workspace} teamId={team.id} pendingTransfers={pendingTransfers} pendingSourceTransfers={pendingSourceTransfers} editable={!meetingReadOnly} onAccept={onAccept} onReject={onReject} onCancel={onCancel} />
-    <MeetingOccurrencePanel team={team} occurrences={occurrences} selectedMeetingId={selectedMeetingId} canManageSchedule={canManageSchedule && !recordClosed} onSelect={onSelectMeeting} onStart={onStartMeeting} onSkip={onSkipMeeting} onReschedule={onRescheduleMeeting} onGenerate={onGenerateMeetings} />
+    <MeetingOccurrencePanel team={team} occurrences={occurrences} selectedMeetingId={selectedMeetingId} currentUserId={workspace.currentUser.id} canManageSchedule={canManageSchedule && !recordClosed} canChangeFacilitator={canChangeFacilitator} onSelect={onSelectMeeting} onStart={onStartMeeting} onChangeFacilitator={onChangeFacilitator} onSkip={onSkipMeeting} onReschedule={onRescheduleMeeting} onGenerate={onGenerateMeetings} />
     <div className="meeting-workspace">
       <aside className="agenda-rail card-surface"><div className="agenda-rail-head"><div><span className="section-kicker">{cadenceLabel(team.meetingCadence).toUpperCase()} RHYTHM</span><h2>{meeting.label}</h2></div><span className="agenda-date">{meeting.dateLabel}<small>{meeting.scheduledTime ? ` · ${meeting.scheduledTime}` : ''}</small></span></div><div className="agenda-list">{agenda.map((item, index) => <button key={item.id} className={`agenda-item ${item.id === section ? 'agenda-item-active' : ''} ${index < currentIndex || recordClosed ? 'agenda-item-done' : ''}`} onClick={() => void changeSection(item.id)}><span className="agenda-index">{index < currentIndex || recordClosed ? '✓' : String(index + 1).padStart(2, '0')}</span><span className="agenda-item-copy"><strong>{item.label}</strong><small>{item.duration} min</small></span></button>)}</div><div className="agenda-rail-bottom"><span className="section-kicker">FACILITATOR</span><div className="facilitator-line"><Avatar user={userFor(workspace, meeting.facilitatorId)} size="sm" /><span>{meeting.facilitatorId ? userFor(workspace, meeting.facilitatorId).name : 'Not selected'}</span></div><span className="section-kicker attendee-kicker">ATTENDEES</span><div className="attendee-line"><AvatarStack workspace={workspace} ids={meeting.attendeeIds} /><span>{meeting.attendeeIds.length} people invited</span></div></div></aside>
       <section className="meeting-stage card-surface">

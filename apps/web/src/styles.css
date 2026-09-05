@@ -803,7 +803,9 @@ img { max-width: 100%; }
 
 .meeting-metric-table, .meeting-rock-list, .meeting-todo-table, .ids-meeting-list { margin-top: 27px; border-top: 1px solid #eef0f4; }
 
-.metric-row { display: grid; grid-template-columns: minmax(180px, 1.35fr) minmax(170px, 0.8fr) auto auto; align-items: center; gap: 18px; min-height: 73px; padding: 0 3px; border-bottom: 1px solid #eef0f4; }
+.metric-row { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.8fr) minmax(0, 0.9fr) auto auto; align-items: center; gap: 18px; min-height: 73px; padding: 0 3px; border-bottom: 1px solid #eef0f4; }
+
+.metric-row > * { min-width: 0; }
 
 .metric-name { min-width: 0; }
 
@@ -817,7 +819,9 @@ img { max-width: 100%; }
 
 .metric-off-track { background: var(--coral); }
 
-.metric-values { display: flex; gap: 17px; color: #8f9baa; font-size: 12px; white-space: nowrap; }
+.metric-values { display: flex; min-width: 0; flex-wrap: wrap; gap: 4px 17px; color: #8f9baa; font-size: 12px; }
+
+.metric-values > span { white-space: nowrap; }
 
 .metric-values b { margin-left: 4px; color: #607089; font-size: 14px; }
 
@@ -1792,7 +1796,9 @@ img { max-width: 100%; }
 
 .scorecard-week-controls, .scorecard-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 
-.scorecard-metric-row { grid-template-columns: minmax(170px, 1.3fr) minmax(170px, 1fr) minmax(105px, 0.7fr) auto minmax(150px, auto); padding: 0 24px; }
+.scorecard-metric-row { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 0.7fr) auto minmax(0, auto); padding: 0 24px; }
+
+.meeting-metric-table .metric-row { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1.1fr) minmax(0, 0.95fr) auto auto; gap: 14px; }
 
 .scorecard-metric-row .metric-name { display: block; }
 
@@ -1808,7 +1814,7 @@ img { max-width: 100%; }
 
 .metric-missing { background: #aab4c2; }
 
-.metric-trend { display: flex; align-items: center; gap: 5px; color: #8a98aa; font-size: 12px; white-space: nowrap; }
+.metric-trend { display: flex; min-width: 0; align-items: center; gap: 5px; color: #8a98aa; font-size: 12px; overflow-wrap: anywhere; }
 
 .trend-arrow { font-size: 18px; }
 
@@ -2455,6 +2461,8 @@ img { max-width: 100%; }
   .metric-row, .meeting-metric-table .metric-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; min-height: 69px; padding: 10px 0; }
   .metric-values { display: none; }
   .metric-row .row-action-small { display: none; }
+  .meeting-metric-table .metric-trend { display: none; }
+  .meeting-metric-table .row-action-button { grid-column: 1 / -1; justify-self: start; }
   .meeting-rock-row { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding: 13px 0; }
   .meeting-rock-progress { display: none; }
   .quick-status-button { grid-column: 2; grid-row: 1; }

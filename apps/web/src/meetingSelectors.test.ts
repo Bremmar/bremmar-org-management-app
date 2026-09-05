@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { meetingsForQuarter, rollingMeetingsForTeam } from './meetingSelectors';
+import { canResumeMeeting, meetingsForQuarter, rollingMeetingsForTeam } from './meetingSelectors';
 import type { MeetingInstance, Quarter } from './types';
 
 const quarters: Quarter[] = [
@@ -12,6 +12,14 @@ function meeting(id: string, teamId: string, scheduledDate: string, quarterId?: 
 }
 
 describe('meeting selectors', () => {
+  it('only lets the recorded facilitator resume a live meeting', () => {
+    const live = { status: 'in-progress', facilitatorId: 'facilitator' } as const;
+
+    expect(canResumeMeeting(live, 'facilitator')).toBe(true);
+    expect(canResumeMeeting(live, 'another-user')).toBe(false);
+    expect(canResumeMeeting({ status: 'upcoming', facilitatorId: 'facilitator' }, 'another-user')).toBe(true);
+  });
+
   it('keeps rolling team occurrences visible across quarter boundaries', () => {
     const meetings = [
       meeting('current-quarter', 'leadership', '2026-09-28', '2026-q3'),

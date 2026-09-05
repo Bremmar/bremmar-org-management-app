@@ -2321,6 +2321,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     const isTeamMember = this.memberships.some((membership) => membership.teamId === teamId && membership.userId === selectedFacilitatorId && membership.active);
     if (!this.user(selectedFacilitatorId) || !isTeamMember) throw new RepositoryError('VALIDATION', 'The facilitator must be an active member of this team.');
     if (meeting.status === 'in-progress') {
+      if (facilitatorId === undefined && meeting.facilitatorId !== actorId) throw new RepositoryError('FORBIDDEN', 'Only the current facilitator can resume this meeting.');
       // A start/resume request from another screen is safe to repeat when the
       // meeting is already live and the facilitator is unchanged.
       if (meeting.facilitatorId === selectedFacilitatorId) return clone(meeting);

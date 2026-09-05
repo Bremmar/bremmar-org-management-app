@@ -1457,6 +1457,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const selectedFacilitatorId = facilitatorId ?? meeting.facilitatorId ?? this.workspace.currentUser.id;
     if (!this.workspace.users.some((user) => user.id === selectedFacilitatorId && user.active) || !teamMemberIds.has(selectedFacilitatorId)) throw new WorkspaceApiError('VALIDATION', 'The facilitator must be an active member of this team.');
     if (meeting.status === 'in-progress') {
+      if (facilitatorId === undefined && meeting.facilitatorId !== this.workspace.currentUser.id) throw new WorkspaceApiError('FORBIDDEN', 'Only the current facilitator can resume this meeting.');
       // Starting/resuming is safe to repeat from a second screen when the
       // meeting is already live and the facilitator is unchanged.
       if (meeting.facilitatorId === selectedFacilitatorId) return this.result();
