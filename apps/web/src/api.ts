@@ -1,5 +1,5 @@
 import { defaultAgeBand, initialWorkspace, testWorkspace } from './data';
-import { averageMeetingRating, defaultMeetingSections, isValidMeetingRating, meetingDateFor, meetingDateLabel, meetingReviewStatus, meetingScheduledAt, meetingSectionConfigsFor, meetingSectionsFor, nextConfiguredMeetingDateAfter, normalizeMeeting, issueMeetingBand, rockMilestoneCounts, scorecardTrendFor, weekStartDateFor } from './types';
+import { averageMeetingRating, defaultMeetingSections, isValidMeetingRating, meetingDateFor, meetingDateLabel, meetingReviewStatus, meetingScheduledAt, meetingSectionConfigsFor, meetingSectionsFor, nextConfiguredMeetingDateAfter, normalizeMeeting, issueMeetingBand, quarterIdForDate, rockMilestoneCounts, scorecardTrendFor, weekStartDateFor } from './types';
 import { richTextToPlainText, sanitizeRichText, sanitizeTodoNotes } from './richText';
 import type {
   CompanyOverview,
@@ -24,6 +24,7 @@ import type {
   MeetingReviewQuery,
   MeetingReviewPage,
   MeetingSkipReason,
+  HistoricalMeetingInput,
   Notification,
   TeamMessage,
   MeetingSection,
@@ -42,6 +43,9 @@ import type {
   TodoChecklistItem,
   TodoStatus,
   User,
+  Vto,
+  VtoSaveInput,
+  VtoVersion,
   Workspace,
 } from './types';
 
@@ -67,19 +71,19 @@ export interface WorkspaceApi {
   selectEnvironment(environment: EnvironmentId): Promise<EnvironmentSession>;
   getEnvironmentAccess(): Promise<EnvironmentAccess[]>;
   updateEnvironmentAccess(userId: string, testAllowed: boolean): Promise<EnvironmentAccess[]>;
-  getWorkspace(): Promise<Workspace>;
+  getWorkspace(quarterId?: string): Promise<Workspace>;
   getAuditTrail(entityType: AuditEntityType, entityId: string): Promise<AuditEvent[]>;
   getCompanyOverview(): Promise<CompanyOverview>;
   updateRockStatus(rockId: string, status: RockStatus, expectedVersion?: number): Promise<Workspace>;
   updateRock(rockId: string, input: Partial<Pick<Rock, 'title' | 'description' | 'notes' | 'ownerId' | 'dueDate' | 'priority'>>, expectedVersion?: number): Promise<Workspace>;
-  addRock(input: Pick<Rock, 'title' | 'description' | 'ownerId' | 'dueDate' | 'priority' | 'teamId'> & { notes?: string }): Promise<Workspace>;
+  addRock(input: Pick<Rock, 'title' | 'description' | 'ownerId' | 'dueDate' | 'priority' | 'teamId'> & { notes?: string; quarterId?: string }): Promise<Workspace>;
   addRockTask(rockId: string, input: Pick<RockTask, 'title' | 'notes' | 'assigneeId' | 'assignedAt' | 'startDate' | 'dueDate'>): Promise<Workspace>;
   updateRockTask(taskId: string, input: Partial<Pick<RockTask, 'title' | 'notes' | 'assigneeId' | 'assignedAt' | 'startDate' | 'dueDate' | 'status'>>, expectedVersion?: number): Promise<Workspace>;
   deleteRockTask(taskId: string, expectedVersion?: number): Promise<Workspace>;
   convertRockTaskToTodo(taskId: string): Promise<Workspace>;
   updateTodoStatus(todoId: string, status: TodoStatus, expectedVersion?: number): Promise<Workspace>;
   updateTodo(todoId: string, input: Partial<Pick<Todo, 'title' | 'notes' | 'ownerId' | 'dueDate' | 'status'>>, expectedVersion?: number): Promise<Workspace>;
-  addTodo(input: Pick<Todo, 'title' | 'ownerId' | 'dueDate' | 'teamId'> & { notes?: string; linkedRockTaskId?: string; sourceIssueId?: string }): Promise<Workspace>;
+  addTodo(input: Pick<Todo, 'title' | 'ownerId' | 'dueDate' | 'teamId'> & { notes?: string; linkedRockTaskId?: string; sourceIssueId?: string; quarterId?: string }): Promise<Workspace>;
   addTodoChecklistItem(todoId: string, text: string, supporterId?: string, expectedVersion?: number): Promise<Workspace>;
   updateTodoChecklistItem(todoId: string, itemId: string, input: Partial<Pick<TodoChecklistItem, 'text' | 'completed' | 'supporterId'>>, expectedVersion?: number): Promise<Workspace>;
   deleteTodoChecklistItem(todoId: string, itemId: string, expectedVersion?: number): Promise<Workspace>;
@@ -93,7 +97,7 @@ export interface WorkspaceApi {
   solveIssue(issueId: string, input: SolveIssueInput, expectedVersion?: number): Promise<Workspace>;
   reopenIssue(issueId: string, expectedVersion?: number): Promise<Workspace>;
   createHeadline(input: Pick<Headline, 'teamId' | 'type' | 'title' | 'detail'> & { meetingId?: string; issueId?: string }): Promise<Workspace>;
-  addIssue(input: Pick<Issue, 'title' | 'detail' | 'teamId' | 'raisedById'> & { horizon?: IssueHorizon; priority?: number; ownerId?: string; linkedRockId?: string; linkedScorecardMetricId?: string; linkedScorecardWeekStartDate?: string; idsNote?: string }): Promise<Workspace>;
+  addIssue(input: Pick<Issue, 'title' | 'detail' | 'teamId' | 'raisedById'> & { horizon?: IssueHorizon; priority?: number; ownerId?: string; quarterId?: string; linkedRockId?: string; linkedScorecardMetricId?: string; linkedScorecardWeekStartDate?: string; idsNote?: string }): Promise<Workspace>;
   updateIssue(issueId: string, input: Partial<Pick<Issue, 'title' | 'detail' | 'priority' | 'horizon' | 'ownerId' | 'idsNote'>>, expectedVersion?: number): Promise<Workspace>;
   addMeetingIssueNote(issueId: string, meetingId: string, note: string, expectedVersion?: number): Promise<Workspace>;
   updateMeetingSectionNote(teamId: string, meetingId: string, section: MeetingSection, note: string, expectedVersion?: number): Promise<Workspace>;
@@ -124,6 +128,8 @@ export interface WorkspaceApi {
   skipMeeting(teamId: string, meetingId: string, reason: MeetingSkipReason, note?: string, expectedVersion?: number): Promise<Workspace>;
   requestMeetingSummary(teamId: string, meetingId: string, expectedVersion?: number): Promise<Workspace>;
   cancelMeetingSummary(teamId: string, meetingId: string, expectedVersion?: number): Promise<Workspace>;
+  saveVto(teamId: string, input: VtoSaveInput, expectedVersion?: number): Promise<Workspace>;
+  createHistoricalMeeting(teamId: string, input: HistoricalMeetingInput): Promise<Workspace>;
 }
 
 const cloneWorkspace = (workspace: Workspace): Workspace => structuredClone(workspace);
@@ -353,6 +359,24 @@ function teamForMessage(workspace: Workspace, teamId: string) {
   return workspace.teams.find((team) => team.id === teamId)?.name ?? teamId;
 }
 
+function validateVtoInput(input: VtoSaveInput) {
+  const list = (value: unknown, label: string, minimum: number, maximum: number) => {
+    if (!Array.isArray(value) || value.length < minimum || value.length > maximum || value.some((item) => typeof item !== 'string' || !item.trim())) throw new WorkspaceApiError('VALIDATION', `${label} must contain between ${minimum} and ${maximum} non-empty entries.`);
+  };
+  const text = (value: unknown, label: string) => {
+    if (typeof value !== 'string' || !value.trim()) throw new WorkspaceApiError('VALIDATION', `${label} is required.`);
+  };
+  list(input.coreValues, 'Core Values', 3, 7);
+  list(input.marketingStrategy?.uniques, 'Three Uniques', 3, 3);
+  list(input.oneYearPlan?.measurables, 'One-Year Measurables', 1, 7);
+  list(input.oneYearPlan?.goals, 'One-Year Goals', 1, 7);
+  for (const [value, label] of [[input.coreFocusPurpose, 'Core Focus purpose'], [input.coreFocusNiche, 'Core Focus niche'], [input.tenYearTarget, '10-Year Target'], [input.marketingStrategy?.targetMarket, 'Target Market'], [input.marketingStrategy?.provenProcess, 'Proven Process'], [input.marketingStrategy?.guarantee, 'Guarantee'], [input.threeYearPicture?.targetDate, '3-Year Picture target date'], [input.threeYearPicture?.revenue, '3-Year Picture revenue'], [input.threeYearPicture?.profit, '3-Year Picture profit'], [input.threeYearPicture?.headcount, '3-Year Picture headcount'], [input.threeYearPicture?.description, '3-Year Picture description'], [input.oneYearPlan?.revenue, 'One-Year Plan revenue'], [input.oneYearPlan?.profit, 'One-Year Plan profit'], [input.effectiveDate, 'V/TO effective date'], [input.changeSummary, 'V/TO change summary']] as const) text(value, label);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.effectiveDate) || !/^\d{4}-\d{2}-\d{2}$/.test(input.threeYearPicture.targetDate) || Number.isNaN(new Date(`${input.effectiveDate}T12:00:00Z`).getTime()) || Number.isNaN(new Date(`${input.threeYearPicture.targetDate}T12:00:00Z`).getTime())) throw new WorkspaceApiError('VALIDATION', 'V/TO dates must be valid dates.');
+  if (!Number.isInteger(input.oneYearPlan?.year) || input.oneYearPlan.year < 2000 || input.oneYearPlan.year > 9999) throw new WorkspaceApiError('VALIDATION', 'One-Year Plan year must be a four-digit year.');
+  if (!Array.isArray(input.quarterlyRockIds) || input.quarterlyRockIds.length > 7 || input.quarterlyRockIds.some((id) => typeof id !== 'string' || !id.trim())) throw new WorkspaceApiError('VALIDATION', 'Quarterly Rocks must contain no more than seven valid Rock IDs.');
+  if (!Array.isArray(input.issueIds) || input.issueIds.some((id) => typeof id !== 'string' || !id.trim())) throw new WorkspaceApiError('VALIDATION', 'Issues List must contain valid Issue IDs.');
+}
+
 function advanceIssueEscalations(workspace: Workspace, team: Team, meeting: Workspace['meetings'][number], at: string, notify: (userId: string, input: Omit<Notification, 'id' | 'recipientUserId' | 'createdAt'>) => void) {
   const meetingStart = new Date(meeting.startedAt ?? `${meeting.scheduledDate}T00:00:00.000Z`).getTime();
   for (const issue of workspace.issues.filter((candidate) => {
@@ -381,6 +405,7 @@ function advanceIssueEscalations(workspace: Workspace, team: Team, meeting: Work
 
 export class LocalWorkspaceApi implements WorkspaceApi {
   private readonly workspaces: Record<EnvironmentId, Workspace>;
+  private readonly selectedQuarterIds: Record<EnvironmentId, string>;
   private selectedEnvironment: EnvironmentId = 'live';
   private readonly testAccessUserIds: Set<string>;
 
@@ -393,9 +418,10 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const liveSeed = isWorkspace(seed) ? seed : seed.live ?? initialWorkspace;
     const testSeed = isWorkspace(seed) ? testWorkspace : seed.test ?? testWorkspace;
     this.workspaces = {
-      live: cloneWorkspace({ ...liveSeed, environment: 'live' }),
-      test: cloneWorkspace({ ...testSeed, environment: 'test' }),
+      live: cloneWorkspace({ ...liveSeed, environment: 'live', quarters: liveSeed.quarters?.length ? liveSeed.quarters : [liveSeed.quarter], vtos: liveSeed.vtos ?? [], vtoVersions: liveSeed.vtoVersions ?? [] }),
+      test: cloneWorkspace({ ...testSeed, environment: 'test', quarters: testSeed.quarters?.length ? testSeed.quarters : [testSeed.quarter], vtos: testSeed.vtos ?? [], vtoVersions: testSeed.vtoVersions ?? [] }),
     };
+    this.selectedQuarterIds = { live: liveSeed.quarter.id, test: testSeed.quarter.id };
     this.testAccessUserIds = new Set(options.testAccessUserIds ?? [liveSeed.currentUser.id]);
     this.refreshDerivedState();
     this.maintainMeetingWindows();
@@ -434,6 +460,8 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     if (environment === 'test' && !this.testAccessUserIds.has(this.workspaces.live.currentUser.id)) throw new WorkspaceApiError('FORBIDDEN', 'Test environment access has not been granted.');
     this.selectedEnvironment = environment;
     this.requireSelectedEnvironmentAccess();
+    this.selectedQuarterIds[environment] = this.workspaces[environment].quarters.find((quarter) => quarter.status === 'current')?.id ?? this.workspaces[environment].quarter.id;
+    this.workspaces[environment].quarter = this.workspaces[environment].quarters.find((quarter) => quarter.id === this.selectedQuarterIds[environment]) ?? this.workspaces[environment].quarter;
     this.refreshDerivedState();
     return this.getEnvironmentSession();
   }
@@ -460,6 +488,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
   }
 
   private refreshDerivedState() {
+    this.workspace.quarters = (this.workspace.quarters?.length ? this.workspace.quarters : [this.workspace.quarter]).map((quarter) => ({ ...quarter, status: quarter.status ?? (quarter.id === this.workspace.quarter.id ? 'current' : 'past') }));
     this.workspace.rocks = this.workspace.rocks.map((rock) => ({ ...stripLegacyRockProgress(rock), notes: sanitizeRichText(rock.notes) }));
     this.workspace.teams = this.workspace.teams.map((team) => ({
       ...team,
@@ -469,6 +498,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     }));
     this.workspace.issues = this.workspace.issues.map((issue) => ageFor({
       ...issue,
+      quarterId: issue.quarterId ?? quarterIdForDate(issue.createdAt, this.workspace.quarters),
       detail: sanitizeRichText(issue.detail),
       idsNote: issue.idsNote ? sanitizeRichText(issue.idsNote) : undefined,
       meetingsPassed: issue.meetingsPassed ?? 0,
@@ -480,13 +510,13 @@ export class LocalWorkspaceApi implements WorkspaceApi {
       ...team,
       memberCount: this.workspace.memberships.filter((membership) => membership.teamId === team.id && membership.active).length,
     }));
-    this.workspace.todos = this.workspace.todos.map((todo) => ({ ...todo, notes: sanitizeTodoNotes(todo.notes), checklist: normalizedChecklist(todo, this.workspace.users, this.workspace.memberships), carryForwardCount: todo.carryForwardCount ?? 0, flagged: todo.flagged ?? false, isMine: todo.ownerId === this.workspace.currentUser.id }));
-    this.workspace.headlines = (this.workspace.headlines ?? []).map((headline) => ({ ...headline, title: typeof headline.title === 'string' ? headline.title.trim() : '', detail: typeof headline.detail === 'string' ? sanitizeRichText(headline.detail) : '' }));
+    this.workspace.todos = this.workspace.todos.map((todo) => ({ ...todo, quarterId: todo.quarterId ?? quarterIdForDate(todo.dueDate, this.workspace.quarters), notes: sanitizeTodoNotes(todo.notes), checklist: normalizedChecklist(todo, this.workspace.users, this.workspace.memberships), carryForwardCount: todo.carryForwardCount ?? 0, flagged: todo.flagged ?? false, isMine: todo.ownerId === this.workspace.currentUser.id }));
+    this.workspace.headlines = (this.workspace.headlines ?? []).map((headline) => ({ ...headline, quarterId: headline.quarterId ?? quarterIdForDate(headline.createdAt, this.workspace.quarters), title: typeof headline.title === 'string' ? headline.title.trim() : '', detail: typeof headline.detail === 'string' ? sanitizeRichText(headline.detail) : '' }));
     this.workspace.scorecardResults = this.workspace.scorecardResults ?? [];
     this.workspace.meetings = this.workspace.meetings.map((meeting) => {
       const team = this.workspace.teams.find((candidate) => candidate.id === meeting.teamId);
       const sections = team ? meetingSectionsFor(team) : meetingSectionsFor({ meetingSections: [] });
-      return normalizeMeeting({ ...meeting, agendaTotal: sections.length, sectionNotes: Object.fromEntries(Object.entries(meeting.sectionNotes ?? {}).map(([section, note]) => [section, sanitizeRichText(note)])), sectionDurations: meeting.sectionDurations ?? {}, attendeeRatings: meeting.attendeeRatings ?? [], idsIssueIds: meeting.idsIssueIds ?? [], idsAddedIssueIds: meeting.idsAddedIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: (meeting.idsNotes ?? []).map((note) => ({ ...note, note: sanitizeRichText(note.note) })), aiSummaryStatus: meeting.aiSummaryStatus ?? (meeting.status === 'closed' ? 'not-generated' : undefined), aiSummarySource: meeting.aiSummarySource }, team);
+      return normalizeMeeting({ ...meeting, quarterId: meeting.quarterId ?? quarterIdForDate(meeting.scheduledDate ?? '', this.workspace.quarters), agendaTotal: sections.length, sectionNotes: Object.fromEntries(Object.entries(meeting.sectionNotes ?? {}).map(([section, note]) => [section, sanitizeRichText(note)])), sectionDurations: meeting.sectionDurations ?? {}, attendeeRatings: meeting.attendeeRatings ?? [], idsIssueIds: meeting.idsIssueIds ?? [], idsAddedIssueIds: meeting.idsAddedIssueIds ?? [], createdTodoIds: meeting.createdTodoIds ?? [], idsNotes: (meeting.idsNotes ?? []).map((note) => ({ ...note, note: sanitizeRichText(note.note) })), aiSummaryStatus: meeting.aiSummaryStatus ?? (meeting.status === 'closed' ? 'not-generated' : undefined), aiSummarySource: meeting.aiSummarySource }, team);
     });
   }
 
@@ -524,6 +554,18 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     if (!this.canWriteTeam(teamId)) throw new WorkspaceApiError('FORBIDDEN', 'You need team editing access for this action.');
   }
 
+  private resolveQuarterId(requestedQuarterId?: string, associatedDate?: string | Date) {
+    const resolved = requestedQuarterId ?? (associatedDate ? quarterIdForDate(associatedDate, this.workspace.quarters) : this.workspace.quarter.id);
+    if (!resolved || !this.workspace.quarters.some((quarter) => quarter.id === resolved)) throw new WorkspaceApiError('VALIDATION', 'Choose a valid quarter.');
+    return resolved;
+  }
+
+  private assertQuarterDate(quarterId: string | undefined, associatedDate: string | Date) {
+    const resolved = this.resolveQuarterId(quarterId, associatedDate);
+    if (quarterId && quarterIdForDate(associatedDate, this.workspace.quarters) !== quarterId) throw new WorkspaceApiError('VALIDATION', 'The record date must fall within the selected quarter.');
+    return resolved;
+  }
+
   private canManageMeetingSummary(teamId: string) {
     // Summary generation is a write against the meeting's own team record.
     // Parent-team reviewers can read descendant meetings, but do not gain
@@ -559,8 +601,13 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     return cloneWorkspace(this.workspace);
   }
 
-  async getWorkspace() {
+  async getWorkspace(quarterId?: string) {
     this.requireSelectedEnvironmentAccess();
+    const selectedId = quarterId ?? this.selectedQuarterIds[this.selectedEnvironment] ?? this.workspace.quarter.id;
+    const selectedQuarter = this.workspace.quarters.find((quarter) => quarter.id === selectedId);
+    if (!selectedQuarter) throw new WorkspaceApiError('VALIDATION', 'The selected quarter does not exist.');
+    this.selectedQuarterIds[this.selectedEnvironment] = selectedId;
+    this.workspace.quarter = selectedQuarter;
     this.refreshDerivedState();
     this.maintainMeetingWindows();
     return cloneWorkspace(this.workspace);
@@ -722,10 +769,11 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     return this.result();
   }
 
-  async addRock(input: Pick<Rock, 'title' | 'description' | 'ownerId' | 'dueDate' | 'priority' | 'teamId'> & { notes?: string }) {
+  async addRock(input: Pick<Rock, 'title' | 'description' | 'ownerId' | 'dueDate' | 'priority' | 'teamId'> & { notes?: string; quarterId?: string }) {
     this.requireWrite(input.teamId);
+    const quarterId = this.assertQuarterDate(input.quarterId, input.dueDate);
     const timestamp = nowIso();
-    this.workspace.rocks.unshift({ ...input, id: `rock-${Date.now()}`, quarterId: this.workspace.quarter.id, notes: sanitizeRichText(input.notes), status: 'on-track', tasks: [], createdAt: timestamp, updatedAt: timestamp, updatedBy: this.workspace.currentUser.id, version: 1 });
+    this.workspace.rocks.unshift({ ...input, id: `rock-${Date.now()}`, quarterId, notes: sanitizeRichText(input.notes), status: 'on-track', tasks: [], createdAt: timestamp, updatedAt: timestamp, updatedBy: this.workspace.currentUser.id, version: 1 });
     this.audit('Created Rock', this.workspace.rocks[0].id, input.title, 'rock');
     return this.result();
   }
@@ -801,7 +849,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     this.requireWrite(rock.teamId);
     if (task.linkedTodoId) return this.result();
     const timestamp = nowIso();
-    const todo: Todo = { id: `todo-task-${task.id}`, teamId: rock.teamId, title: task.title, notes: sanitizeTodoNotes(task.notes), ownerId: task.assigneeId, dueDate: task.dueDate, status: task.status === 'done' ? 'done' : 'open', origin: `Rock · ${rock.title}`, linkedRockTaskId: task.id, checklist: [], createdAt: timestamp, updatedAt: timestamp, updatedBy: this.workspace.currentUser.id, version: 1, carryForwardCount: 0, flagged: false };
+    const todo: Todo = { id: `todo-task-${task.id}`, teamId: rock.teamId, quarterId: rock.quarterId, title: task.title, notes: sanitizeTodoNotes(task.notes), ownerId: task.assigneeId, dueDate: task.dueDate, status: task.status === 'done' ? 'done' : 'open', origin: `Rock · ${rock.title}`, linkedRockTaskId: task.id, checklist: [], createdAt: timestamp, updatedAt: timestamp, updatedBy: this.workspace.currentUser.id, version: 1, carryForwardCount: 0, flagged: false };
     task.linkedTodoId = todo.id;
     task.updatedAt = timestamp;
     task.updatedBy = this.workspace.currentUser.id;
@@ -851,6 +899,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
       const issue: Issue = {
         id: issueId,
         teamId: todo.teamId,
+        quarterId: todo.quarterId,
         sourceTeamId: todo.teamId,
         currentTeamId: todo.teamId,
         title: `Repeated To-Do: ${todo.title}`,
@@ -1015,6 +1064,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const issue: Issue = {
       id: `issue-scorecard-${metricId}-${weekStartDate}`,
       teamId: metric.teamId,
+      quarterId: quarterIdForDate(weekStartDate, this.workspace.quarters),
       sourceTeamId: metric.teamId,
       currentTeamId: metric.teamId,
       title: `Scorecard: ${metric.label}`,
@@ -1053,6 +1103,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const issue: Issue = {
       id: `issue-rock-${rock.id}`,
       teamId: rock.teamId,
+      quarterId: rock.quarterId,
       sourceTeamId: rock.teamId,
       currentTeamId: rock.teamId,
       title: `Off-track Rock: ${rock.title}`,
@@ -1079,17 +1130,18 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     return this.result();
   }
 
-  async addTodo(input: Pick<Todo, 'title' | 'ownerId' | 'dueDate' | 'teamId'> & { notes?: string; linkedRockTaskId?: string; sourceIssueId?: string }) {
+  async addTodo(input: Pick<Todo, 'title' | 'ownerId' | 'dueDate' | 'teamId'> & { notes?: string; linkedRockTaskId?: string; sourceIssueId?: string; quarterId?: string }) {
     this.requireWrite(input.teamId);
     if (!input.title.trim()) throw new WorkspaceApiError('VALIDATION', 'To-Do title is required.');
     if (!this.workspace.users.some((user) => user.id === input.ownerId && user.active)) throw new WorkspaceApiError('VALIDATION', 'To-Do owner not found.');
     const dueDate = normalizeTodoDate(input.dueDate);
+    const quarterId = this.assertQuarterDate(input.quarterId, dueDate);
     if (input.sourceIssueId) {
       const sourceIssue = this.issue(input.sourceIssueId);
       if (sourceIssue.teamId !== input.teamId) throw new WorkspaceApiError('VALIDATION', 'Source Issue must belong to the same team.');
     }
     const timestamp = nowIso();
-    this.workspace.todos.unshift({ ...input, dueDate, id: `todo-${Date.now()}`, notes: sanitizeTodoNotes(input.notes), status: 'open', origin: input.linkedRockTaskId ? 'Rock Task' : input.sourceIssueId ? 'Issue follow-up' : 'Team workspace', checklist: [], createdAt: timestamp, updatedAt: timestamp, updatedBy: this.workspace.currentUser.id, version: 1, carryForwardCount: 0, flagged: false });
+    this.workspace.todos.unshift({ ...input, quarterId, dueDate, id: `todo-${Date.now()}`, notes: sanitizeTodoNotes(input.notes), status: 'open', origin: input.linkedRockTaskId ? 'Rock Task' : input.sourceIssueId ? 'Issue follow-up' : 'Team workspace', checklist: [], createdAt: timestamp, updatedAt: timestamp, updatedBy: this.workspace.currentUser.id, version: 1, carryForwardCount: 0, flagged: false });
     this.audit('Created To-Do', this.workspace.todos[0].id, input.title, 'todo');
     return this.result();
   }
@@ -1167,7 +1219,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const followUpExists = this.workspace.todos.some((todo) => todo.id === followUpId);
     let followUpCreated = false;
     if (input.createFollowUpTodo && !followUpExists) {
-      this.workspace.todos.unshift({ id: followUpId, teamId: issue.teamId, title: `Follow up on the solution: ${issue.title}`, notes: '', ownerId: this.workspace.currentUser.id, dueDate: new Date(Date.now() + 7 * DAY).toISOString().slice(0, 10), status: 'open', origin: `IDS · ${issue.title}`, sourceIssueId: issue.id, checklist: [], createdAt: timestamp, updatedAt: timestamp, updatedBy: this.workspace.currentUser.id, version: 1, carryForwardCount: 0, flagged: false });
+      this.workspace.todos.unshift({ id: followUpId, teamId: issue.teamId, quarterId: issue.quarterId, title: `Follow up on the solution: ${issue.title}`, notes: '', ownerId: this.workspace.currentUser.id, dueDate: new Date(Date.now() + 7 * DAY).toISOString().slice(0, 10), status: 'open', origin: `IDS · ${issue.title}`, sourceIssueId: issue.id, checklist: [], createdAt: timestamp, updatedAt: timestamp, updatedBy: this.workspace.currentUser.id, version: 1, carryForwardCount: 0, flagged: false });
       followUpCreated = true;
       if (meeting) {
         meeting.createdTodoIds.push(followUpId);
@@ -1233,10 +1285,11 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     return this.result();
   }
 
-  async addIssue(input: Pick<Issue, 'title' | 'detail' | 'teamId' | 'raisedById'> & { horizon?: IssueHorizon; priority?: number; ownerId?: string; linkedRockId?: string; linkedScorecardMetricId?: string; linkedScorecardWeekStartDate?: string; idsNote?: string }) {
+  async addIssue(input: Pick<Issue, 'title' | 'detail' | 'teamId' | 'raisedById'> & { horizon?: IssueHorizon; priority?: number; ownerId?: string; quarterId?: string; linkedRockId?: string; linkedScorecardMetricId?: string; linkedScorecardWeekStartDate?: string; idsNote?: string }) {
     this.requireWrite(input.teamId);
+    const quarterId = this.resolveQuarterId(input.quarterId);
     const timestamp = nowIso();
-    const issue = { id: `issue-${Date.now()}`, teamId: input.teamId, title: input.title, detail: sanitizeRichText(input.detail), sourceTeamId: input.teamId, currentTeamId: input.teamId, raisedById: input.raisedById, ownerId: input.ownerId ?? input.raisedById, priority: input.priority ?? 1, status: 'open' as const, horizon: input.horizon ?? 'short-term', assignmentState: 'assigned' as const, ...(input.linkedRockId ? { linkedRockId: input.linkedRockId } : {}), ...(input.linkedScorecardMetricId ? { linkedScorecardMetricId: input.linkedScorecardMetricId } : {}), ...(input.linkedScorecardWeekStartDate ? { linkedScorecardWeekStartDate: input.linkedScorecardWeekStartDate } : {}), ...(input.idsNote ? { idsNote: sanitizeRichText(input.idsNote) } : {}), createdAt: timestamp, updatedAt: timestamp, updatedBy: this.workspace.currentUser.id, ageInDays: 0, ageBand: 'fresh' as const, meetingBand: issueMeetingBand(0, 'open'), version: 1, meetingsPassed: 0, escalationState: 'not-scheduled' as const, escalationLevel: 0 };
+    const issue = { id: `issue-${Date.now()}`, teamId: input.teamId, quarterId, title: input.title, detail: sanitizeRichText(input.detail), sourceTeamId: input.teamId, currentTeamId: input.teamId, raisedById: input.raisedById, ownerId: input.ownerId ?? input.raisedById, priority: input.priority ?? 1, status: 'open' as const, horizon: input.horizon ?? 'short-term', assignmentState: 'assigned' as const, ...(input.linkedRockId ? { linkedRockId: input.linkedRockId } : {}), ...(input.linkedScorecardMetricId ? { linkedScorecardMetricId: input.linkedScorecardMetricId } : {}), ...(input.linkedScorecardWeekStartDate ? { linkedScorecardWeekStartDate: input.linkedScorecardWeekStartDate } : {}), ...(input.idsNote ? { idsNote: sanitizeRichText(input.idsNote) } : {}), createdAt: timestamp, updatedAt: timestamp, updatedBy: this.workspace.currentUser.id, ageInDays: 0, ageBand: 'fresh' as const, meetingBand: issueMeetingBand(0, 'open'), version: 1, meetingsPassed: 0, escalationState: 'not-scheduled' as const, escalationLevel: 0 };
     this.workspace.issues.unshift(issue);
     this.audit('Created Issue', this.workspace.issues[0].id, input.title, 'issue');
     return this.result();
@@ -1615,7 +1668,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     this.workspace.teams.push(team);
     if (team.nodeType === 'operational') {
       const scheduledDate = meetingDateFor(team);
-      this.workspace.meetings.push({ id: `meeting-${team.id}-current`, teamId: team.id, label: `${team.shortName} L10`, dateLabel: meetingDateLabel(scheduledDate), scheduledDate, scheduledTime: team.meetingTime, recurrenceDate: scheduledDate, weekStartDate: weekStartDateFor(scheduledDate), status: 'upcoming', facilitatorId: team.escalationUserIds[0] ?? this.workspace.currentUser.id, attendeeIds: [], lastRating: 0, agendaProgress: 0, agendaTotal: meetingSectionsFor(team).length, idsSolved: 0, idsTotal: 0, recap: '', startedAt: undefined, closedAt: undefined, sectionNotes: {}, idsIssueIds: [], idsAddedIssueIds: [], createdTodoIds: [], idsNotes: [], version: 1 });
+      this.workspace.meetings.push({ id: `meeting-${team.id}-current`, teamId: team.id, quarterId: quarterIdForDate(scheduledDate, this.workspace.quarters), label: `${team.shortName} L10`, dateLabel: meetingDateLabel(scheduledDate), scheduledDate, scheduledTime: team.meetingTime, recurrenceDate: scheduledDate, weekStartDate: weekStartDateFor(scheduledDate), status: 'upcoming', facilitatorId: team.escalationUserIds[0] ?? this.workspace.currentUser.id, attendeeIds: [], lastRating: 0, agendaProgress: 0, agendaTotal: meetingSectionsFor(team).length, idsSolved: 0, idsTotal: 0, recap: '', startedAt: undefined, closedAt: undefined, sectionNotes: {}, idsIssueIds: [], idsAddedIssueIds: [], createdTodoIds: [], idsNotes: [], version: 1 });
       this.ensureUpcomingMeetingWindow(team);
     }
     this.audit('Created team', id, input.name, 'team');
@@ -1646,6 +1699,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     return {
       id: `meeting-${team.id}-${scheduledDate}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       teamId: team.id,
+      quarterId: quarterIdForDate(scheduledDate, this.workspace.quarters),
       label: `${team.shortName} L10`,
       dateLabel: meetingDateLabel(scheduledDate),
       scheduledDate,
@@ -1892,6 +1946,115 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     return this.result();
   }
 
+  async saveVto(teamId: string, input: VtoSaveInput, expectedVersion?: number) {
+    if (!this.canManageMeeting(teamId)) throw new WorkspaceApiError('FORBIDDEN', 'Only a TeamLead or OrgAdmin can edit the team V/TO.');
+    const team = this.workspace.teams.find((candidate) => candidate.id === teamId && candidate.active);
+    if (!team) throw new WorkspaceApiError('NOT_FOUND', 'Team not found.');
+    if (team.nodeType !== 'operational') throw new WorkspaceApiError('VALIDATION', 'Grouping-only nodes cannot own a V/TO.');
+    validateVtoInput(input);
+    const normalized: VtoSaveInput = {
+      ...input,
+      coreValues: input.coreValues.map((value) => value.trim()),
+      coreFocusPurpose: input.coreFocusPurpose.trim(),
+      coreFocusNiche: input.coreFocusNiche.trim(),
+      tenYearTarget: input.tenYearTarget.trim(),
+      marketingStrategy: { targetMarket: input.marketingStrategy.targetMarket.trim(), uniques: input.marketingStrategy.uniques.map((value) => value.trim()), provenProcess: input.marketingStrategy.provenProcess.trim(), guarantee: input.marketingStrategy.guarantee.trim() },
+      threeYearPicture: { targetDate: input.threeYearPicture.targetDate.trim(), revenue: input.threeYearPicture.revenue.trim(), profit: input.threeYearPicture.profit.trim(), headcount: input.threeYearPicture.headcount.trim(), description: input.threeYearPicture.description.trim() },
+      oneYearPlan: { year: input.oneYearPlan.year, revenue: input.oneYearPlan.revenue.trim(), profit: input.oneYearPlan.profit.trim(), measurables: input.oneYearPlan.measurables.map((value) => value.trim()), goals: input.oneYearPlan.goals.map((value) => value.trim()) },
+      quarterlyRockIds: [...input.quarterlyRockIds],
+      issueIds: [...input.issueIds],
+      effectiveDate: input.effectiveDate.trim(),
+      changeSummary: input.changeSummary.trim(),
+    };
+    if (normalized.quarterlyRockIds.some((rockId) => !this.workspace.rocks.some((rock) => rock.id === rockId && rock.teamId === teamId))) throw new WorkspaceApiError('VALIDATION', 'Every V/TO Quarterly Rock must belong to this team.');
+    if (normalized.issueIds.some((issueId) => !this.workspace.issues.some((issue) => issue.id === issueId && issue.teamId === teamId && issue.assignmentState !== 'redirected'))) throw new WorkspaceApiError('VALIDATION', 'Every V/TO Issue must belong to this team.');
+    const current = this.workspace.vtos.find((candidate) => candidate.teamId === teamId);
+    if (current) this.requireVersion(current.version, expectedVersion);
+    else if (expectedVersion !== undefined) throw new WorkspaceApiError('CONFLICT', 'This team V/TO does not exist yet. Refresh and try again.');
+    const timestamp = nowIso();
+    const versionNumber = Math.max(current?.versionNumber ?? 0, ...this.workspace.vtoVersions.filter((version) => version.teamId === teamId).map((version) => version.versionNumber), 0) + 1;
+    const vtoId = `vto-${teamId}`;
+    const next: Vto = {
+      ...(current ?? { id: vtoId, teamId, createdAt: timestamp }),
+      ...normalized,
+      id: vtoId,
+      teamId,
+      versionNumber,
+      savedBy: this.workspace.currentUser.id,
+      updatedAt: timestamp,
+      version: (current?.version ?? 0) + 1,
+    };
+    const snapshot: VtoVersion = {
+      ...next,
+      id: `${vtoId}-version-${versionNumber}`,
+      vtoId,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      version: versionNumber,
+    };
+    this.workspace.vtos = current ? this.workspace.vtos.map((candidate) => candidate.teamId === teamId ? next : candidate) : [next, ...this.workspace.vtos];
+    this.workspace.vtoVersions.unshift(snapshot);
+    this.audit('Updated team V/TO', vtoId, `${team.name} V/TO version ${versionNumber} saved.`, 'vto');
+    return this.result();
+  }
+
+  async createHistoricalMeeting(teamId: string, input: HistoricalMeetingInput) {
+    this.requireWrite(teamId);
+    const team = this.workspace.teams.find((candidate) => candidate.id === teamId && candidate.active);
+    if (!team) throw new WorkspaceApiError('NOT_FOUND', 'Team not found.');
+    if (team.nodeType !== 'operational') throw new WorkspaceApiError('VALIDATION', 'Grouping-only nodes cannot own L10 meetings.');
+    const scheduledDate = normalizeMeetingDate(input.scheduledDate);
+    const scheduledTime = input.scheduledTime.trim();
+    const scheduledAt = meetingScheduledAt({ scheduledDate, scheduledTime });
+    if (!scheduledTime || !Number.isFinite(scheduledAt) || scheduledAt > Date.now()) throw new WorkspaceApiError('VALIDATION', 'Historical meetings must have a valid date and time in the past.');
+    const quarterId = input.quarterId ?? quarterIdForDate(scheduledDate, this.workspace.quarters);
+    if (!quarterId || !this.workspace.quarters.some((quarter) => quarter.id === quarterId)) throw new WorkspaceApiError('VALIDATION', 'Choose a valid quarter.');
+    if (input.quarterId && quarterIdForDate(scheduledDate, this.workspace.quarters) !== input.quarterId) throw new WorkspaceApiError('VALIDATION', 'The meeting date must fall within the selected quarter.');
+    if (this.workspace.meetings.some((meeting) => meeting.teamId === teamId && meeting.scheduledDate === scheduledDate && meeting.scheduledTime === scheduledTime)) throw new WorkspaceApiError('CONFLICT', 'A meeting already exists for that team, date, and time.');
+    const activeMemberIds = new Set(this.workspace.memberships.filter((membership) => membership.teamId === teamId && membership.active && this.workspace.users.some((user) => user.id === membership.userId && user.active)).map((membership) => membership.userId));
+    if (!input.attendeeIds.length) throw new WorkspaceApiError('VALIDATION', 'Record at least one attendee.');
+    if (!activeMemberIds.has(input.facilitatorId)) throw new WorkspaceApiError('VALIDATION', 'Facilitator must be an active member of the team.');
+    if (new Set(input.attendeeIds).size !== input.attendeeIds.length || input.attendeeIds.some((userId) => !activeMemberIds.has(userId))) throw new WorkspaceApiError('VALIDATION', 'Every attendee must be a unique active member of the team.');
+    const rating = input.rating ?? 0;
+    if (rating !== 0 && !isValidMeetingRating(rating)) throw new WorkspaceApiError('VALIDATION', 'Meeting rating must be 0 or a half-point value from 0.5 to 10.');
+    const timestamp = nowIso();
+    const sections = meetingSectionsFor(team);
+    const meeting: Workspace['meetings'][number] = {
+      id: `meeting-${teamId}-${scheduledDate}-${Date.now()}`,
+      teamId,
+      quarterId,
+      label: `${team.shortName} L10`,
+      dateLabel: meetingDateLabel(scheduledDate),
+      scheduledDate,
+      scheduledTime,
+      weekStartDate: weekStartDateFor(scheduledDate),
+      status: 'closed',
+      facilitatorId: input.facilitatorId,
+      attendeeIds: [...input.attendeeIds],
+      lastRating: rating,
+      agendaProgress: sections.length,
+      agendaTotal: sections.length,
+      idsSolved: 0,
+      idsTotal: 0,
+      recap: sanitizeRichText(input.recap ?? ''),
+      startedAt: new Date(scheduledAt - sections.reduce((total, section) => total + section.duration, 0) * 60_000).toISOString(),
+      closedAt: new Date(scheduledAt).toISOString(),
+      sectionNotes: input.idsNote?.trim() ? { ids: sanitizeRichText(input.idsNote) } : {},
+      idsIssueIds: [],
+      idsAddedIssueIds: [],
+      createdTodoIds: [],
+      idsNotes: [],
+      aiSummaryStatus: 'not-generated',
+      aiSummarySource: 'legacy',
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      version: 1,
+    };
+    this.workspace.meetings.unshift(meeting);
+    this.audit('Recorded historical L10 meeting', meeting.id, `${team.name} · ${meeting.dateLabel}.`, 'meeting');
+    return this.result();
+  }
+
   async closeMeeting(teamId: string, recap: string, rating: number, meetingId?: string, attendeeRatings?: MeetingAttendeeRating[]) {
     this.requireWrite(teamId);
     const canManage = this.canManageMeeting(teamId);
@@ -1956,6 +2119,9 @@ type ApiSnapshot = {
   headlines: Workspace['headlines'];
   audit: ApiAuditEvent[];
   quarter: QuarterDto;
+  quarters?: QuarterDto[];
+  vtos?: Vto[];
+  vtoVersions?: VtoVersion[];
   etag: string;
 };
 
@@ -1963,7 +2129,7 @@ type QuarterDto = Workspace['quarter'];
 
 type ApiAuditEvent = { id: string; actorId: string; action: string; target: string; detail: string; createdAt: string; eventType?: string; type?: string };
 
-const auditEventTypes = new Set<AuditEvent['type']>(['team', 'membership', 'rock', 'todo', 'issue', 'transfer', 'profile', 'meeting']);
+const auditEventTypes = new Set<AuditEvent['type']>(['team', 'membership', 'rock', 'todo', 'issue', 'transfer', 'profile', 'meeting', 'vto']);
 
 function auditEventType(value: string | undefined): AuditEvent['type'] {
   if (!value || value === 'admin' || !auditEventTypes.has(value as AuditEvent['type'])) return 'team';
@@ -1988,26 +2154,39 @@ function serverMembership(membership: TeamMembership): TeamMembership {
 
 function mapSnapshot(snapshot: ApiSnapshot): Workspace {
   const teams = snapshot.teams.map(serverTeam);
+  const quarters = snapshot.quarters?.length ? snapshot.quarters : [snapshot.quarter];
+  const selectedQuarter = quarters.find((quarter) => quarter.id === snapshot.quarter.id) ?? snapshot.quarter;
+  const quarterIdForRecord = (value: string | undefined) => {
+    if (value) return value;
+    try {
+      return quarterIdForDate(value ?? '', quarters);
+    } catch {
+      return undefined;
+    }
+  };
   const tasksByRock = new Map<string, RockTask[]>();
   for (const task of snapshot.tasks) tasksByRock.set(task.rockId, [...(tasksByRock.get(task.rockId) ?? []), task]);
   return {
     environment: snapshot.environmentId,
     currentUser: snapshot.user,
-    quarter: snapshot.quarter,
+    quarter: selectedQuarter,
+    quarters,
     settings: snapshot.settings,
     teams,
     users: snapshot.users,
     memberships: snapshot.memberships.map(serverMembership),
     rocks: snapshot.rocks.map((rock) => ({ ...stripLegacyRockProgress(rock), id: rock.id, notes: sanitizeRichText(rock.notes), tasks: tasksByRock.get(rock.id) ?? [] })),
-    todos: snapshot.todos.map((todo) => ({ ...todo, notes: sanitizeTodoNotes(todo.notes), checklist: normalizedChecklist(todo, snapshot.users, snapshot.memberships) })),
-    issues: snapshot.issues.map((issue) => ({ ...issue, detail: sanitizeRichText(issue.detail), idsNote: issue.idsNote ? sanitizeRichText(issue.idsNote) : undefined, meetingsPassed: issue.meetingsPassed ?? 0, meetingBand: issueMeetingBand(issue.meetingsPassed ?? 0, issue.status), escalationState: issue.escalationState ?? 'not-scheduled', escalationLevel: issue.escalationLevel ?? 0 })),
+    todos: snapshot.todos.map((todo) => ({ ...todo, quarterId: quarterIdForRecord(todo.quarterId) ?? quarterIdForRecord(todo.dueDate), notes: sanitizeTodoNotes(todo.notes), checklist: normalizedChecklist(todo, snapshot.users, snapshot.memberships) })),
+    issues: snapshot.issues.map((issue) => ({ ...issue, quarterId: quarterIdForRecord(issue.quarterId) ?? quarterIdForRecord(issue.createdAt), detail: sanitizeRichText(issue.detail), idsNote: issue.idsNote ? sanitizeRichText(issue.idsNote) : undefined, meetingsPassed: issue.meetingsPassed ?? 0, meetingBand: issueMeetingBand(issue.meetingsPassed ?? 0, issue.status), escalationState: issue.escalationState ?? 'not-scheduled', escalationLevel: issue.escalationLevel ?? 0 })),
     messages: snapshot.messages,
     transfers: snapshot.transfers,
     notifications: snapshot.notifications,
     metrics: snapshot.metrics,
     scorecardResults: snapshot.scorecardResults ?? [],
-    headlines: (snapshot.headlines ?? []).map((headline) => ({ ...headline, title: typeof headline.title === 'string' ? headline.title.trim() : '', detail: typeof headline.detail === 'string' ? headline.detail.trim() : '' })),
-    meetings: snapshot.meetings.map((meeting) => normalizeMeeting(meeting, teams.find((team) => team.id === meeting.teamId))),
+    headlines: (snapshot.headlines ?? []).map((headline) => ({ ...headline, quarterId: quarterIdForRecord(headline.quarterId) ?? quarterIdForRecord(headline.createdAt), title: typeof headline.title === 'string' ? headline.title.trim() : '', detail: typeof headline.detail === 'string' ? headline.detail.trim() : '' })),
+    meetings: snapshot.meetings.map((meeting) => normalizeMeeting({ ...meeting, quarterId: quarterIdForRecord(meeting.quarterId) ?? quarterIdForRecord(meeting.scheduledDate) }, teams.find((team) => team.id === meeting.teamId))),
+    vtos: snapshot.vtos ?? [],
+    vtoVersions: snapshot.vtoVersions ?? [],
     activity: snapshot.audit.map(mapAuditEvent),
   };
 }
@@ -2066,6 +2245,12 @@ function mergeMutationRecord(workspace: Workspace, value: MutationObject): boole
       replaceRecord(workspace.meetings, normalizeMeeting(next, team));
       return true;
     }
+    case 'vto':
+      replaceRecord(workspace.vtos, value as unknown as Vto);
+      return true;
+    case 'vtoVersion':
+      replaceRecord(workspace.vtoVersions, value as unknown as VtoVersion);
+      return true;
     case 'user': {
       const next = value as unknown as User;
       replaceRecord(workspace.users, next);
@@ -2160,8 +2345,10 @@ export class HttpWorkspaceApi implements WorkspaceApi {
     return this.getEnvironmentAccess();
   }
 
-  async getWorkspace(): Promise<Workspace> {
-    const workspace = mapSnapshot(await this.request<ApiSnapshot>('/workspace'));
+  async getWorkspace(quarterId?: string): Promise<Workspace> {
+    const selectedQuarterId = quarterId ?? (this.cachedWorkspace?.quarter.status !== 'current' ? this.cachedWorkspace?.quarter.id : undefined);
+    const path = selectedQuarterId ? `/workspace?quarterId=${encodeURIComponent(selectedQuarterId)}` : '/workspace';
+    const workspace = mapSnapshot(await this.request<ApiSnapshot>(path));
     this.cachedWorkspace = workspace;
     return cloneWorkspace(workspace);
   }
@@ -2199,7 +2386,7 @@ export class HttpWorkspaceApi implements WorkspaceApi {
 
   async updateRockStatus(rockId: string, status: RockStatus, expectedVersion?: number) { return this.mutate(`/rocks/${rockId}/status`, 'PATCH', { status }, expectedVersion); }
   async updateRock(rockId: string, input: Partial<Pick<Rock, 'title' | 'description' | 'notes' | 'ownerId' | 'dueDate' | 'priority'>>, expectedVersion?: number) { return this.mutate(`/rocks/${rockId}`, 'PATCH', input, expectedVersion); }
-  async addRock(input: Pick<Rock, 'title' | 'description' | 'ownerId' | 'dueDate' | 'priority' | 'teamId'> & { notes?: string }) { return this.mutate(`/teams/${input.teamId}/rocks`, 'POST', input); }
+  async addRock(input: Pick<Rock, 'title' | 'description' | 'ownerId' | 'dueDate' | 'priority' | 'teamId'> & { notes?: string; quarterId?: string }) { return this.mutate(`/teams/${input.teamId}/rocks`, 'POST', input); }
   async addRockTask(rockId: string, input: Pick<RockTask, 'title' | 'notes' | 'assigneeId' | 'assignedAt' | 'startDate' | 'dueDate'>) { return this.mutate(`/rocks/${rockId}/tasks`, 'POST', input); }
   async updateRockTask(taskId: string, input: Partial<Pick<RockTask, 'title' | 'notes' | 'assigneeId' | 'assignedAt' | 'startDate' | 'dueDate' | 'status'>>, expectedVersion?: number) {
     const task = this.cachedWorkspace?.rocks.flatMap((rock) => rock.tasks).find((candidate) => candidate.id === taskId);
@@ -2213,7 +2400,7 @@ export class HttpWorkspaceApi implements WorkspaceApi {
     const dueDateChanged = input.dueDate !== undefined && input.dueDate !== todo?.dueDate;
     return this.mutate(`/todos/${todoId}`, 'PATCH', input, expectedVersion, { refresh: Boolean(todo?.linkedRockTaskId) || dueDateChanged });
   }
-  async addTodo(input: Pick<Todo, 'title' | 'ownerId' | 'dueDate' | 'teamId'> & { notes?: string; linkedRockTaskId?: string; sourceIssueId?: string }) { return this.mutate(`/teams/${input.teamId}/todos`, 'POST', input); }
+  async addTodo(input: Pick<Todo, 'title' | 'ownerId' | 'dueDate' | 'teamId'> & { notes?: string; linkedRockTaskId?: string; sourceIssueId?: string; quarterId?: string }) { return this.mutate(`/teams/${input.teamId}/todos`, 'POST', input); }
   async addTodoChecklistItem(todoId: string, text: string, supporterId?: string, expectedVersion?: number) { return this.mutate(`/todos/${todoId}/checklist`, 'POST', { text, ...(supporterId ? { supporterId } : {}) }, expectedVersion); }
   async updateTodoChecklistItem(todoId: string, itemId: string, input: Partial<Pick<TodoChecklistItem, 'text' | 'completed' | 'supporterId'>>, expectedVersion?: number) { return this.mutate(`/todos/${todoId}/checklist/${itemId}`, 'PATCH', input, expectedVersion); }
   async deleteTodoChecklistItem(todoId: string, itemId: string, expectedVersion?: number) { return this.mutate(`/todos/${todoId}/checklist/${itemId}`, 'DELETE', undefined, expectedVersion); }
@@ -2227,7 +2414,7 @@ export class HttpWorkspaceApi implements WorkspaceApi {
   async solveIssue(issueId: string, input: SolveIssueInput, expectedVersion?: number) { return this.mutate(`/issues/${issueId}/solve`, 'POST', input, expectedVersion, { refresh: true }); }
   async reopenIssue(issueId: string, expectedVersion?: number) { return this.mutate(`/issues/${issueId}/reopen`, 'POST', undefined, expectedVersion, { refresh: true }); }
   async createHeadline(input: Pick<Headline, 'teamId' | 'type' | 'title' | 'detail'> & { meetingId?: string; issueId?: string }) { return this.mutate(`/teams/${input.teamId}/headlines`, 'POST', input, undefined, { refresh: true }); }
-  async addIssue(input: Pick<Issue, 'title' | 'detail' | 'teamId' | 'raisedById'> & { horizon?: IssueHorizon; priority?: number; ownerId?: string; linkedRockId?: string; linkedScorecardMetricId?: string; linkedScorecardWeekStartDate?: string; idsNote?: string }) { return this.mutate(`/teams/${input.teamId}/issues`, 'POST', input); }
+  async addIssue(input: Pick<Issue, 'title' | 'detail' | 'teamId' | 'raisedById'> & { horizon?: IssueHorizon; priority?: number; ownerId?: string; quarterId?: string; linkedRockId?: string; linkedScorecardMetricId?: string; linkedScorecardWeekStartDate?: string; idsNote?: string }) { return this.mutate(`/teams/${input.teamId}/issues`, 'POST', input); }
   async updateIssue(issueId: string, input: Partial<Pick<Issue, 'title' | 'detail' | 'priority' | 'horizon' | 'ownerId' | 'idsNote'>>, expectedVersion?: number) { return this.mutate(`/issues/${issueId}`, 'PATCH', input, expectedVersion); }
   async addMeetingIssueNote(issueId: string, meetingId: string, note: string, expectedVersion?: number) {
     const workspace = this.cachedWorkspace ?? await this.getWorkspace();
@@ -2251,6 +2438,8 @@ export class HttpWorkspaceApi implements WorkspaceApi {
   async skipMeeting(teamId: string, meetingId: string, reason: MeetingSkipReason, note = '', expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/skip`, 'POST', { reason, note }, expectedVersion, { refresh: true }); }
   async requestMeetingSummary(teamId: string, meetingId: string, expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/ai-summary/retry`, 'POST', undefined, expectedVersion, { refresh: true }); }
   async cancelMeetingSummary(teamId: string, meetingId: string, expectedVersion?: number) { return this.mutate(`/teams/${teamId}/meetings/${meetingId}/ai-summary/cancel`, 'POST', undefined, expectedVersion, { refresh: true }); }
+  async saveVto(teamId: string, input: VtoSaveInput, expectedVersion?: number) { return this.mutate(`/teams/${teamId}/vto`, 'PUT', input, expectedVersion, { refresh: true }); }
+  async createHistoricalMeeting(teamId: string, input: HistoricalMeetingInput) { return this.mutate(`/teams/${teamId}/meetings/history`, 'POST', input, undefined, { refresh: true }); }
   async requestIssueTransfer(issueId: string, destinationTeamId: string, note?: string) { return this.mutate(`/issues/${issueId}/transfers`, 'POST', { destinationTeamId, note }, undefined, { refresh: true }); }
   async acceptIssueTransfer(transferId: string, expectedVersion?: number) { return this.mutate(`/issue-transfers/${transferId}/accept`, 'POST', undefined, expectedVersion, { refresh: true }); }
   async rejectIssueTransfer(transferId: string, message: string, expectedVersion?: number) { return this.mutate(`/issue-transfers/${transferId}/reject`, 'POST', { message }, expectedVersion, { refresh: true }); }

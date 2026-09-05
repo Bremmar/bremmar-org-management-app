@@ -2,7 +2,7 @@ import { app, type HttpRequest, type HttpResponseInit, type InvocationContext } 
 import { expectedVersion, isResponse, repositoryErrorResponse, requestJson, requestScope, responseWithEtag } from './http.js';
 import { verifyAiSignature, dispatchMeetingSummaryJob } from '../ai.js';
 import { environmentRepositories } from '../data/services.js';
-import type { WorkspaceRepository } from '../data/repository.js';
+import type { CreateHistoricalMeetingInput, WorkspaceRepository } from '../data/repository.js';
 import { isValidMeetingRating, type EnvironmentId, type MeetingAiSummary, type MeetingReviewFilter, type MeetingReviewQuery, type MeetingReviewStatus, type MeetingSection } from '../domain.js';
 
 const meetingSections = new Set<MeetingSection>(['segue', 'scorecard', 'rock-review', 'headlines', 'todo-review', 'ids', 'conclude']);
@@ -282,6 +282,32 @@ async function transitionMeetingSectionHandler(request: HttpRequest, _context: I
   }
 }
 
+async function createHistoricalMeetingHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
+  const scope = await requestScope(request);
+  if (isResponse(scope)) return scope;
+  const { principal, repository } = scope;
+  const teamId = request.params.teamId;
+  if (!teamId) return { status: 422, jsonBody: { error: 'teamId is required', code: 'VALIDATION' } };
+  try {
+    const body = await requestJson<Partial<Omit<CreateHistoricalMeetingInput, 'teamId'>>>(request);
+    const input: CreateHistoricalMeetingInput = {
+      teamId,
+      quarterId: typeof body.quarterId === 'string' ? body.quarterId : undefined,
+      scheduledDate: typeof body.scheduledDate === 'string' ? body.scheduledDate : '',
+      scheduledTime: typeof body.scheduledTime === 'string' ? body.scheduledTime : '',
+      facilitatorId: typeof body.facilitatorId === 'string' ? body.facilitatorId : '',
+      attendeeIds: Array.isArray(body.attendeeIds) ? body.attendeeIds as string[] : [],
+      rating: typeof body.rating === 'number' ? body.rating : undefined,
+      recap: typeof body.recap === 'string' ? body.recap : undefined,
+      idsNote: typeof body.idsNote === 'string' ? body.idsNote : undefined,
+    };
+    const meeting = await repository.createHistoricalMeeting(input, principal.userId);
+    return responseWithEtag(meeting, `W/"${meeting.version}"`, 201);
+  } catch (error) {
+    return repositoryErrorResponse(error);
+  }
+}
+
 app.http('addMeetingIssueNote', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/issues/{issueId}/notes', handler: addMeetingNoteHandler });
 app.http('meetingReview', { methods: ['GET'], authLevel: 'anonymous', route: 'meetings/review', handler: meetingReviewHandler });
 app.http('getMeeting', { methods: ['GET'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}', handler: getMeetingHandler });
@@ -291,6 +317,7 @@ app.http('updateMeetingSectionNote', { methods: ['PATCH'], authLevel: 'anonymous
 app.http('selectMeetingIssues', { methods: ['PATCH'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/ids/selection', handler: selectMeetingIssuesHandler });
 app.http('reorderMeetingIssues', { methods: ['PATCH'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/ids/order', handler: reorderMeetingIssuesHandler });
 app.http('transitionMeetingSection', { methods: ['PATCH'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/section', handler: transitionMeetingSectionHandler });
+app.http('createHistoricalMeeting', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/history', handler: createHistoricalMeetingHandler });
 app.http('startMeeting', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/start', handler: startMeetingHandler });
 app.http('closeMeeting', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/close', handler: closeMeetingHandler });
 app.http('skipMeeting', { methods: ['POST'], authLevel: 'anonymous', route: 'teams/{teamId}/meetings/{meetingId}/skip', handler: skipMeetingHandler });

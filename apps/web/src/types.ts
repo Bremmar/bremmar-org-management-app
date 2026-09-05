@@ -1,4 +1,4 @@
-export type ViewId = 'overview' | 'company' | 'meeting' | 'meeting-prep' | 'meeting-history' | 'rocks' | 'todos' | 'issues' | 'messages' | 'scorecard' | 'admin' | 'profile';
+export type ViewId = 'overview' | 'company' | 'meeting' | 'meeting-prep' | 'meeting-history' | 'vto' | 'rocks' | 'todos' | 'issues' | 'messages' | 'scorecard' | 'admin' | 'profile';
 
 export type RockStatus = 'on-track' | 'off-track' | 'complete';
 export type RockTaskStatus = 'open' | 'in-progress' | 'done';
@@ -117,6 +117,87 @@ export interface Quarter {
   startDate: string;
   endDate: string;
   daysRemaining: number;
+  status: 'past' | 'current' | 'upcoming';
+  daysUntilStart?: number;
+}
+
+export function quarterIdForDate(value: string | Date, quarters: readonly Pick<Quarter, 'id' | 'startDate' | 'endDate'>[]) {
+  const date = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : new Date(value).toISOString().slice(0, 10);
+  return quarters.find((quarter) => date >= quarter.startDate && date <= quarter.endDate)?.id;
+}
+
+export interface VtoMarketingStrategy {
+  targetMarket: string;
+  uniques: string[];
+  provenProcess: string;
+  guarantee: string;
+}
+
+export interface VtoThreeYearPicture {
+  targetDate: string;
+  revenue: string;
+  profit: string;
+  headcount: string;
+  description: string;
+}
+
+export interface VtoOneYearPlan {
+  year: number;
+  revenue: string;
+  profit: string;
+  measurables: string[];
+  goals: string[];
+}
+
+/** The eight EOS V/TO questions, with links back to operational records. */
+export interface VtoContent {
+  coreValues: string[];
+  coreFocusPurpose: string;
+  coreFocusNiche: string;
+  tenYearTarget: string;
+  marketingStrategy: VtoMarketingStrategy;
+  threeYearPicture: VtoThreeYearPicture;
+  oneYearPlan: VtoOneYearPlan;
+  quarterlyRockIds: string[];
+  issueIds: string[];
+}
+
+export interface Vto extends VtoContent {
+  id: string;
+  teamId: string;
+  versionNumber: number;
+  effectiveDate: string;
+  changeSummary: string;
+  savedBy: string;
+  createdAt: string;
+  updatedAt: string;
+  version: number;
+}
+
+export interface VtoVersion extends VtoContent {
+  id: string;
+  teamId: string;
+  vtoId: string;
+  versionNumber: number;
+  effectiveDate: string;
+  changeSummary: string;
+  savedBy: string;
+  createdAt: string;
+  updatedAt: string;
+  version: number;
+}
+
+export type VtoSaveInput = VtoContent & Pick<Vto, 'effectiveDate' | 'changeSummary'>;
+
+export interface HistoricalMeetingInput {
+  quarterId?: string;
+  scheduledDate: string;
+  scheduledTime: string;
+  facilitatorId: string;
+  attendeeIds: string[];
+  rating?: number;
+  recap?: string;
+  idsNote?: string;
 }
 
 export interface RockTask {
@@ -170,6 +251,7 @@ export function rockMilestoneCounts(rock: Pick<Rock, 'tasks'>): RockMilestoneCou
 export interface Todo {
   id: string;
   teamId: string;
+  quarterId?: string;
   title: string;
   notes: string;
   ownerId: string;
@@ -201,6 +283,7 @@ export interface TodoChecklistItem {
 export interface Issue {
   id: string;
   teamId: string;
+  quarterId?: string;
   sourceTeamId: string;
   currentTeamId: string | null;
   title: string;
@@ -353,6 +436,7 @@ export interface ScorecardResult {
 export interface Headline {
   id: string;
   teamId: string;
+  quarterId?: string;
   authorId: string;
   type: 'win' | 'concern';
   title: string;
@@ -368,6 +452,7 @@ export interface Headline {
 export interface MeetingInstance {
   id: string;
   teamId: string;
+  quarterId?: string;
   label: string;
   dateLabel: string;
   /** Calendar date selected for this meeting occurrence. Legacy snapshots may omit it. */
@@ -402,6 +487,7 @@ export interface MeetingInstance {
   idsAddedIssueIds: string[];
   createdTodoIds: string[];
   idsNotes: MeetingIssueNote[];
+  createdAt?: string;
   actionSummary?: MeetingActionSummary;
   skipReason?: MeetingSkipReason;
   skipNote?: string;
@@ -445,7 +531,7 @@ export interface AuditEvent {
   target: string;
   detail: string;
   createdAt: string;
-  type: 'team' | 'membership' | 'rock' | 'todo' | 'issue' | 'transfer' | 'profile' | 'meeting';
+  type: 'team' | 'membership' | 'rock' | 'todo' | 'issue' | 'transfer' | 'profile' | 'meeting' | 'vto';
 }
 
 export type AuditEntityType = 'rock' | 'todo' | 'issue';
@@ -461,6 +547,7 @@ export interface Workspace {
   environment: EnvironmentId;
   currentUser: User;
   quarter: Quarter;
+  quarters: Quarter[];
   settings: IssueAgeSettings;
   teams: Team[];
   users: User[];
@@ -475,6 +562,8 @@ export interface Workspace {
   scorecardResults: ScorecardResult[];
   headlines: Headline[];
   meetings: MeetingInstance[];
+  vtos: Vto[];
+  vtoVersions: VtoVersion[];
   activity: AuditEvent[];
 }
 

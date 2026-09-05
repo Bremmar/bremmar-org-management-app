@@ -475,7 +475,7 @@ describe('LocalWorkspaceApi', () => {
     expect(issue.meetingsPassed).toBe(3);
     expect(issue.meetingBand).toBe('orange');
     expect(issue.escalationState).toBe('not-scheduled');
-    expect(workspace.meetings.filter((meeting) => meeting.teamId === 'leadership' && meeting.status === 'closed')).toHaveLength(3);
+    expect(workspace.meetings.filter((meeting) => meeting.teamId === 'leadership' && meeting.quarterId === workspace.quarter.id && meeting.status === 'closed')).toHaveLength(3);
     expect(workspace.meetings.filter((meeting) => meeting.teamId === 'leadership' && meeting.status === 'upcoming')).toHaveLength(4);
     expect(workspace.meetings.filter((meeting) => meeting.teamId === 'leadership' && meeting.status !== 'closed')[0]?.idsIssueIds).toContain(issue.id);
 
@@ -639,6 +639,38 @@ describe('LocalWorkspaceApi', () => {
     const ordered = workspace.meetings.find((candidate) => candidate.id === meeting.id)!;
     expect(ordered.idsIssueIds.slice(0, 2)).toEqual([second.id, first.id]);
     expect(workspace.issues.find((issue) => issue.id === second.id)?.priority).toBe(1);
+  });
+
+  it('switches quarter context and places new Rocks in the selected upcoming quarter', async () => {
+    const api = new LocalWorkspaceApi();
+    const historical = await api.getWorkspace('2026-q2');
+    expect(historical.quarter).toMatchObject({ id: '2026-q2', status: 'past' });
+    expect(historical.rocks.some((rock) => rock.quarterId === '2026-q2')).toBe(true);
+    expect(historical.todos.some((todo) => todo.quarterId === '2026-q2')).toBe(true);
+
+    const upcoming = await api.getWorkspace('2026-q4');
+    expect(upcoming.quarter).toMatchObject({ id: '2026-q4', status: 'upcoming' });
+    const created = await api.addRock({ title: 'Prepare next-quarter planning', description: 'Make the next planning cycle ready.', ownerId: 'ava-khan', dueDate: upcoming.quarter.endDate, priority: 'high', teamId: 'leadership', quarterId: upcoming.quarter.id });
+    expect(created.rocks[0]).toMatchObject({ title: 'Prepare next-quarter planning', quarterId: '2026-q4', dueDate: '2026-12-31' });
+    expect((await api.getWorkspace()).quarter.id).toBe('2026-q4');
+  });
+
+  it('saves a team V/TO as an immutable version and records historical meetings in their quarter', async () => {
+    const api = new LocalWorkspaceApi();
+    let workspace = await api.getWorkspace();
+    const current = workspace.vtos.find((vto) => vto.teamId === 'leadership')!;
+    const versionCount = workspace.vtoVersions.filter((version) => version.teamId === 'leadership').length;
+    const saved = await api.saveVto('leadership', { coreValues: [...current.coreValues], coreFocusPurpose: current.coreFocusPurpose, coreFocusNiche: current.coreFocusNiche, tenYearTarget: current.tenYearTarget, marketingStrategy: structuredClone(current.marketingStrategy), threeYearPicture: structuredClone(current.threeYearPicture), oneYearPlan: structuredClone(current.oneYearPlan), quarterlyRockIds: [...current.quarterlyRockIds], issueIds: [...current.issueIds], effectiveDate: '2026-10-01', changeSummary: 'Added the next-quarter planning horizon.' }, current.version);
+    const next = saved.vtos.find((vto) => vto.teamId === 'leadership')!;
+    expect(next).toMatchObject({ versionNumber: current.versionNumber + 1, effectiveDate: '2026-10-01', changeSummary: 'Added the next-quarter planning horizon.' });
+    expect(saved.vtoVersions.filter((version) => version.teamId === 'leadership')).toHaveLength(versionCount + 1);
+    await expect(api.saveVto('leadership', { coreValues: [...next.coreValues], coreFocusPurpose: next.coreFocusPurpose, coreFocusNiche: next.coreFocusNiche, tenYearTarget: next.tenYearTarget, marketingStrategy: structuredClone(next.marketingStrategy), threeYearPicture: structuredClone(next.threeYearPicture), oneYearPlan: structuredClone(next.oneYearPlan), quarterlyRockIds: [...next.quarterlyRockIds], issueIds: [...next.issueIds], effectiveDate: next.effectiveDate, changeSummary: 'Stale edit.' }, current.version)).rejects.toMatchObject({ code: 'CONFLICT' });
+
+    workspace = await api.getWorkspace('2026-q2');
+    const updated = await api.createHistoricalMeeting('leadership', { scheduledDate: '2026-06-29', scheduledTime: '9:00 AM', facilitatorId: 'ava-khan', attendeeIds: ['ava-khan'], rating: 8.5, recap: 'The team agreed the next-quarter priorities.', idsNote: 'Carry the planning decisions forward.' });
+    expect(updated.quarter).toMatchObject({ id: '2026-q2', status: 'past' });
+    expect(workspace.quarter.id).toBe('2026-q2');
+    expect(updated.meetings.find((candidate) => candidate.scheduledDate === '2026-06-29')).toMatchObject({ status: 'closed', quarterId: '2026-q2' });
   });
 
   it('merges a simple HTTP mutation response without requesting the full workspace again', async () => {

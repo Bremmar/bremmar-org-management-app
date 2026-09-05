@@ -3,7 +3,7 @@ import type { ChangeEvent, FormEvent, ReactNode } from 'react';
 import { workspaceApi, WorkspaceApiError, type SolveIssueInput } from './api';
 import { buildInfo } from './buildInfo';
 import { initialWorkspace, workspaceToday } from './data';
-import { averageMeetingRating, defaultMeetingSections, isValidMeetingRating, meetingReviewStatus, meetingScheduledAt, meetingSectionConfigsFor, meetingSectionsFor, rockMilestoneCounts, weekStartDateFor } from './types';
+import { averageMeetingRating, defaultMeetingSections, isValidMeetingRating, meetingReviewStatus, meetingScheduledAt, meetingSectionConfigsFor, meetingSectionsFor, quarterIdForDate, rockMilestoneCounts, weekStartDateFor } from './types';
 import { sanitizeTodoNotes } from './richText';
 import type {
   CompanyOverview,
@@ -21,6 +21,8 @@ import type {
   MeetingSection,
   MeetingAttendeeRating,
   MeetingSkipReason,
+  HistoricalMeetingInput,
+  Quarter,
   Rock,
   RockStatus,
   RockTask,
@@ -38,6 +40,8 @@ import type {
   TodoStatus,
   User,
   ViewId,
+  Vto,
+  VtoSaveInput,
   Workspace,
 } from './types';
 
@@ -45,7 +49,7 @@ const clone = <T,>(value: T): T => structuredClone(value);
 const isLocalPocBuild = import.meta.env.VITE_LOCAL_POC_MODE !== 'false';
 
 const navLabels: Record<ViewId, string> = {
-  overview: 'My week', company: 'Company overview', meeting: 'Live L10', 'meeting-prep': 'Meeting prep', 'meeting-history': 'Past meetings', rocks: 'Rocks', todos: 'To-Dos', issues: 'Issues', messages: 'Team messages', scorecard: 'Scorecard', admin: 'Admin', profile: 'Profile',
+  overview: 'My week', company: 'Company overview', meeting: 'Live L10', 'meeting-prep': 'Meeting prep', 'meeting-history': 'Past meetings', vto: 'Vision / Traction', rocks: 'Rocks', todos: 'To-Dos', issues: 'Issues', messages: 'Team messages', scorecard: 'Scorecard', admin: 'Admin', profile: 'Profile',
 };
 
 const userFor = (workspace: Workspace, id?: string): User => workspace.users.find((user) => user.id === id) ?? {
@@ -144,6 +148,17 @@ function teamPath(workspace: Workspace, teamId: string) {
   return parts.join(' / ');
 }
 
+function quarterIdForRecord(record: { quarterId?: string; scheduledDate?: string; dueDate?: string; createdAt?: string }, quarters: Quarter[]) {
+  if (record.quarterId) return record.quarterId;
+  const date = record.scheduledDate ?? record.dueDate ?? record.createdAt;
+  if (!date) return undefined;
+  try {
+    return quarterIdForDate(date, quarters);
+  } catch {
+    return undefined;
+  }
+}
+
 function descendantIds(workspace: Workspace, teamId: string): string[] {
   const children = workspace.teams.filter((team) => team.parentTeamId === teamId).map((team) => team.id);
   return children.flatMap((child) => [child, ...descendantIds(workspace, child)]);
@@ -229,6 +244,7 @@ function App() {
   const [scorecardContext, setScorecardContext] = useState('');
   const [clockNow, setClockNow] = useState(() => Date.now());
   const [companyOverview, setCompanyOverview] = useState<CompanyOverview | null>(null);
+  const [quarterLoading, setQuarterLoading] = useState(false);
   const environmentGeneration = useRef(0);
 
   const accessibleTeams = useMemo(() => {
@@ -244,7 +260,7 @@ function App() {
   const activeTeam = teamFor(workspace, accessibleTeamId);
   const currentRole = roleFor(workspace, activeTeam.id);
   const readOnly = !hasWorkspaceAccess || !canWrite(workspace, activeTeam.id);
-  const teamMeetings = useMemo(() => workspace.meetings.filter((meeting) => meeting.teamId === activeTeam.id), [workspace.meetings, activeTeam.id]);
+  const teamMeetings = useMemo(() => workspace.meetings.filter((meeting) => meeting.teamId === activeTeam.id && quarterIdForRecord(meeting, workspace.quarters) === workspace.quarter.id), [workspace.meetings, workspace.quarters, workspace.quarter.id, activeTeam.id]);
   const sortedTeamMeetings = useMemo(() => [...teamMeetings].sort((left, right) => meetingScheduledAt(left) - meetingScheduledAt(right)), [teamMeetings]);
   const selectedMeeting = teamMeetings.find((meeting) => meeting.id === selectedMeetingId);
   const recapMeeting = teamMeetings.find((meeting) => meeting.id === recapMeetingId);
@@ -256,12 +272,18 @@ function App() {
   const meetingWeekStartDate = currentMeeting?.weekStartDate ?? weekStartDateFor(new Date());
   const selectedScorecardWeek = scorecardWeekStartDate || meetingWeekStartDate;
   const activeAgenda = useMemo(() => meetingSectionsFor(activeTeam), [activeTeam]);
-  const activeIssues = useMemo(() => hasWorkspaceAccess ? workspace.issues.filter((issue) => issue.teamId === activeTeam.id && issue.assignmentState !== 'redirected') : [], [hasWorkspaceAccess, workspace.issues, activeTeam.id]);
-  const activeRocks = useMemo(() => hasWorkspaceAccess ? workspace.rocks.filter((rock) => rock.teamId === activeTeam.id) : [], [hasWorkspaceAccess, workspace.rocks, activeTeam.id]);
-  const activeTodos = useMemo(() => hasWorkspaceAccess ? workspace.todos.filter((todo) => todo.teamId === activeTeam.id) : [], [hasWorkspaceAccess, workspace.todos, activeTeam.id]);
+  const teamRocks = useMemo(() => hasWorkspaceAccess ? workspace.rocks.filter((rock) => rock.teamId === activeTeam.id) : [], [hasWorkspaceAccess, workspace.rocks, activeTeam.id]);
+  const teamTodos = useMemo(() => hasWorkspaceAccess ? workspace.todos.filter((todo) => todo.teamId === activeTeam.id) : [], [hasWorkspaceAccess, workspace.todos, activeTeam.id]);
+  const teamIssues = useMemo(() => hasWorkspaceAccess ? workspace.issues.filter((issue) => issue.teamId === activeTeam.id && issue.assignmentState !== 'redirected') : [], [hasWorkspaceAccess, workspace.issues, activeTeam.id]);
+  // Issues stay in the operating queue until solved. Their quarter is the
+  // originating/planning context used by history, while unresolved Issues
+  // continue to appear in the current quarter's IDS view.
+  const activeIssues = useMemo(() => teamIssues.filter((issue) => issue.status !== 'solved' || quarterIdForRecord(issue, workspace.quarters) === workspace.quarter.id), [teamIssues, workspace.quarters, workspace.quarter.id]);
+  const activeRocks = useMemo(() => teamRocks.filter((rock) => quarterIdForRecord(rock, workspace.quarters) === workspace.quarter.id), [teamRocks, workspace.quarters, workspace.quarter.id]);
+  const activeTodos = useMemo(() => teamTodos.filter((todo) => quarterIdForRecord(todo, workspace.quarters) === workspace.quarter.id), [teamTodos, workspace.quarters, workspace.quarter.id]);
   const activeMetrics = useMemo(() => hasWorkspaceAccess ? workspace.metrics.filter((metric) => metric.teamId === activeTeam.id) : [], [hasWorkspaceAccess, workspace.metrics, activeTeam.id]);
-  const activeScorecardResults = useMemo(() => hasWorkspaceAccess ? workspace.scorecardResults.filter((result) => result.teamId === activeTeam.id) : [], [hasWorkspaceAccess, workspace.scorecardResults, activeTeam.id]);
-  const activeHeadlines = useMemo(() => hasWorkspaceAccess ? workspace.headlines.filter((headline) => headline.teamId === activeTeam.id) : [], [hasWorkspaceAccess, workspace.headlines, activeTeam.id]);
+  const activeScorecardResults = useMemo(() => hasWorkspaceAccess ? workspace.scorecardResults.filter((result) => result.teamId === activeTeam.id && quarterIdForRecord({ createdAt: result.weekStartDate }, workspace.quarters) === workspace.quarter.id) : [], [hasWorkspaceAccess, workspace.scorecardResults, workspace.quarters, workspace.quarter.id, activeTeam.id]);
+  const activeHeadlines = useMemo(() => hasWorkspaceAccess ? workspace.headlines.filter((headline) => headline.teamId === activeTeam.id && quarterIdForRecord(headline, workspace.quarters) === workspace.quarter.id) : [], [hasWorkspaceAccess, workspace.headlines, workspace.quarters, workspace.quarter.id, activeTeam.id]);
   const pendingForTeam = hasWorkspaceAccess ? workspace.transfers.filter((transfer) => transfer.status === 'pending' && transfer.destinationTeamId === activeTeam.id) : [];
   const pendingFromTeam = hasWorkspaceAccess ? workspace.transfers.filter((transfer) => transfer.status === 'pending' && transfer.sourceTeamId === activeTeam.id) : [];
   const activeMessages = hasWorkspaceAccess ? workspace.messages.filter((message) => message.toTeamId === activeTeam.id || message.fromTeamId === activeTeam.id) : [];
@@ -405,6 +427,30 @@ function App() {
       if (generation === environmentGeneration.current && session) setEnvironmentSession(session);
     } finally {
       if (generation === environmentGeneration.current) setEnvironmentLoading(false);
+    }
+  };
+
+  const changeQuarter = async (quarterId: string) => {
+    if (quarterId === workspace.quarter.id || !workspace.quarters.some((quarter) => quarter.id === quarterId)) return;
+    const generation = environmentGeneration.current;
+    setQuarterLoading(true);
+    setModal(null);
+    setMeetingClosed(false);
+    setMeetingRunning(false);
+    setSelectedMeetingId(null);
+    setRecapMeetingId(null);
+    setMeetingSection('segue');
+    setScorecardContext('');
+    setScorecardWeekStartDate('');
+    try {
+      const next = await workspaceApi.getWorkspace(quarterId);
+      if (generation !== environmentGeneration.current) return;
+      setWorkspace(next);
+      notify(`${next.quarter.label} loaded.`);
+    } catch (error) {
+      if (generation === environmentGeneration.current) notify(error instanceof WorkspaceApiError ? error.message : 'That quarter could not be loaded.');
+    } finally {
+      if (generation === environmentGeneration.current) setQuarterLoading(false);
     }
   };
 
@@ -661,6 +707,16 @@ function App() {
   const requestMeetingSummary = (teamId: string, meetingId: string, expectedVersion?: number) => refresh(workspaceApi.requestMeetingSummary(teamId, meetingId, expectedVersion), 'AI recap queued.');
   const cancelMeetingSummary = (teamId: string, meetingId: string, expectedVersion?: number) => refresh(workspaceApi.cancelMeetingSummary(teamId, meetingId, expectedVersion), 'AI recap generation cancelled.');
 
+  const saveVto = async (input: VtoSaveInput) => {
+    const current = workspace.vtos.find((vto) => vto.teamId === activeTeam.id);
+    if (await refresh(workspaceApi.saveVto(activeTeam.id, input, current?.version), `V/TO version ${current?.versionNumber ? current.versionNumber + 1 : 1} saved.`)) return true;
+    return false;
+  };
+
+  const createHistoricalMeeting = async (input: HistoricalMeetingInput) => {
+    if (await refresh(workspaceApi.createHistoricalMeeting(activeTeam.id, input), 'Historical L10 meeting added to the quarter.')) setModal(null);
+  };
+
   const changeTeam = (teamId: string) => {
     if (!accessibleTeams.some((team) => team.id === teamId)) return;
     setSelectedTeamId(teamId);
@@ -686,7 +742,7 @@ function App() {
     const form = new FormData(event.currentTarget);
     const title = String(form.get('title') ?? '').trim();
     if (!title) return;
-    if (await refresh(workspaceApi.addTodo({ title, notes: String(form.get('notes') ?? ''), dueDate: String(form.get('dueDate') ?? workspaceToday), ownerId: String(form.get('ownerId') ?? workspace.currentUser.id), teamId: activeTeam.id }), 'New To-Do added to the team workspace.')) setModal(null);
+    if (await refresh(workspaceApi.addTodo({ title, notes: String(form.get('notes') ?? ''), dueDate: String(form.get('dueDate') ?? workspaceToday), ownerId: String(form.get('ownerId') ?? workspace.currentUser.id), teamId: activeTeam.id, quarterId: workspace.quarter.id }), 'New To-Do added to the team workspace.')) setModal(null);
   };
 
   const handleCreateIssue = async (event: FormEvent<HTMLFormElement>) => {
@@ -694,7 +750,7 @@ function App() {
     const form = new FormData(event.currentTarget);
     const title = String(form.get('title') ?? '').trim();
     if (!title) return;
-    if (await refresh(workspaceApi.addIssue({ title, detail: String(form.get('detail') ?? '').trim() || 'Captured from the team workspace for discussion.', horizon: String(form.get('horizon') ?? 'short-term') as IssueHorizon, priority: Number(form.get('priority') ?? 1), teamId: activeTeam.id, raisedById: workspace.currentUser.id, ownerId: String(form.get('ownerId') ?? workspace.currentUser.id) }), 'Issue added to the list.')) setModal(null);
+    if (await refresh(workspaceApi.addIssue({ title, detail: String(form.get('detail') ?? '').trim() || 'Captured from the team workspace for discussion.', horizon: String(form.get('horizon') ?? 'short-term') as IssueHorizon, priority: Number(form.get('priority') ?? 1), teamId: activeTeam.id, quarterId: workspace.quarter.id, raisedById: workspace.currentUser.id, ownerId: String(form.get('ownerId') ?? workspace.currentUser.id) }), 'Issue added to the list.')) setModal(null);
   };
 
   const handleCreateRock = async (event: FormEvent<HTMLFormElement>) => {
@@ -702,7 +758,7 @@ function App() {
     const form = new FormData(event.currentTarget);
     const title = String(form.get('title') ?? '').trim();
     if (!title) return;
-    if (await refresh(workspaceApi.addRock({ title, description: String(form.get('description') ?? ''), notes: String(form.get('notes') ?? ''), ownerId: String(form.get('ownerId') ?? workspace.currentUser.id), dueDate: String(form.get('dueDate') ?? '2026-09-30'), priority: String(form.get('priority') ?? 'medium') as Rock['priority'], teamId: activeTeam.id }), 'Rock added to the quarter.')) setModal(null);
+    if (await refresh(workspaceApi.addRock({ title, description: String(form.get('description') ?? ''), notes: String(form.get('notes') ?? ''), ownerId: String(form.get('ownerId') ?? workspace.currentUser.id), dueDate: String(form.get('dueDate') ?? workspace.quarter.endDate), priority: String(form.get('priority') ?? 'medium') as Rock['priority'], teamId: activeTeam.id, quarterId: workspace.quarter.id }), `Rock added to ${workspace.quarter.label}.`)) setModal(null);
   };
 
   const handleCreateTask = async (event: FormEvent<HTMLFormElement>, rockId: string) => {
@@ -738,7 +794,9 @@ function App() {
         if (meetingClosed && currentMeeting.status === 'closed') return <MeetingRecapView workspace={workspace} team={activeTeam} meeting={currentMeeting} canRetry={canManageMeetingSummary(workspace, activeTeam.id)} onRequestSummary={() => requestMeetingSummary(activeTeam.id, currentMeeting.id, currentMeeting.version)} onCancelSummary={() => cancelMeetingSummary(activeTeam.id, currentMeeting.id, currentMeeting.version)} onBack={() => { setMeetingClosed(false); setRecapMeetingId(null); setSelectedMeetingId(null); navigate('meeting'); }} />;
         return <MeetingViewV2 {...common} agenda={activeAgenda} rocks={activeRocks} todos={activeTodos} issues={activeIssues} metrics={activeMetrics} scorecardResults={activeScorecardResults} headlines={activeHeadlines} meeting={currentMeeting} occurrences={sortedTeamMeetings} selectedMeetingId={currentMeeting.id} section={meetingSection} clockNow={clockNow} running={meetingRunning} closed={meetingClosed || currentMeeting.status === 'closed' || currentMeeting.status === 'skipped'} pendingTransfers={pendingForTeam} pendingSourceTransfers={pendingFromTeam} pendingMessages={pendingTeamMessages} canManageSchedule={!readOnly} onSelectMeeting={selectMeetingOccurrence} onStartMeeting={startMeetingOccurrence} onSkipMeeting={(meeting) => setModal({ type: 'meeting-skip', meetingId: meeting.id })} onRescheduleMeeting={(meeting) => setModal({ type: 'meeting-schedule', meetingId: meeting.id })} onGenerateMeetings={generateMeetings} onSelectSection={setMeetingSection} onTransitionSection={transitionMeetingSection} onToggleRunning={toggleMeetingRunning} onUpdateRock={updateRockStatus} onUpdateTodo={updateTodoStatus} onStartIssue={startIssue} onParkIssue={parkIssue} onOpenIssue={(issueId, meetingReadOnly) => setModal({ type: 'issue-detail', issueId, meetingId: currentMeeting.id, readOnly: meetingReadOnly })} onOpenTodo={(todoId, meetingReadOnly) => setModal({ type: 'todo-detail', todoId, readOnly: meetingReadOnly })} onSolveIssue={solveIssue} onOpenMessage={openMessage} onMarkMessageRead={markMessageRead} onCreateIssueFromMessage={(messageId) => setModal({ type: 'message-issue', messageId })} onCreateIssueFromScorecard={createScorecardIssue} onCreateIssueFromRock={createRockIssue} onSaveSectionNote={saveMeetingSectionNote} onSelectMeetingIssues={selectMeetingIssues} onSaveIssueNote={saveMeetingIssueNote} onReorderIssues={reorderMeetingIssues} onCreateHeadline={createHeadline} onAccept={acceptTransfer} onReject={(id) => setModal({ type: 'reject', transferId: id })} onCancel={cancelTransfer} onClose={closeMeeting} onEditSchedule={() => setModal({ type: 'meeting-schedule', meetingId: currentMeeting.id })} onNavigate={(view) => { if (view === 'scorecard') setScorecardWeekStartDate(meetingWeekStartDate); navigate(view); }} />;
       case 'meeting-history':
-        return <MeetingHistoryView workspace={workspace} teams={accessibleTeams} onRequestSummary={requestMeetingSummary} onCancelSummary={cancelMeetingSummary} onOpenMeeting={(teamId, meetingId) => { const target = workspace.meetings.find((meeting) => meeting.teamId === teamId && meeting.id === meetingId); const closed = target?.status === 'closed'; setSelectedTeamId(teamId); setSelectedMeetingId(meetingId); setMeetingClosed(closed); setRecapMeetingId(closed ? meetingId : null); navigate('meeting'); }} />;
+        return <MeetingHistoryView workspace={workspace} teams={accessibleTeams} team={activeTeam} onRequestSummary={requestMeetingSummary} onCancelSummary={cancelMeetingSummary} onOpenMeeting={(teamId, meetingId) => { const target = workspace.meetings.find((meeting) => meeting.teamId === teamId && meeting.id === meetingId); const closed = target?.status === 'closed'; setSelectedTeamId(teamId); setSelectedMeetingId(meetingId); setMeetingClosed(closed); setRecapMeetingId(closed ? meetingId : null); navigate('meeting'); }} onAddHistorical={() => setModal({ type: 'historical-meeting' })} />;
+      case 'vto':
+        return <VtoView workspace={workspace} team={activeTeam} rocks={teamRocks} issues={teamIssues} vto={workspace.vtos.find((candidate) => candidate.teamId === activeTeam.id) ?? null} versions={workspace.vtoVersions.filter((version) => version.teamId === activeTeam.id)} canEdit={canManageMeeting(workspace, activeTeam.id)} onSave={saveVto} onNavigate={navigate} />;
       case 'rocks':
         return <RocksView {...common} rocks={activeRocks} onUpdateRock={updateRockStatus} onEditRock={(rockId) => setModal({ type: 'edit-rock', rockId })} onAuditRock={(rockId) => openAudit('rock', rockId)} onAdd={() => setModal({ type: 'rock' })} onAddTask={(rockId) => setModal({ type: 'task', rockId })} onOpenTask={(taskId) => setModal({ type: 'task-detail', taskId })} onConvertTask={(taskId) => void refresh(workspaceApi.convertRockTaskToTodo(taskId), 'Task linked to a new To-Do.')} onUpdateTask={(taskId, input, expectedVersion) => void refresh(workspaceApi.updateRockTask(taskId, input, expectedVersion), 'Rock Task updated.')} />;
       case 'todos':
@@ -785,6 +843,7 @@ function App() {
           <div className="workspace-context">
             <div className="team-context"><span className="team-context-mark" style={{ backgroundColor: activeTeam.accent }}>{activeTeam.initials}</span><div><span className="context-label">Current workspace</span><strong>{activeTeam.name}</strong><small>{teamPath(workspace, activeTeam.id)} · {currentRole ? currentRole : 'Read-only company view'}</small></div></div>
             <label className="team-switcher"><span className="sr-only">Choose team</span><select value={accessibleTeamId} onChange={(event) => changeTeam(event.target.value)}>{availableTeams.map((team) => <option key={team.id} value={team.id}>{team.name}{!canWrite(workspace, team.id) ? ' · Read only' : ''}</option>)}</select><span className="select-arrow">⌄</span></label>
+            <QuarterSwitcher quarter={workspace.quarter} quarters={workspace.quarters} loading={quarterLoading} onChange={changeQuarter} />
           </div>
           {!hasWorkspaceAccess ? <NoWorkspaceAccess /> : readOnly && activeView !== 'company' && activeView !== 'admin' && <div className="read-only-banner"><span>◉</span><strong>Read-only workspace</strong><span>{currentRole === 'Viewer' ? 'Your Viewer membership allows review only.' : 'You can review this team because you are part of Leadership. Editing is limited to your assigned teams.'}</span></div>}
           {hasWorkspaceAccess && renderView()}
@@ -805,6 +864,7 @@ function App() {
       {modal?.type === 'meeting-schedule' && <MeetingScheduleModal team={activeTeam} meeting={workspace.meetings.find((meeting) => meeting.id === modal.meetingId)!} onClose={() => setModal(null)} onSubmit={(input) => updateMeetingSchedule(modal.meetingId, input)} />}
       {modal?.type === 'meeting-skip' && <MeetingSkipModal meeting={workspace.meetings.find((meeting) => meeting.id === modal.meetingId)!} onClose={() => setModal(null)} onSubmit={(reason, note) => submitSkipMeeting(modal.meetingId, reason, note)} />}
       {modal?.type === 'meeting-start' && <MeetingStartModal workspace={workspace} team={activeTeam} meeting={workspace.meetings.find((meeting) => meeting.id === modal.meetingId)!} onClose={() => setModal(null)} onSubmit={(facilitatorId) => submitStartMeeting(modal.meetingId, facilitatorId)} />}
+      {modal?.type === 'historical-meeting' && <HistoricalMeetingModal workspace={workspace} team={activeTeam} quarter={workspace.quarter} onClose={() => setModal(null)} onSubmit={createHistoricalMeeting} />}
       {modal?.type === 'team' && <TeamModal workspace={workspace} onClose={() => setModal(null)} onSubmit={async (input) => { if (await refresh(workspaceApi.createTeam(input), 'Team created.')) setModal(null); }} />}
       {modal?.type === 'edit-team' && <TeamEditModal workspace={workspace} team={workspace.teams.find((team) => team.id === modal.teamId)!} onClose={() => setModal(null)} onSubmit={async (input, expectedVersion) => { if (await refresh(workspaceApi.updateTeam(modal.teamId, input, expectedVersion), 'Team settings updated.')) setModal(null); }} />}
       {modal?.type === 'user' && <UserModal onClose={() => setModal(null)} onSubmit={async (input) => { if (await refresh(workspaceApi.createUser(input), isLocalPocBuild ? 'Local user created.' : 'Entra-linked user created.')) setModal(null); }} />}
@@ -834,6 +894,7 @@ type ModalState =
   | { type: 'meeting-schedule'; meetingId: string }
   | { type: 'meeting-skip'; meetingId: string }
   | { type: 'meeting-start'; meetingId: string }
+  | { type: 'historical-meeting' }
   | { type: 'message' }
   | { type: 'message-detail'; messageId: string }
   | { type: 'message-issue'; messageId: string }
@@ -869,6 +930,11 @@ function EnvironmentSwitcher({ session, onChange }: { session: EnvironmentSessio
   </div>;
 }
 
+function QuarterSwitcher({ quarter, quarters, loading, onChange }: { quarter: Quarter; quarters: Quarter[]; loading: boolean; onChange: (quarterId: string) => void }) {
+  const ordered = [...quarters].sort((left, right) => right.startDate.localeCompare(left.startDate));
+  return <label className="quarter-switcher"><span className="context-label">Planning quarter</span><span className="quarter-select-wrap"><select value={quarter.id} disabled={loading} onChange={(event) => onChange(event.target.value)} aria-label="Choose planning quarter">{ordered.map((item) => <option key={item.id} value={item.id}>{item.label} · {item.status === 'current' ? 'Current' : item.status === 'past' ? 'Past' : 'Upcoming'}</option>)}</select><span className="select-arrow">⌄</span></span></label>;
+}
+
 function Sidebar({ workspace, team, activeView, onView, open }: { workspace: Workspace; team: Team; activeView: ViewId; onView: (view: ViewId) => void; open: boolean }) {
   const items: Array<{ id: ViewId; label: string; icon: string; group?: string }> = [
     { id: 'overview', label: 'My week', icon: '⌂' },
@@ -876,6 +942,7 @@ function Sidebar({ workspace, team, activeView, onView, open }: { workspace: Wor
     { id: 'meeting-prep', label: 'Meeting prep', icon: '✎' },
     { id: 'meeting', label: 'Live L10', icon: '◷' },
     { id: 'meeting-history', label: 'Past meetings', icon: '▤' },
+    { id: 'vto', label: 'Vision / Traction', icon: '✦' },
     { id: 'rocks', label: 'Rocks', icon: '◇', group: 'WORKSPACE' },
     { id: 'todos', label: 'To-Dos', icon: '✓' },
     { id: 'issues', label: 'Issues', icon: '!', },
@@ -883,7 +950,9 @@ function Sidebar({ workspace, team, activeView, onView, open }: { workspace: Wor
     ...(meetingSectionsFor(team).some((section) => section.id === 'scorecard') ? [{ id: 'scorecard' as ViewId, label: 'Scorecard', icon: '◒' }] : []),
     ...(isPlatformAdmin(workspace) ? [{ id: 'admin' as ViewId, label: 'Admin', icon: '⚙', group: 'ORGANISATION' }] : []),
   ];
-  return <aside className={`sidebar ${open ? 'sidebar-open' : ''}`}><div className="brand-lockup"><img className="brand-logo brand-logo-dark" src="/branding/bremmar-dark.png" alt="Bremmar" /></div><div className="sidebar-rule" /><nav className="sidebar-nav">{items.map((item) => <div key={item.id}>{item.group && <div className="nav-group-label">{item.group}</div>}<button className={`nav-item ${activeView === item.id ? 'nav-active' : ''}`} onClick={() => onView(item.id)}><span className="glyph">{item.icon}</span><span>{item.label}</span>{item.id === 'issues' && <span className="nav-count">{workspace.issues.filter((issue) => issue.status !== 'solved' && issue.assignmentState !== 'redirected').length}</span>}</button></div>)}</nav><div className="sidebar-spacer" /><div className="quarter-mini"><div className="quarter-mini-top"><span className="nav-group-label">CURRENT QUARTER</span><span className="quarter-mini-badge">Q3</span></div><strong>{workspace.quarter.theme}</strong><div className="mini-progress"><span style={{ width: '67%' }} /></div><span className="quarter-mini-note">{workspace.quarter.daysRemaining} days remaining</span></div><div className="build-meta" aria-label={`Build ${buildInfo.number}, last built ${formatBuildTimestamp(buildInfo.builtAt)}`}><span>BUILD {buildInfo.number}</span><small>Last built {formatBuildTimestamp(buildInfo.builtAt)}</small></div><button className="sidebar-user" onClick={() => onView('profile')}><Avatar user={workspace.currentUser} size="md" /><span><strong>{workspace.currentUser.name}</strong><small>{workspace.currentUser.platformCapabilities.includes('PlatformAdmin') ? 'Platform Admin' : 'Team member'}</small></span><span className="sidebar-more">•••</span></button></aside>;
+  const quarterProgress = workspace.quarter.status === 'past' ? 100 : workspace.quarter.status === 'upcoming' ? 0 : Math.max(0, Math.min(100, 100 - (workspace.quarter.daysRemaining / Math.max(1, Math.round((new Date(workspace.quarter.endDate).getTime() - new Date(workspace.quarter.startDate).getTime()) / 86_400_000 + 1))) * 100));
+  const quarterNote = workspace.quarter.status === 'past' ? 'Historical view' : workspace.quarter.status === 'upcoming' ? `${workspace.quarter.daysUntilStart ?? 0} days until start` : `${workspace.quarter.daysRemaining} days remaining`;
+  return <aside className={`sidebar ${open ? 'sidebar-open' : ''}`}><div className="brand-lockup"><img className="brand-logo brand-logo-dark" src="/branding/bremmar-dark.png" alt="Bremmar" /></div><div className="sidebar-rule" /><nav className="sidebar-nav">{items.map((item) => <div key={item.id}>{item.group && <div className="nav-group-label">{item.group}</div>}<button className={`nav-item ${activeView === item.id ? 'nav-active' : ''}`} onClick={() => onView(item.id)}><span className="glyph">{item.icon}</span><span>{item.label}</span>{item.id === 'issues' && <span className="nav-count">{workspace.issues.filter((issue) => issue.status !== 'solved' && issue.assignmentState !== 'redirected').length}</span>}</button></div>)}</nav><div className="sidebar-spacer" /><div className="quarter-mini"><div className="quarter-mini-top"><span className="nav-group-label">WORKSPACE QUARTER</span><span className={`quarter-mini-badge quarter-mini-${workspace.quarter.status}`}>{workspace.quarter.label.replace(' ', '')}</span></div><strong>{workspace.quarter.theme}</strong><div className="mini-progress"><span style={{ width: `${quarterProgress}%` }} /></div><span className="quarter-mini-note">{quarterNote}</span></div><div className="build-meta" aria-label={`Build ${buildInfo.number}, last built ${formatBuildTimestamp(buildInfo.builtAt)}`}><span>BUILD {buildInfo.number}</span><small>Last built {formatBuildTimestamp(buildInfo.builtAt)}</small></div><button className="sidebar-user" onClick={() => onView('profile')}><Avatar user={workspace.currentUser} size="md" /><span><strong>{workspace.currentUser.name}</strong><small>{workspace.currentUser.platformCapabilities.includes('PlatformAdmin') ? 'Platform Admin' : 'Team member'}</small></span><span className="sidebar-more">•••</span></button></aside>;
 }
 
 function Avatar({ user, size = 'md' }: { user: User; size?: 'sm' | 'md' | 'lg' }) {
@@ -909,8 +978,8 @@ function ProgressBar({ value, tone = 'brand' }: { value: number; tone?: 'brand' 
   return <div className={`progress-track progress-${tone}`}><span style={{ width: `${Math.min(100, Math.max(0, value))}%` }} /></div>;
 }
 
-function Button({ children, variant = 'primary', onClick, type = 'button', disabled = false, className = '' }: { children: ReactNode; variant?: 'primary' | 'secondary' | 'quiet' | 'danger'; onClick?: () => void; type?: 'button' | 'submit'; disabled?: boolean; className?: string }) {
-  return <button type={type} className={`button button-${variant} ${className}`} onClick={onClick} disabled={disabled}>{children}</button>;
+function Button({ children, variant = 'primary', onClick, type = 'button', disabled = false, className = '', form }: { children: ReactNode; variant?: 'primary' | 'secondary' | 'quiet' | 'danger'; onClick?: () => void; type?: 'button' | 'submit'; disabled?: boolean; className?: string; form?: string }) {
+  return <button type={type} form={form} className={`button button-${variant} ${className}`} onClick={onClick} disabled={disabled}>{children}</button>;
 }
 
 function PageHeader({ eyebrow, title, description, actions }: { eyebrow: string; title: string; description?: string; actions?: ReactNode }) {
@@ -961,23 +1030,126 @@ function MeetingRecordSections({ workspace, meeting }: { workspace: Workspace; m
   return <div className="meeting-record-sections"><section className="card-surface record-section"><div className="recap-section-heading"><div><span className="section-kicker">MEETING TIMING</span><h2>Time spent in the room</h2></div></div><div className="timing-record-grid"><div><span>Overall meeting</span><strong>{meeting.durationSeconds !== undefined ? formatDuration(meeting.durationSeconds) : 'Not recorded'}</strong></div>{sectionDurations.map(([section, seconds]) => <div key={section}><span>{statusLabel(section)}</span><strong>{formatDuration(seconds ?? 0)}</strong></div>)}</div></section><section className="card-surface record-section"><div className="recap-section-heading"><div><span className="section-kicker">AGENDA NOTES</span><h2>Notes captured during the L10</h2></div></div>{agendaNotes.length ? agendaNotes.map(([section, note]) => <div className="record-note" key={section}><strong>{statusLabel(section)}</strong><RichTextViewer value={note} /></div>) : <EmptyState title="No agenda notes" detail="The team did not add section notes to this meeting." />}</section><section className="card-surface record-section"><div className="recap-section-heading"><div><span className="section-kicker">IDS RECORD</span><h2>Decisions and created commitments</h2></div></div>{meeting.idsNotes.length ? meeting.idsNotes.map((note) => <div className="record-note" key={note.id}><strong>{userFor(workspace, note.authorId).name} · {formatDate(note.createdAt)}</strong><RichTextViewer value={note.note} /></div>) : <p className="record-empty">No separate IDS notes were captured.</p>}{createdTodos.length > 0 && <div className="record-created-todos"><strong>Created To-Dos</strong><ul>{createdTodos.map((todo, index) => <li key={`${todo}-${index}`}>{todo}</li>)}</ul></div>}</section>{meeting.status === 'skipped' && <section className="card-surface record-section skip-detail"><div className="recap-section-heading"><div><span className="section-kicker">SKIP DETAILS</span><h2>Why this occurrence was skipped</h2></div></div><p><strong>{meeting.skipReason === 'public-holiday' ? 'Public holiday' : meeting.skipReason === 'annual-leave' ? 'Annual leave' : 'Other reason'}</strong>{meeting.skipNote ? ` · ${meeting.skipNote}` : ''}</p><small>{meeting.skippedAt ? `Recorded ${formatDate(meeting.skippedAt)} · ${formatTime(meeting.skippedAt)}` : 'Recorded in the meeting audit trail.'}</small></section>}</div>;
 }
 
-function MeetingHistoryView({ workspace, teams, onRequestSummary, onCancelSummary, onOpenMeeting }: { workspace: Workspace; teams: Team[]; onRequestSummary: (teamId: string, meetingId: string, expectedVersion?: number) => Promise<boolean>; onCancelSummary: (teamId: string, meetingId: string, expectedVersion?: number) => Promise<boolean>; onOpenMeeting: (teamId: string, meetingId: string) => void }) {
+function MeetingHistoryView({ workspace, teams, team: activeTeam, onRequestSummary, onCancelSummary, onOpenMeeting, onAddHistorical }: { workspace: Workspace; teams: Team[]; team: Team; onRequestSummary: (teamId: string, meetingId: string, expectedVersion?: number) => Promise<boolean>; onCancelSummary: (teamId: string, meetingId: string, expectedVersion?: number) => Promise<boolean>; onOpenMeeting: (teamId: string, meetingId: string) => void; onAddHistorical: () => void }) {
   const [filter, setFilter] = useState<'attention' | 'completed' | 'skipped' | 'all'>('completed');
   const [teamFilter, setTeamFilter] = useState('all');
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const items = useMemo(() => workspace.meetings.map((meeting) => { const team = teamFor(workspace, meeting.teamId); return { meeting, team, reviewStatus: meetingReviewStatus(meeting, team) }; }).filter(({ team, reviewStatus }) => teams.some((candidate) => candidate.id === team.id) && (teamFilter === 'all' || team.id === teamFilter) && (filter === 'attention' ? reviewStatus === 'missed' || reviewStatus === 'overdue' : filter === 'completed' ? reviewStatus === 'closed' : filter === 'skipped' ? reviewStatus === 'skipped' : true)).sort((left, right) => meetingScheduledAt(right.meeting) - meetingScheduledAt(left.meeting)), [filter, teamFilter, teams, workspace]);
+  const quarterMeetings = useMemo(() => workspace.meetings.filter((meeting) => quarterIdForRecord(meeting, workspace.quarters) === workspace.quarter.id), [workspace.meetings, workspace.quarters, workspace.quarter.id]);
+  const items = useMemo(() => quarterMeetings.map((meeting) => { const team = teamFor(workspace, meeting.teamId); return { meeting, team, reviewStatus: meetingReviewStatus(meeting, team) }; }).filter(({ team, reviewStatus }) => teams.some((candidate) => candidate.id === team.id) && (teamFilter === 'all' || team.id === teamFilter) && (filter === 'attention' ? reviewStatus === 'missed' || reviewStatus === 'overdue' : filter === 'completed' ? reviewStatus === 'closed' : filter === 'skipped' ? reviewStatus === 'skipped' : true)).sort((left, right) => meetingScheduledAt(right.meeting) - meetingScheduledAt(left.meeting)), [filter, teamFilter, teams, quarterMeetings, workspace]);
   const selected = items.find((item) => item.meeting.id === selectedId) ?? items[0];
   useEffect(() => {
     if (selected && selected.meeting.id !== selectedId) setSelectedId(selected.meeting.id);
     if (!selected) setSelectedId(null);
   }, [selected, selectedId]);
-  const counts = useMemo(() => ({ attention: workspace.meetings.filter((meeting) => { const team = teamFor(workspace, meeting.teamId); const status = meetingReviewStatus(meeting, team); return teams.some((candidate) => candidate.id === team.id) && (status === 'missed' || status === 'overdue'); }).length, completed: workspace.meetings.filter((meeting) => teams.some((team) => team.id === meeting.teamId) && meeting.status === 'closed').length, skipped: workspace.meetings.filter((meeting) => teams.some((team) => team.id === meeting.teamId) && meeting.status === 'skipped').length }), [teams, workspace]);
-  return <><PageHeader eyebrow="MEETING HISTORY" title="Review the room over time." description="Completed meetings are shown first. Switch filters when you need to review missed cadence or open records across the teams you can read." actions={<div className="history-filter-buttons">{([['attention', `Attention · ${counts.attention}`], ['completed', `Completed · ${counts.completed}`], ['skipped', `Skipped · ${counts.skipped}`], ['all', 'All records']] as const).map(([value, label]) => <button className={`history-filter-button ${filter === value ? 'history-filter-active' : ''}`} key={value} onClick={() => setFilter(value)}>{label}</button>)}</div>} /><div className="history-toolbar card-surface"><label>Team<select value={teamFilter} onChange={(event) => setTeamFilter(event.target.value)}><option value="all">All accessible teams</option>{teams.filter((team) => team.nodeType === 'operational').map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label><span>{items.length} {items.length === 1 ? 'meeting' : 'meetings'} in this view</span></div><div className="meeting-history-layout card-surface"><div className="history-list">{items.map(({ meeting, team, reviewStatus }) => <button className={`history-list-row ${selected?.meeting.id === meeting.id ? 'history-list-selected' : ''}`} key={meeting.id} onClick={() => setSelectedId(meeting.id)}><span className="history-list-date"><strong>{formatDate(meeting.scheduledDate ?? '')}</strong><small>{meeting.scheduledTime ?? team.meetingTime}</small></span><span className="history-list-copy"><strong>{team.shortName} L10</strong><small>{meeting.startedAt ? `Started ${formatTime(meeting.startedAt)}` : meeting.status === 'skipped' ? 'Skipped occurrence' : 'No start recorded'}</small></span><StatusPill status={reviewStatus} /></button>)}{items.length === 0 && <EmptyState title={filter === 'attention' ? 'No missed or overdue meetings' : 'No meetings in this view'} detail={filter === 'attention' ? 'The cadence is caught up across the teams you can review.' : 'Try another history filter or team.'} />}</div><div className="history-detail">{selected ? <MeetingHistoryDetail workspace={workspace} item={selected} canRetry={canManageMeetingSummary(workspace, selected.team.id)} onRequestSummary={() => onRequestSummary(selected.team.id, selected.meeting.id, selected.meeting.version)} onCancelSummary={() => onCancelSummary(selected.team.id, selected.meeting.id, selected.meeting.version)} onOpenMeeting={() => onOpenMeeting(selected.team.id, selected.meeting.id)} /> : <EmptyState title="Select a meeting" detail="Choose a meeting from the history list to review its record." />}</div></div></>;
+  const counts = useMemo(() => ({ attention: quarterMeetings.filter((meeting) => { const team = teamFor(workspace, meeting.teamId); const status = meetingReviewStatus(meeting, team); return teams.some((candidate) => candidate.id === team.id) && (status === 'missed' || status === 'overdue'); }).length, completed: quarterMeetings.filter((meeting) => teams.some((team) => team.id === meeting.teamId) && meeting.status === 'closed').length, skipped: quarterMeetings.filter((meeting) => teams.some((team) => team.id === meeting.teamId) && meeting.status === 'skipped').length }), [teams, quarterMeetings, workspace]);
+  const canAddHistorical = activeTeam.nodeType === 'operational' && workspace.quarter.status !== 'upcoming' && canWrite(workspace, activeTeam.id);
+  return <><PageHeader eyebrow={`${workspace.quarter.label.toUpperCase()} · MEETING HISTORY`} title="Review the room over time." description="Quarter history keeps Rocks, Issues, To-Dos, Headlines, and L10 records together. Select another quarter above to review or backfill it." actions={<div className="history-header-actions">{canAddHistorical && <Button variant="secondary" onClick={onAddHistorical}>Record historical L10</Button>}<div className="history-filter-buttons">{([['attention', `Attention · ${counts.attention}`], ['completed', `Completed · ${counts.completed}`], ['skipped', `Skipped · ${counts.skipped}`], ['all', 'All records']] as const).map(([value, label]) => <button className={`history-filter-button ${filter === value ? 'history-filter-active' : ''}`} key={value} onClick={() => setFilter(value)}>{label}</button>)}</div></div>} /><div className="history-toolbar card-surface"><label>Team<select value={teamFilter} onChange={(event) => setTeamFilter(event.target.value)}><option value="all">All accessible teams</option>{teams.filter((team) => team.nodeType === 'operational').map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label><span>{items.length} {items.length === 1 ? 'meeting' : 'meetings'} in {workspace.quarter.label}</span></div><div className="meeting-history-layout card-surface"><div className="history-list">{items.map(({ meeting, team, reviewStatus }) => <button className={`history-list-row ${selected?.meeting.id === meeting.id ? 'history-list-selected' : ''}`} key={meeting.id} onClick={() => setSelectedId(meeting.id)}><span className="history-list-date"><strong>{formatDate(meeting.scheduledDate ?? '')}</strong><small>{meeting.scheduledTime ?? team.meetingTime}</small></span><span className="history-list-copy"><strong>{team.shortName} L10</strong><small>{meeting.startedAt ? `Started ${formatTime(meeting.startedAt)}` : meeting.status === 'skipped' ? 'Skipped occurrence' : 'No start recorded'}</small></span><StatusPill status={reviewStatus} /></button>)}{items.length === 0 && <EmptyState title={filter === 'attention' ? 'No missed or overdue meetings' : 'No meetings in this view'} detail={filter === 'attention' ? 'The cadence is caught up across the teams you can review.' : 'Try another history filter or team.'} />}</div><div className="history-detail">{selected ? <MeetingHistoryDetail workspace={workspace} item={selected} canRetry={canManageMeetingSummary(workspace, selected.team.id)} onRequestSummary={() => onRequestSummary(selected.team.id, selected.meeting.id, selected.meeting.version)} onCancelSummary={() => onCancelSummary(selected.team.id, selected.meeting.id, selected.meeting.version)} onOpenMeeting={() => onOpenMeeting(selected.team.id, selected.meeting.id)} /> : <EmptyState title="Select a meeting" detail="Choose a meeting from the history list to review its record." />}</div></div></>;
 }
 
 function MeetingHistoryDetail({ workspace, item, canRetry, onRequestSummary, onCancelSummary, onOpenMeeting }: { workspace: Workspace; item: { meeting: Workspace['meetings'][number]; team: Team; reviewStatus: string }; canRetry: boolean; onRequestSummary: () => Promise<boolean>; onCancelSummary: () => Promise<boolean>; onOpenMeeting: () => void }) {
   const { meeting, team, reviewStatus } = item;
   return <><div className="history-detail-head"><div><span className="section-kicker">{team.name.toUpperCase()}</span><h2>{meeting.label}</h2><p>{meetingDateTimeLabel(meeting)}</p></div><div><StatusPill status={reviewStatus} /><Button variant="secondary" onClick={onOpenMeeting}>Open record</Button></div></div><div className="history-detail-meta"><span><strong>Facilitator</strong>{meeting.facilitatorId ? userFor(workspace, meeting.facilitatorId).name : 'Not recorded'}</span><span><strong>Started</strong>{meeting.startedAt ? `${formatDate(meeting.startedAt)} · ${formatTime(meeting.startedAt)}` : 'Not started'}</span><span><strong>Closed</strong>{meeting.closedAt ? `${formatDate(meeting.closedAt)} · ${formatTime(meeting.closedAt)}` : 'Still open'}</span><span><strong>Duration</strong>{meeting.durationSeconds !== undefined ? formatDuration(meeting.durationSeconds) : 'Not recorded'}</span><span><strong>Attendance</strong>{meeting.attendeeIds.length} invited</span></div>{meeting.status === 'skipped' && <div className="history-skip-callout"><strong>Skipped: {meeting.skipReason === 'public-holiday' ? 'Public holiday' : meeting.skipReason === 'annual-leave' ? 'Annual leave' : 'Other'}</strong><span>{meeting.skipNote || 'No note was added.'}</span></div>}{meeting.status === 'closed' ? <><section className="history-manual-recap"><span className="section-kicker">MANUAL RECAP</span><h3>{meeting.lastRating || '—'}/10 rating</h3><p>{meeting.recap || 'No manual recap was entered.'}</p>{meeting.attendeeRatings && meeting.attendeeRatings.length > 0 && <div className="history-attendee-ratings"><span className="section-kicker">INDIVIDUAL RATINGS</span>{meeting.attendeeRatings.map((entry) => <span key={entry.attendeeId}>{userFor(workspace, entry.attendeeId).name}: <strong>{entry.rating}/10</strong></span>)}</div>}</section><MeetingAiSummaryPanel meeting={meeting} canRetry={canRetry} onRequestSummary={onRequestSummary} onCancelSummary={onCancelSummary} /></> : <div className="history-open-note"><strong>{reviewStatus === 'missed' ? 'This meeting was missed.' : reviewStatus === 'overdue' ? 'This meeting is overdue.' : 'This occurrence is not complete yet.'}</strong><p>Open Live L10 to resume the meeting or manage the occurrence.</p></div>}<MeetingRecordSections workspace={workspace} meeting={meeting} /></>;
+}
+
+function vtoInputFor(vto: Vto | null, quarter: Quarter): VtoSaveInput {
+  return {
+    coreValues: vto?.coreValues?.length ? [...vto.coreValues] : ['', '', ''],
+    coreFocusPurpose: vto?.coreFocusPurpose ?? '',
+    coreFocusNiche: vto?.coreFocusNiche ?? '',
+    tenYearTarget: vto?.tenYearTarget ?? '',
+    marketingStrategy: {
+      targetMarket: vto?.marketingStrategy?.targetMarket ?? '',
+      uniques: vto?.marketingStrategy?.uniques?.length ? [...vto.marketingStrategy.uniques] : ['', '', ''],
+      provenProcess: vto?.marketingStrategy?.provenProcess ?? '',
+      guarantee: vto?.marketingStrategy?.guarantee ?? '',
+    },
+    threeYearPicture: {
+      targetDate: vto?.threeYearPicture?.targetDate ?? '',
+      revenue: vto?.threeYearPicture?.revenue ?? '',
+      profit: vto?.threeYearPicture?.profit ?? '',
+      headcount: vto?.threeYearPicture?.headcount ?? '',
+      description: vto?.threeYearPicture?.description ?? '',
+    },
+    oneYearPlan: {
+      year: vto?.oneYearPlan?.year ?? (Number(quarter.label.slice(-4)) || new Date().getUTCFullYear()),
+      revenue: vto?.oneYearPlan?.revenue ?? '',
+      profit: vto?.oneYearPlan?.profit ?? '',
+      measurables: vto?.oneYearPlan?.measurables?.length ? [...vto.oneYearPlan.measurables] : [''],
+      goals: vto?.oneYearPlan?.goals?.length ? [...vto.oneYearPlan.goals] : [''],
+    },
+    quarterlyRockIds: [...(vto?.quarterlyRockIds ?? [])],
+    issueIds: [...(vto?.issueIds ?? [])],
+    effectiveDate: vto?.effectiveDate ?? quarter.startDate,
+    changeSummary: vto?.changeSummary ?? '',
+  };
+}
+
+function VtoView({ workspace, team, rocks, issues, vto, versions, canEdit, onSave, onNavigate }: { workspace: Workspace; team: Team; rocks: Rock[]; issues: Issue[]; vto: Vto | null; versions: Workspace['vtoVersions']; canEdit: boolean; onSave: (input: VtoSaveInput) => Promise<boolean>; onNavigate: (view: ViewId) => void }) {
+  const [draft, setDraft] = useState<VtoSaveInput>(() => vtoInputFor(vto, workspace.quarter));
+  const [saving, setSaving] = useState(false);
+  const [previewVersionId, setPreviewVersionId] = useState<string | null>(null);
+  useEffect(() => {
+    setDraft(vtoInputFor(vto, workspace.quarter));
+    setPreviewVersionId(null);
+  }, [vto?.id, vto?.versionNumber, workspace.quarter.id]);
+
+  const setText = (field: 'coreFocusPurpose' | 'coreFocusNiche' | 'tenYearTarget' | 'effectiveDate' | 'changeSummary', value: string) => setDraft((current) => ({ ...current, [field]: value }));
+  const setListItem = (field: 'coreValues' | 'measurables' | 'goals', index: number, value: string) => setDraft((current) => ({ ...current, ...(field === 'coreValues' ? { coreValues: current.coreValues.map((item, itemIndex) => itemIndex === index ? value : item) } : { oneYearPlan: { ...current.oneYearPlan, [field]: current.oneYearPlan[field].map((item, itemIndex) => itemIndex === index ? value : item) } }) }));
+  const setMarketing = (field: 'targetMarket' | 'provenProcess' | 'guarantee', value: string) => setDraft((current) => ({ ...current, marketingStrategy: { ...current.marketingStrategy, [field]: value } }));
+  const setUnique = (index: number, value: string) => setDraft((current) => ({ ...current, marketingStrategy: { ...current.marketingStrategy, uniques: current.marketingStrategy.uniques.map((item, itemIndex) => itemIndex === index ? value : item) } }));
+  const setPicture = (field: keyof VtoSaveInput['threeYearPicture'], value: string) => setDraft((current) => ({ ...current, threeYearPicture: { ...current.threeYearPicture, [field]: value } }));
+  const setPlan = (field: 'year' | 'revenue' | 'profit', value: string) => setDraft((current) => ({ ...current, oneYearPlan: { ...current.oneYearPlan, [field]: field === 'year' ? Number(value) : value } }));
+  const addListItem = (field: 'coreValues' | 'measurables' | 'goals') => setDraft((current) => field === 'coreValues' ? { ...current, coreValues: [...current.coreValues, ''] } : { ...current, oneYearPlan: { ...current.oneYearPlan, [field]: [...current.oneYearPlan[field], ''] } });
+  const removeListItem = (field: 'coreValues' | 'measurables' | 'goals', index: number) => setDraft((current) => field === 'coreValues' ? { ...current, coreValues: current.coreValues.filter((_, itemIndex) => itemIndex !== index) } : { ...current, oneYearPlan: { ...current.oneYearPlan, [field]: current.oneYearPlan[field].filter((_, itemIndex) => itemIndex !== index) } });
+  const toggleRock = (rockId: string) => setDraft((current) => current.quarterlyRockIds.includes(rockId)
+    ? { ...current, quarterlyRockIds: current.quarterlyRockIds.filter((id) => id !== rockId) }
+    : current.quarterlyRockIds.length >= 7 ? current : { ...current, quarterlyRockIds: [...current.quarterlyRockIds, rockId] });
+  const toggleIssue = (issueId: string) => setDraft((current) => ({ ...current, issueIds: current.issueIds.includes(issueId) ? current.issueIds.filter((id) => id !== issueId) : [...current.issueIds, issueId] }));
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!canEdit || saving) return;
+    setSaving(true);
+    try {
+      await onSave(draft);
+    } finally {
+      setSaving(false);
+    }
+  };
+  const snapshots = [...versions].sort((left, right) => right.versionNumber - left.versionNumber);
+  const preview = snapshots.find((version) => version.id === previewVersionId);
+  const quarterLabelFor = (quarterId?: string) => workspace.quarters.find((quarter) => quarter.id === quarterId)?.label ?? 'Unassigned quarter';
+  const vtoRockOptions = rocks.slice().sort((left, right) => `${right.quarterId}-${right.title}`.localeCompare(`${left.quarterId}-${left.title}`));
+  const vtoIssueOptions = issues.filter((issue) => issue.assignmentState !== 'redirected').sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  return <>
+    <PageHeader eyebrow={`${team.name.toUpperCase()} · EOS V/TO`} title="Make the vision visible, then turn it into traction." description="This V/TO belongs to the team, not a single quarter. Save a new version when the team refreshes its long-term direction or plans the next 90 days." actions={<div className="vto-header-actions"><Button variant="secondary" onClick={() => onNavigate('rocks')}>Plan Rocks</Button>{canEdit && <Button type="submit" form="vto-form" disabled={saving}>{saving ? 'Saving…' : 'Save new version →'}</Button>}</div>} />
+    <div className="vto-layout">
+      <form id="vto-form" className="vto-editor" onSubmit={submit}>
+        {!canEdit && <div className="read-only-banner"><span>◉</span><strong>V/TO is read-only</strong><span>Only a TeamLead or OrgAdmin can create a new version. You can still review the current direction and history.</span></div>}
+        <fieldset className="vto-fieldset" disabled={!canEdit}>
+          <section className="card-surface vto-section"><div className="vto-section-heading"><div><span className="section-kicker">1 · CORE VALUES</span><h2>How this team behaves</h2></div><small>Keep these stable and memorable.</small></div><div className="vto-list-editor">{draft.coreValues.map((value, index) => <div className="vto-list-row" key={`core-${index}`}><span>{index + 1}</span><input value={value} onChange={(event) => setListItem('coreValues', index, event.target.value)} placeholder="A value the team lives by" required />{draft.coreValues.length > 3 && <button type="button" className="vto-remove" onClick={() => removeListItem('coreValues', index)} aria-label="Remove core value">×</button>}</div>)}<button type="button" className="text-button" onClick={() => addListItem('coreValues')} disabled={draft.coreValues.length >= 7}>+ Add value</button></div></section>
+          <section className="card-surface vto-section"><div className="vto-section-heading"><div><span className="section-kicker">2 · CORE FOCUS</span><h2>Purpose and niche</h2></div></div><div className="form-grid"><label>Purpose / cause / passion<textarea value={draft.coreFocusPurpose} onChange={(event) => setText('coreFocusPurpose', event.target.value)} rows={3} required placeholder="Why does this team exist?" /></label><label>Niche<textarea value={draft.coreFocusNiche} onChange={(event) => setText('coreFocusNiche', event.target.value)} rows={3} required placeholder="What does this team do uniquely well?" /></label></div></section>
+          <section className="card-surface vto-section"><div className="vto-section-heading"><div><span className="section-kicker">3 · 10-YEAR TARGET</span><h2>The long horizon</h2></div></div><label>Target statement<textarea value={draft.tenYearTarget} onChange={(event) => setText('tenYearTarget', event.target.value)} rows={3} required placeholder="What is the compelling long-range target?" /></label></section>
+          <section className="card-surface vto-section"><div className="vto-section-heading"><div><span className="section-kicker">4 · MARKETING STRATEGY</span><h2>Who you serve and why you win</h2></div></div><label>Target market / The List<textarea value={draft.marketingStrategy.targetMarket} onChange={(event) => setMarketing('targetMarket', event.target.value)} rows={2} required placeholder="Who is the ideal customer or internal partner?" /></label><div className="vto-subheading"><strong>Three Uniques</strong><small>Why should this market choose this team?</small></div><div className="form-grid vto-three-columns">{draft.marketingStrategy.uniques.map((value, index) => <label key={`unique-${index}`}>Unique {index + 1}<input value={value} onChange={(event) => setUnique(index, event.target.value)} required /></label>)}</div><div className="form-grid"><label>Proven process<textarea value={draft.marketingStrategy.provenProcess} onChange={(event) => setMarketing('provenProcess', event.target.value)} rows={3} required placeholder="Name the repeatable process that delivers the promise." /></label><label>Guarantee<textarea value={draft.marketingStrategy.guarantee} onChange={(event) => setMarketing('guarantee', event.target.value)} rows={3} required placeholder="What can this team confidently guarantee?" /></label></div></section>
+          <section className="card-surface vto-section"><div className="vto-section-heading"><div><span className="section-kicker">5 · 3-YEAR PICTURE</span><h2>Make the future tangible</h2></div></div><div className="form-grid vto-four-columns"><label>Target date<input type="date" value={draft.threeYearPicture.targetDate} onChange={(event) => setPicture('targetDate', event.target.value)} required /></label><label>Revenue / value<input value={draft.threeYearPicture.revenue} onChange={(event) => setPicture('revenue', event.target.value)} required /></label><label>Profit / margin<input value={draft.threeYearPicture.profit} onChange={(event) => setPicture('profit', event.target.value)} required /></label><label>Headcount / capacity<input value={draft.threeYearPicture.headcount} onChange={(event) => setPicture('headcount', event.target.value)} required /></label></div><label>Vivid description<textarea value={draft.threeYearPicture.description} onChange={(event) => setPicture('description', event.target.value)} rows={4} required placeholder="What will be visibly different three years from now?" /></label></section>
+          <section className="card-surface vto-section"><div className="vto-section-heading"><div><span className="section-kicker">6 · 1-YEAR PLAN</span><h2>What must be true this year</h2></div></div><div className="form-grid vto-three-columns"><label>Plan year<input type="number" min="2000" max="9999" value={draft.oneYearPlan.year} onChange={(event) => setPlan('year', event.target.value)} required /></label><label>Revenue / value<input value={draft.oneYearPlan.revenue} onChange={(event) => setPlan('revenue', event.target.value)} required /></label><label>Profit / margin<input value={draft.oneYearPlan.profit} onChange={(event) => setPlan('profit', event.target.value)} required /></label></div><div className="form-grid"><VtoListEditor title="Measurables" values={draft.oneYearPlan.measurables} minimum={1} maximum={7} onChange={(index, value) => setListItem('measurables', index, value)} onAdd={() => addListItem('measurables')} onRemove={(index) => removeListItem('measurables', index)} /><VtoListEditor title="Annual goals" values={draft.oneYearPlan.goals} minimum={1} maximum={7} onChange={(index, value) => setListItem('goals', index, value)} onAdd={() => addListItem('goals')} onRemove={(index) => removeListItem('goals', index)} /></div></section>
+          <section className="card-surface vto-section"><div className="vto-section-heading"><div><span className="section-kicker">7 · QUARTERLY ROCKS</span><h2>Choose the next 90-day priorities</h2></div><small>{draft.quarterlyRockIds.length}/7 selected. Use the quarter switcher and Plan Rocks to add the upcoming quarter first.</small></div><div className="vto-reference-list">{vtoRockOptions.map((rock) => <label className="vto-reference-row" key={rock.id}><input type="checkbox" checked={draft.quarterlyRockIds.includes(rock.id)} disabled={!draft.quarterlyRockIds.includes(rock.id) && draft.quarterlyRockIds.length >= 7} onChange={() => toggleRock(rock.id)} /><span><strong>{rock.title}</strong><small>{quarterLabelFor(rock.quarterId)} · {statusLabel(rock.status)} · {userFor(workspace, rock.ownerId).name}</small></span></label>)}{vtoRockOptions.length === 0 && <EmptyState title="No Rocks yet" detail="Switch to the upcoming quarter, open Plan Rocks, and add the team’s priorities." />}</div></section>
+          <section className="card-surface vto-section"><div className="vto-section-heading"><div><span className="section-kicker">8 · ISSUES LIST</span><h2>Keep obstacles visible</h2></div><small>Capture the problems, decisions, opportunities, and ideas that need attention; short-term items can still flow through weekly IDS.</small></div><div className="vto-reference-list">{vtoIssueOptions.map((issue) => <label className="vto-reference-row" key={issue.id}><input type="checkbox" checked={draft.issueIds.includes(issue.id)} onChange={() => toggleIssue(issue.id)} /><span><strong>{issue.title}</strong><small>{statusLabel(issue.status)} · {issue.horizon} · {ageLabel(issue)} · P{issue.priority}</small></span></label>)}{vtoIssueOptions.length === 0 && <p className="record-empty">No Issues are recorded for this team.</p>}</div></section>
+          <section className="card-surface vto-section"><div className="vto-section-heading"><div><span className="section-kicker">VERSION DETAILS</span><h2>Explain this planning decision</h2></div></div><div className="form-grid"><label>Effective date<input type="date" value={draft.effectiveDate} onChange={(event) => setText('effectiveDate', event.target.value)} required /></label><label>Change summary<textarea value={draft.changeSummary} onChange={(event) => setText('changeSummary', event.target.value)} rows={2} required placeholder="What changed since the prior version?" /></label></div></section>
+        </fieldset>
+      </form>
+      <aside className="vto-history-column"><section className="card-surface vto-history"><div className="vto-section-heading"><div><span className="section-kicker">VERSION HISTORY</span><h2>{versions.length} saved versions</h2></div></div>{snapshots.length ? <div className="vto-version-list">{snapshots.map((version) => <button type="button" className={`vto-version-row ${previewVersionId === version.id ? 'vto-version-selected' : ''}`} key={version.id} onClick={() => setPreviewVersionId(version.id)}><span className="vto-version-number">v{version.versionNumber}</span><span><strong>{formatDate(version.effectiveDate)}</strong><small>{version.changeSummary}</small><small>Saved by {userFor(workspace, version.savedBy).name}</small></span></button>)}</div> : <p className="record-empty">The first V/TO save will create version history.</p>}</section>{preview && <VtoSnapshotSummary workspace={workspace} version={preview} />}</aside>
+    </div>
+  </>;
+}
+
+function VtoListEditor({ title, values, minimum, maximum, onChange, onAdd, onRemove }: { title: string; values: string[]; minimum: number; maximum: number; onChange: (index: number, value: string) => void; onAdd: () => void; onRemove: (index: number) => void }) {
+  return <div className="vto-list-field"><div className="vto-subheading"><strong>{title}</strong><small>{values.length}/{maximum}</small></div>{values.map((value, index) => <div className="vto-list-row" key={`${title}-${index}`}><span>{index + 1}</span><input value={value} onChange={(event) => onChange(index, event.target.value)} required placeholder={`Add ${title.toLowerCase().replace(/s$/, '')}`} />{values.length > minimum && <button type="button" className="vto-remove" onClick={() => onRemove(index)} aria-label={`Remove ${title} entry`}>×</button>}</div>)}<button type="button" className="text-button" onClick={onAdd} disabled={values.length >= maximum}>+ Add {title.toLowerCase().replace(/s$/, '')}</button></div>;
+}
+
+function VtoSnapshotSummary({ workspace, version }: { workspace: Workspace; version: Workspace['vtoVersions'][number] }) {
+  const rockNames = version.quarterlyRockIds.map((id) => workspace.rocks.find((rock) => rock.id === id)?.title ?? id);
+  const issueNames = version.issueIds.map((id) => workspace.issues.find((issue) => issue.id === id)?.title ?? id);
+  return <section className="card-surface vto-snapshot"><div className="vto-section-heading"><div><span className="section-kicker">SNAPSHOT PREVIEW</span><h2>Version {version.versionNumber}</h2></div></div><p className="snapshot-summary">{version.changeSummary}</p><div className="snapshot-grid"><div><span>Core focus</span><strong>{version.coreFocusPurpose}</strong></div><div><span>10-year target</span><strong>{version.tenYearTarget}</strong></div><div><span>Quarterly Rocks</span><strong>{rockNames.length ? rockNames.join(' · ') : 'None linked'}</strong></div><div><span>Issues List</span><strong>{issueNames.length ? issueNames.join(' · ') : 'None linked'}</strong></div></div><small className="form-help">Effective {formatDate(version.effectiveDate)} · Saved by {userFor(workspace, version.savedBy).name}</small></section>;
 }
 
 function MeetingStartModal({ workspace, team, meeting, onClose, onSubmit }: { workspace: Workspace; team: Team; meeting: Workspace['meetings'][number]; onClose: () => void; onSubmit: (facilitatorId?: string) => void }) {
@@ -996,6 +1168,32 @@ function MeetingStartModal({ workspace, team, meeting, onClose, onSubmit }: { wo
       <ModalActions onClose={onClose} submitLabel={meeting.status === 'in-progress' ? canChangeFacilitator ? 'Save facilitator' : 'Resume meeting' : 'Start meeting'} />
     </form>
   </ModalShell>;
+}
+
+function HistoricalMeetingModal({ workspace, team, quarter, onClose, onSubmit }: { workspace: Workspace; team: Team; quarter: Quarter; onClose: () => void; onSubmit: (input: HistoricalMeetingInput) => Promise<void> }) {
+  const teamUsers = workspace.memberships
+    .filter((membership) => membership.teamId === team.id && membership.active)
+    .map((membership) => workspace.users.find((user) => user.id === membership.userId))
+    .filter((user): user is User => Boolean(user && user.active));
+  const defaultDate = quarter.status === 'past' ? quarter.endDate : workspaceToday;
+  const [attendeeIds, setAttendeeIds] = useState(() => teamUsers.map((user) => user.id));
+  const [facilitatorId, setFacilitatorId] = useState(() => teamUsers.find((user) => user.id === workspace.currentUser.id)?.id ?? teamUsers[0]?.id ?? '');
+  const [saving, setSaving] = useState(false);
+  const toggleAttendee = (userId: string) => setAttendeeIds((current) => current.includes(userId) ? current.filter((id) => id !== userId) : [...current, userId]);
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (saving) return;
+    const form = new FormData(event.currentTarget);
+    const ratingValue = String(form.get('rating') ?? '').trim();
+    setSaving(true);
+    try {
+      await onSubmit({ quarterId: quarter.id, scheduledDate: String(form.get('scheduledDate') ?? ''), scheduledTime: String(form.get('scheduledTime') ?? ''), facilitatorId, attendeeIds, rating: ratingValue ? Number(ratingValue) : undefined, recap: String(form.get('recap') ?? '').trim() || undefined, idsNote: String(form.get('idsNote') ?? '').trim() || undefined });
+    } finally {
+      setSaving(false);
+    }
+  };
+  const maxDate = quarter.status === 'past' ? quarter.endDate : workspaceToday;
+  return <ModalShell title="Record a historical L10" description={`Add a completed ${team.name} meeting to ${quarter.label}. This creates a closed, auditable meeting record without reopening the live cadence.`} onClose={onClose} className="modal-card-wide"><form className="modal-form" onSubmit={submit}><div className="form-grid"><label>Meeting date<input name="scheduledDate" type="date" defaultValue={defaultDate} min={quarter.startDate} max={maxDate} required /></label><label>Meeting time<input name="scheduledTime" defaultValue={team.meetingTime} placeholder="e.g. 9:00 AM" required /></label></div><label>Facilitator<select value={facilitatorId} onChange={(event) => setFacilitatorId(event.target.value)} required>{teamUsers.map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label><fieldset className="modal-fieldset"><legend className="form-legend">Attendees</legend><div className="attendee-picker">{teamUsers.map((user) => <label className="checkbox-label" key={user.id}><input type="checkbox" checked={attendeeIds.includes(user.id)} onChange={() => toggleAttendee(user.id)} />{user.name}</label>)}</div></fieldset><div className="form-grid"><label>Meeting rating <span className="form-label-note">optional</span><input name="rating" type="number" min="0.5" max="10" step="0.5" placeholder="e.g. 8.5" /></label><div className="historical-form-note"><span className="section-kicker">RECORD TYPE</span><strong>Completed / historical</strong><small>AI recap is not generated for backfilled records.</small></div></div><label>Manual recap <span className="form-label-note">optional</span><textarea name="recap" rows={4} placeholder="What should the team remember from this meeting?" /></label><label>IDS notes <span className="form-label-note">optional</span><textarea name="idsNote" rows={4} placeholder="Record decisions, solved Issues, or items carried forward." /></label><small className="form-help">The meeting date must fall within {quarter.label}. Use the quarter selector above to backfill a different period.</small><div className="modal-actions"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button type="submit" disabled={saving || !facilitatorId || attendeeIds.length === 0}>{saving ? 'Saving…' : 'Record meeting'}</Button></div></form></ModalShell>;
 }
 
 function TransferNotice({ workspace, teamId, pendingTransfers, pendingSourceTransfers, editable, onAccept, onReject, onCancel }: { workspace: Workspace; teamId: string; pendingTransfers: IssueTransfer[]; pendingSourceTransfers: IssueTransfer[]; editable: boolean; onAccept: (transferId: string) => void; onReject: (transferId: string) => void; onCancel: (transferId: string) => void }) {
@@ -1851,7 +2049,7 @@ function UserOptions({ workspace, name, defaultValue }: { workspace: Workspace; 
 }
 
 function TodoModal({ workspace, team, onClose, onSubmit }: { workspace: Workspace; team: Team; onClose: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
-  return <ModalShell title="Add a To-Do" description={`Create a clear seven-day commitment for ${team.name}.`} onClose={onClose} className="modal-card-wide"><form className="modal-form" onSubmit={onSubmit}><label>Commitment<input name="title" placeholder="What will be done?" autoFocus required /></label><label>Notes<RichTextEditor name="notes" value="" disabled={false} placeholder="Add useful context, decisions, or the next step." /></label><label>Owner<UserOptions workspace={workspace} name="ownerId" /></label><label>Due date<input name="dueDate" type="date" defaultValue={workspaceToday} required /></label><ModalActions onClose={onClose} submitLabel="Add To-Do" /></form></ModalShell>;
+  return <ModalShell title="Add a To-Do" description={`Create a clear seven-day commitment for ${team.name} in ${workspace.quarter.label}.`} onClose={onClose} className="modal-card-wide"><form className="modal-form" onSubmit={onSubmit}><label>Commitment<input name="title" placeholder="What will be done?" autoFocus required /></label><label>Notes<RichTextEditor name="notes" value="" disabled={false} placeholder="Add useful context, decisions, or the next step." /></label><label>Owner<UserOptions workspace={workspace} name="ownerId" /></label><label>Due date<input name="dueDate" type="date" min={workspace.quarter.startDate} max={workspace.quarter.endDate} defaultValue={workspace.quarter.status === 'past' ? workspace.quarter.endDate : workspaceToday} required /></label><small className="form-help">This To-Do will be associated with {workspace.quarter.label}. Use the quarter selector to enter a historical commitment.</small><ModalActions onClose={onClose} submitLabel="Add To-Do" /></form></ModalShell>;
 }
 
 function ScorecardMetricModal({ workspace, team, metric, onClose, onSubmit }: { workspace: Workspace; team: Team; metric?: ScorecardMetric; onClose: () => void; onSubmit: (input: Pick<ScorecardMetric, 'label' | 'target' | 'unit' | 'ownerId'>) => void }) {
@@ -1879,7 +2077,7 @@ function ResolveIssueModal({ issue, onClose, onSubmit }: { issue: Issue; onClose
 }
 
 function IssueModal({ workspace, onClose, onSubmit }: { workspace: Workspace; onClose: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
-  return <ModalShell title="Capture an Issue" description="Name the problem, decision, idea, or opportunity. The team can solve short-term Issues in IDS when the time is right." onClose={onClose} className="modal-card-wide"><form className="modal-form" onSubmit={onSubmit}><label>Issue title<input name="title" placeholder="What needs solving?" autoFocus required /></label><label>Original Context<RichTextEditor name="detail" value="" disabled={false} placeholder="Add enough context for the team to recognise the Issue." /></label><div className="form-grid"><label>Horizon<select name="horizon" defaultValue="short-term"><option value="short-term">Short-term · feed L10</option><option value="long-term">Long-term · future planning</option></select></label><label>Priority<select name="priority" defaultValue="1"><option value="1">1 · highest</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5 · lowest</option></select></label></div><label>Owner<UserOptions workspace={workspace} name="ownerId" /></label><ModalActions onClose={onClose} submitLabel="Add to Issues" /></form></ModalShell>;
+  return <ModalShell title="Capture an Issue" description={`Name the problem, decision, idea, or opportunity for ${workspace.quarter.label}. The team can solve short-term Issues in IDS when the time is right.`} onClose={onClose} className="modal-card-wide"><form className="modal-form" onSubmit={onSubmit}><label>Issue title<input name="title" placeholder="What needs solving?" autoFocus required /></label><label>Original Context<RichTextEditor name="detail" value="" disabled={false} placeholder="Add enough context for the team to recognise the Issue." /></label><div className="form-grid"><label>Horizon<select name="horizon" defaultValue="short-term"><option value="short-term">Short-term · feed L10</option><option value="long-term">Long-term · future planning</option></select></label><label>Priority<select name="priority" defaultValue="1"><option value="1">1 · highest</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5 · lowest</option></select></label></div><label>Owner<UserOptions workspace={workspace} name="ownerId" /></label><ModalActions onClose={onClose} submitLabel="Add to Issues" /></form></ModalShell>;
 }
 
 function RockEditModal({ workspace, rock, onClose, onAudit, onSubmit }: { workspace: Workspace; rock: Rock; onClose: () => void; onAudit: () => void; onSubmit: (input: Partial<Pick<Rock, 'title' | 'description' | 'notes' | 'ownerId' | 'dueDate' | 'priority'>>) => void }) {
@@ -1898,7 +2096,7 @@ function IssueEditModal({ workspace, issue, meetingId, readOnly, onClose, onAudi
 }
 
 function RockModal({ workspace, onClose, onSubmit }: { workspace: Workspace; onClose: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
-  return <ModalShell title="Add a Rock" description="Define one important quarterly outcome with one accountable owner." onClose={onClose} className="modal-card-wide"><form className="modal-form" onSubmit={onSubmit}><label>Rock title<input name="title" placeholder="What must be true by quarter end?" autoFocus required /></label><label>Description<textarea name="description" rows={3} placeholder="Describe the outcome." /></label><label>Notes<RichTextEditor name="notes" value="" disabled={false} placeholder="Add working notes or guardrails." /></label><label>Owner<UserOptions workspace={workspace} name="ownerId" /></label><div className="form-grid"><label>Priority<select name="priority" defaultValue="medium"><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label><label>Due date<input name="dueDate" type="date" defaultValue="2026-09-30" required /></label></div><ModalActions onClose={onClose} submitLabel="Add Rock" /></form></ModalShell>;
+  return <ModalShell title="Add a Rock" description={`Define one important quarterly outcome for ${workspace.quarter.label} with one accountable owner.`} onClose={onClose} className="modal-card-wide"><form className="modal-form" onSubmit={onSubmit}><label>Rock title<input name="title" placeholder="What must be true by quarter end?" autoFocus required /></label><label>Description<textarea name="description" rows={3} placeholder="Describe the outcome." /></label><label>Notes<RichTextEditor name="notes" value="" disabled={false} placeholder="Add working notes or guardrails." /></label><label>Owner<UserOptions workspace={workspace} name="ownerId" /></label><div className="form-grid"><label>Priority<select name="priority" defaultValue="medium"><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label><label>Due date<input name="dueDate" type="date" min={workspace.quarter.startDate} max={workspace.quarter.endDate} defaultValue={workspace.quarter.endDate} required /></label></div><small className="form-help">This Rock will be created in {workspace.quarter.label}. Select the upcoming quarter before adding next-quarter priorities.</small><ModalActions onClose={onClose} submitLabel="Add Rock" /></form></ModalShell>;
 }
 
 function TaskModal({ workspace, rock, onClose, onSubmit }: { workspace: Workspace; rock: Rock; onClose: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
