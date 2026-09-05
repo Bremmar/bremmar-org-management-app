@@ -837,6 +837,8 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
       ...baseRecord('transfer-projects-leadership', 'issueTransfer'), kind: 'issueTransfer', issueId: 'issue-transfer-pending', sourceTeamId: 'projects', destinationTeamId: 'leadership', requestedById: 'marcus-lee', requestedAt: daysAgo(2), status: 'pending', note: 'Confirm the right receiving team.', sourceIssueVersion: 1, version: 1,
     }];
     this.notifications = [{
+      ...baseRecord('notification-message-projects-kickoff', 'notification'), kind: 'notification', recipientTeamId: 'leadership', type: 'team-message', title: 'New message from Projects', message: 'Security review needed for the next kickoff', messageId: 'message-projects-kickoff', teamId: 'leadership',
+    }, {
       ...baseRecord('notification-ava-transfer', 'notification'), kind: 'notification', recipientUserId: 'ava-khan', type: 'issue-transfer-requested', title: 'Issue transferred to Leadership', message: 'Projects sent an Issue to Leadership. Accept or reject the handoff before the next L10.', issueId: 'issue-transfer-pending', transferId: 'transfer-projects-leadership', teamId: 'leadership',
     }];
     this.messages = [{
@@ -985,6 +987,40 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
   protected notify(recipientUserId: string, input: Omit<NotificationRecord, keyof WorkspaceRecord | 'recipientUserId' | 'kind'> & { teamId?: string }) {
     const record = baseRecord(generatedId('notification'), 'notification');
     this.notifications.unshift({ ...record, ...input, kind: 'notification', recipientUserId, updatedBy: 'system', environmentId: this.environmentId });
+  }
+
+  protected notifyTeam(recipientTeamId: string, input: Omit<NotificationRecord, keyof WorkspaceRecord | 'recipientUserId' | 'recipientTeamId' | 'kind'> & { teamId?: string }) {
+    const record = baseRecord(generatedId('notification'), 'notification');
+    this.notifications.unshift({ ...record, ...input, kind: 'notification', recipientTeamId, updatedBy: 'system', environmentId: this.environmentId });
+  }
+
+  protected notificationTeamId(notification: Pick<NotificationRecord, 'type' | 'teamId' | 'recipientTeamId' | 'recipientUserId'>) {
+    return notification.recipientTeamId ?? (notification.type === 'team-message' ? notification.teamId : undefined);
+  }
+
+  protected notificationVisibleToUser(notification: NotificationRecord, userId: string) {
+    const recipientTeamId = this.notificationTeamId(notification);
+    if (recipientTeamId) return this.canReadTeam(recipientTeamId, userId);
+    return notification.recipientUserId === userId;
+  }
+
+  protected messageForNotification(notification: NotificationRecord) {
+    const teamId = this.notificationTeamId(notification);
+    return this.messages.find((message) => message.id === notification.messageId
+      || (notification.type === 'team-message' && message.toTeamId === teamId && message.subject === notification.message));
+  }
+
+  protected acknowledgeTeamMessage(message: TeamMessageRecord, userId: string, timestamp: string) {
+    for (const notification of this.notifications) {
+      const related = notification.type === 'team-message'
+        && (notification.messageId === message.id
+          || (!notification.messageId && notification.teamId === message.toTeamId && notification.message === message.subject));
+      if (!related || notification.readAt) continue;
+      notification.readAt = timestamp;
+      notification.updatedAt = timestamp;
+      notification.updatedBy = userId;
+      notification.version += 1;
+    }
   }
 
   protected activeIssue(issueId: string) {
@@ -1147,7 +1183,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     const todos = this.todos.filter((todo) => todo.teamId === teamId);
     const issues = this.issues.filter((issue) => issue.teamId === teamId && issue.assignmentState !== 'redirected');
     const transfers = this.transfers.filter((transfer) => transfer.sourceTeamId === teamId || transfer.destinationTeamId === teamId);
-    const notifications = this.notifications.filter((notification) => notification.recipientUserId === userId && (!notification.teamId || notification.teamId === teamId));
+    const notifications = this.notifications.filter((notification) => this.notificationVisibleToUser(notification, userId) && (notification.type === 'team-message' ? this.notificationTeamId(notification) === teamId : (!notification.teamId || notification.teamId === teamId)));
     const messages = this.messages.filter((message) => message.fromTeamId === teamId || message.toTeamId === teamId);
     const meetings = this.meetings.filter((meeting) => meeting.teamId === teamId);
     const metrics = this.metrics.filter((metric) => metric.teamId === teamId);
@@ -1217,7 +1253,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     const scorecardResults = this.scorecardResults.filter((result) => teamIds.has(result.teamId));
     const vtos = this.vtos.filter((vto) => teamIds.has(vto.teamId));
     const vtoVersions = this.vtoVersions.filter((version) => teamIds.has(version.teamId));
-    const notifications = this.notifications.filter((notification) => notification.recipientUserId === userId);
+    const notifications = this.notifications.filter((notification) => this.notificationVisibleToUser(notification, userId));
     const quarters = this.quarters.map((quarter) => quarterSummary(quarter));
     const selectedId = quarterId ?? currentQuarterId(quarters);
     const selectedQuarter = quarters.find((quarter) => quarter.id === selectedId);
@@ -1329,18 +1365,31 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
 
   async getNotifications(userId: string) {
     this.requireUser(userId);
-    return clone(this.notifications.filter((notification) => notification.recipientUserId === userId));
+    return clone(this.notifications.filter((notification) => this.notificationVisibleToUser(notification, userId)));
   }
 
   async markNotificationRead(notificationId: string, userId: string, expectedVersion?: number) {
     this.requireUser(userId);
-    const notification = this.notifications.find((item) => item.id === notificationId && item.recipientUserId === userId);
+    const notification = this.notifications.find((item) => item.id === notificationId && this.notificationVisibleToUser(item, userId));
     if (!notification) throw new RepositoryError('NOT_FOUND', 'Notification not found.');
     assertExpectedVersion(notification.version, expectedVersion);
-    notification.readAt = notification.readAt ?? nowIso();
-    notification.updatedAt = nowIso();
-    notification.updatedBy = userId;
-    notification.version += 1;
+    const timestamp = nowIso();
+    const message = notification.type === 'team-message' ? this.messageForNotification(notification) : undefined;
+    if (message) {
+      if (message.status === 'unread') {
+        message.status = 'read';
+        message.readAt = timestamp;
+        message.updatedAt = timestamp;
+        message.updatedBy = userId;
+        message.version += 1;
+      }
+      this.acknowledgeTeamMessage(message, userId, timestamp);
+    } else if (!notification.readAt) {
+      notification.readAt = timestamp;
+      notification.updatedAt = timestamp;
+      notification.updatedBy = userId;
+      notification.version += 1;
+    }
     return clone(notification);
   }
 
@@ -2292,9 +2341,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     const timestamp = nowIso();
     const message: TeamMessageRecord = { ...baseRecord(generatedId('message'), 'message'), kind: 'message', fromTeamId: input.fromTeamId, toTeamId: input.toTeamId, senderId: input.senderId, subject: input.subject.trim(), body: input.body.trim(), status: 'unread', updatedBy: input.senderId };
     this.messages.unshift(message);
-    for (const membership of this.memberships.filter((item) => item.teamId === input.toTeamId && item.active && item.role !== 'Viewer')) {
-      this.notify(membership.userId, { type: 'team-message', title: `New message from ${this.team(input.fromTeamId)?.name ?? input.fromTeamId}`, message: message.subject, teamId: input.toTeamId });
-    }
+    this.notifyTeam(input.toTeamId, { type: 'team-message', title: `New message from ${this.team(input.fromTeamId)?.name ?? input.fromTeamId}`, message: message.subject, messageId: message.id, teamId: input.toTeamId });
     this.recordAudit(input.senderId, 'Sent team message', message.id, `${input.fromTeamId} → ${input.toTeamId}: ${message.subject}`, 'admin');
     return clone(message);
   }
@@ -2306,10 +2353,12 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     this.requireRead(message.toTeamId, userId);
     assertExpectedVersion(message.version, expectedVersion);
     if (message.status === 'unread') message.status = 'read';
-    message.readAt = message.readAt ?? nowIso();
-    message.updatedAt = nowIso();
+    const timestamp = message.readAt ?? nowIso();
+    message.readAt = timestamp;
+    message.updatedAt = timestamp;
     message.updatedBy = userId;
     message.version += 1;
+    this.acknowledgeTeamMessage(message, userId, timestamp);
     return clone(message);
   }
 
@@ -2332,6 +2381,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     message.updatedAt = timestamp;
     message.updatedBy = actorId;
     message.version += 1;
+    this.acknowledgeTeamMessage(message, actorId, timestamp);
     this.recordAudit(actorId, 'Created Issue from team message', issue.id, `${message.subject} → ${issue.title}`, 'issue');
     return clone(issue);
   }
@@ -3128,7 +3178,7 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
     const teamRocks = rocks.map((rock) => ({ ...rock, notes: sanitizeRichText(rock.notes) }));
     const teamIssues = issues.filter((issue) => issue.assignmentState !== 'redirected').map((issue) => issueAge({ ...issue, detail: sanitizeRichText(issue.detail), idsNote: issue.idsNote ? sanitizeRichText(issue.idsNote) : undefined }, settings));
     const teamTransfers = transfers.filter((transfer) => transfer.sourceTeamId === teamId || transfer.destinationTeamId === teamId);
-    const teamNotifications = notifications.filter((notification) => notification.recipientUserId === userId && (!notification.teamId || notification.teamId === teamId));
+    const teamNotifications = notifications.filter((notification) => this.notificationVisibleToUser(notification, userId) && (notification.type === 'team-message' ? this.notificationTeamId(notification) === teamId : (!notification.teamId || notification.teamId === teamId)));
     const teamMessages = messages.filter((message) => message.fromTeamId === teamId || message.toTeamId === teamId);
     const teamHeadlines = headlines.filter((headline) => headline.teamId === teamId).map((headline) => ({ ...headline, detail: sanitizeRichText(headline.detail) }));
     const normalizedMeetings = meetings.map((meeting) => normalizedMeeting(team, meeting, this.quarters));
@@ -3238,9 +3288,10 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
   }
 
   async getNotifications(userId: string) {
+    await this.ensureLoaded();
     if (!await this.getUser(userId)) throw new RepositoryError('FORBIDDEN', 'The user is not active in this organization.');
     const records = await this.orgRecords<NotificationRecord>('notification');
-    return this.publicValue(clone(records.filter((notification) => notification.recipientUserId === userId)));
+    return this.publicValue(clone(records.filter((notification) => this.notificationVisibleToUser(notification, userId))));
   }
 
   async markNotificationRead(notificationId: string, userId: string, expectedVersion?: number) { return this.withMutation(userId, () => super.markNotificationRead(notificationId, userId, expectedVersion)); }

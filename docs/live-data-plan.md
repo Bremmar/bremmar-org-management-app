@@ -171,6 +171,11 @@ operational work has been resolved or moved.
   status. Reading or opening a message does not mark it read automatically;
   the explicit message actions remain available, while read messages stay in
   the full Team messages view.
+- Team-message notifications are stored once with a `recipientTeamId` and
+  `messageId`, rather than once per member. Marking the message or its alert
+  read acknowledges it for the whole receiving team. The web notification
+  panel shows team-message alerts only for the currently selected team; other
+  user-specific notices retain their own recipients.
 
 The partitioning and transactional design follows the Cosmos DB guidance for
 [partition keys](https://learn.microsoft.com/en-us/azure/cosmos-db/partitioning)

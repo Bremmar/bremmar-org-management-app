@@ -312,8 +312,14 @@ test('team messages can be read and converted into an editable Issue in the rece
   const repository = new MemoryWorkspaceRepository();
   const sent = await repository.sendTeamMessage({ fromTeamId: 'projects', toTeamId: 'leadership', subject: 'Confirm kickoff owner', body: 'Please choose the receiving owner before the customer meeting.', senderId: 'marcus-lee' });
   assert.equal(sent.status, 'unread');
+  const state = repository as unknown as { notifications: Array<{ id: string; type: string; recipientUserId?: string; recipientTeamId?: string; teamId?: string; messageId?: string; readAt?: string }> };
+  const messageNotification = state.notifications.find((notification) => notification.type === 'team-message');
+  assert.deepEqual(messageNotification && { recipientUserId: messageNotification.recipientUserId, recipientTeamId: messageNotification.recipientTeamId, teamId: messageNotification.teamId, messageId: messageNotification.messageId }, { recipientUserId: undefined, recipientTeamId: 'leadership', teamId: 'leadership', messageId: sent.id });
+  await repository.upsertMembership({ userId: 'marcus-lee', teamId: 'leadership', role: 'Member' }, 'ava-khan');
   const read = await repository.markMessageRead(sent.id, 'ava-khan', sent.version);
   assert.equal(read.status, 'read');
+  assert.ok(messageNotification?.readAt);
+  assert.ok((await repository.getNotifications('marcus-lee')).find((notification) => notification.id === messageNotification?.id)?.readAt);
   const issue = await repository.createIssueFromMessage({ messageId: sent.id, title: 'Kickoff owner needs confirmation', detail: 'Please choose the receiving owner before the customer meeting.', priority: 2, horizon: 'short-term', ownerId: 'ava-khan' }, 'ava-khan');
   assert.deepEqual({ teamId: issue.teamId, title: issue.title }, { teamId: 'leadership', title: 'Kickoff owner needs confirmation' });
   assert.equal((await repository.getTeamWorkspace('leadership', 'ava-khan')).messages.find((message) => message.id === sent.id)?.status, 'converted');

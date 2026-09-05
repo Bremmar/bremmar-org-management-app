@@ -319,12 +319,15 @@ export interface IssueTransferRecord extends WorkspaceRecord {
 
 export interface NotificationRecord extends WorkspaceRecord {
   kind: 'notification';
-  recipientUserId: string;
+  /** User-specific notices keep an individual recipient; team notices are shared by recipientTeamId. */
+  recipientUserId?: string;
+  recipientTeamId?: string;
   type: NotificationType;
   title: string;
   message: string;
   issueId?: string;
   transferId?: string;
+  messageId?: string;
   teamId?: string;
   readAt?: string;
 }

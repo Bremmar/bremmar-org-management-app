@@ -606,6 +606,25 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     this.workspace.notifications.unshift({ ...input, id: `notification-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, recipientUserId, createdAt: nowIso() });
   }
 
+  private notifyTeam(recipientTeamId: string, input: Omit<Notification, 'id' | 'recipientUserId' | 'recipientTeamId' | 'createdAt'>) {
+    this.workspace.notifications.unshift({ ...input, id: `notification-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, recipientTeamId, createdAt: nowIso() });
+  }
+
+  private messageForNotification(notification: Notification) {
+    const teamId = notification.recipientTeamId ?? notification.teamId;
+    return this.workspace.messages.find((message) => message.id === notification.messageId
+      || (notification.type === 'team-message' && message.toTeamId === teamId && message.subject === notification.message));
+  }
+
+  private acknowledgeTeamMessage(message: TeamMessage, timestamp: string) {
+    for (const notification of this.workspace.notifications) {
+      if (notification.type !== 'team-message') continue;
+      const related = notification.messageId === message.id
+        || (!notification.messageId && notification.teamId === message.toTeamId && notification.message === message.subject);
+      if (related && !notification.readAt) notification.readAt = timestamp;
+    }
+  }
+
   private result() {
     this.requireSelectedEnvironmentAccess();
     this.refreshDerivedState();
@@ -620,8 +639,10 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     if (!selectedQuarter) throw new WorkspaceApiError('VALIDATION', 'The selected quarter does not exist.');
     this.selectedQuarterIds[this.selectedEnvironment] = selectedId;
     this.workspace.quarter = selectedQuarter;
-    this.refreshDerivedState();
-    this.maintainMeetingWindows();
+    if (quarterId === undefined) {
+      this.refreshDerivedState();
+      this.maintainMeetingWindows();
+    }
     return cloneWorkspace(this.workspace);
   }
 
@@ -1608,9 +1629,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     const timestamp = nowIso();
     this.workspace.messages.unshift({ id: `message-${Date.now()}`, fromTeamId: input.fromTeamId, toTeamId: input.toTeamId, senderId: this.workspace.currentUser.id, subject: input.subject.trim(), body: input.body.trim(), status: 'unread', createdAt: timestamp, updatedAt: timestamp, version: 1 });
     const message = this.workspace.messages[0];
-    this.workspace.memberships.filter((membership) => membership.teamId === destination.id && membership.active).forEach((membership) => {
-      this.notify(membership.userId, { type: 'team-message', title: `New message from ${teamForMessage(this.workspace, input.fromTeamId)}`, message: input.subject.trim(), teamId: destination.id });
-    });
+    this.notifyTeam(destination.id, { type: 'team-message', title: `New message from ${teamForMessage(this.workspace, input.fromTeamId)}`, message: input.subject.trim(), messageId: message.id, teamId: destination.id });
     this.audit('Sent team message', message.id, `${teamForMessage(this.workspace, input.fromTeamId)} → ${destination.name}: ${message.subject}`, 'team');
     return this.result();
   }
@@ -1625,6 +1644,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
       message.updatedAt = message.readAt;
       message.version += 1;
     }
+    this.acknowledgeTeamMessage(message, message.readAt ?? nowIso());
     return this.result();
   }
 
@@ -1644,14 +1664,30 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     message.readAt = message.readAt ?? timestamp;
     message.updatedAt = timestamp;
     message.version += 1;
+    this.acknowledgeTeamMessage(message, timestamp);
     this.audit('Created Issue from team message', issue.id, `${message.subject} → ${issue.title}`, 'issue');
     return this.result();
   }
 
   async markNotificationRead(notificationId: string) {
-    const notification = this.workspace.notifications.find((item) => item.id === notificationId && item.recipientUserId === this.workspace.currentUser.id);
+    const notification = this.workspace.notifications.find((item) => item.id === notificationId && (
+      item.recipientUserId === this.workspace.currentUser.id
+      || ((item.recipientTeamId ?? (item.type === 'team-message' ? item.teamId : undefined)) && this.canReadTeam(item.recipientTeamId ?? item.teamId!))
+    ));
     if (!notification) throw new WorkspaceApiError('NOT_FOUND', 'Notification not found.');
-    notification.readAt = nowIso();
+    const timestamp = nowIso();
+    const message = notification.type === 'team-message' ? this.messageForNotification(notification) : undefined;
+    if (message) {
+      if (message.status === 'unread') {
+        message.status = 'read';
+        message.readAt = timestamp;
+        message.updatedAt = timestamp;
+        message.version += 1;
+      }
+      this.acknowledgeTeamMessage(message, timestamp);
+    } else {
+      notification.readAt = notification.readAt ?? timestamp;
+    }
     return this.result();
   }
 
@@ -2410,6 +2446,13 @@ export class HttpWorkspaceApi implements WorkspaceApi {
   }
 
   async getWorkspace(quarterId?: string): Promise<Workspace> {
+    if (quarterId && this.cachedWorkspace) {
+      const selectedQuarter = this.cachedWorkspace.quarters.find((quarter) => quarter.id === quarterId);
+      if (selectedQuarter) {
+        this.cachedWorkspace = { ...this.cachedWorkspace, quarter: selectedQuarter };
+        return cloneWorkspace(this.cachedWorkspace);
+      }
+    }
     const selectedQuarterId = quarterId ?? (this.cachedWorkspace?.quarter.status !== 'current' ? this.cachedWorkspace?.quarter.id : undefined);
     const path = selectedQuarterId ? `/workspace?quarterId=${encodeURIComponent(selectedQuarterId)}` : '/workspace';
     const workspace = mapSnapshot(await this.request<ApiSnapshot>(path));
@@ -2513,9 +2556,9 @@ export class HttpWorkspaceApi implements WorkspaceApi {
   async rejectIssueTransfer(transferId: string, message: string, expectedVersion?: number) { return this.mutate(`/issue-transfers/${transferId}/reject`, 'POST', { message }, expectedVersion, { refresh: true }); }
   async cancelIssueTransfer(transferId: string, expectedVersion?: number) { return this.mutate(`/issue-transfers/${transferId}/cancel`, 'POST', undefined, expectedVersion, { refresh: true }); }
   async sendTeamMessage(input: Pick<TeamMessage, 'fromTeamId' | 'toTeamId' | 'subject' | 'body'>) { return this.mutate(`/teams/${input.fromTeamId}/messages`, 'POST', input, undefined, { refresh: true }); }
-  async markMessageRead(messageId: string, expectedVersion?: number) { return this.mutate(`/messages/${messageId}/read`, 'POST', undefined, expectedVersion); }
+  async markMessageRead(messageId: string, expectedVersion?: number) { return this.mutate(`/messages/${messageId}/read`, 'POST', undefined, expectedVersion, { refresh: true }); }
   async createIssueFromMessage(messageId: string, input: Pick<Issue, 'title' | 'detail' | 'priority' | 'horizon' | 'ownerId'>) { return this.mutate(`/messages/${messageId}/issue`, 'POST', input, undefined, { refresh: true }); }
-  async markNotificationRead(notificationId: string) { return this.mutate(`/notifications/${notificationId}/read`, 'PATCH'); }
+  async markNotificationRead(notificationId: string) { return this.mutate(`/notifications/${notificationId}/read`, 'PATCH', undefined, undefined, { refresh: true }); }
   async updateProfile(input: Pick<Partial<User>, 'name' | 'email' | 'avatarDataUrl'>) { return this.mutate('/profile', 'PATCH', input); }
   async createTeam(input: Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials'> & { meetingSections?: MeetingSectionConfig[]; escalationUserIds?: string[] }) { return this.mutate('/platform-admin/teams', 'POST', input, undefined, { refresh: true }); }
   async updateTeam(teamId: string, input: Partial<Pick<Team, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds'>>, expectedVersion?: number) { return this.mutate(`/platform-admin/teams/${teamId}`, 'PATCH', input, expectedVersion, { refresh: true }); }

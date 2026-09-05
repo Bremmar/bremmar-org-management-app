@@ -4,7 +4,7 @@ import { initialWorkspace } from './data';
 import { defaultMeetingSections, meetingScheduledAt, quarterIdForDate } from './types';
 import type { TeamMessage, TeamMembership, Workspace } from './types';
 import { sanitizeTodoNotes } from './richText';
-import { pendingTeamMessagesFor } from './App';
+import { pendingTeamMessagesFor, unreadNotificationsForTeam } from './App';
 
 describe('LocalWorkspaceApi', () => {
   it('starts in Live, hides Test without a grant, and isolates granted Test changes', async () => {
@@ -417,6 +417,35 @@ describe('LocalWorkspaceApi', () => {
     const created = workspace.issues.find((issue) => issue.id === convertedMessage.convertedIssueId);
     expect(created).toMatchObject({ title: 'Security review before kickoff', detail: '<p>Leadership will confirm the receiving team before Friday.</p>', teamId: 'leadership' });
     expect(workspace.messages.find((item) => item.id === message.id)?.status).toBe('converted');
+  });
+
+  it('uses one shared team notification when a message is sent and acknowledged', async () => {
+    const api = new LocalWorkspaceApi();
+    const sent = await api.sendTeamMessage({ fromTeamId: 'leadership', toTeamId: 'projects', subject: 'Shared context', body: 'The whole Projects team should see this once.' });
+    let workspace = await api.getWorkspace();
+    const notification = workspace.notifications.find((item) => item.type === 'team-message' && item.messageId === sent.messages[0].id);
+    expect(notification).toMatchObject({ recipientTeamId: 'projects', teamId: 'projects', messageId: sent.messages[0].id });
+    expect(notification?.recipientUserId).toBeUndefined();
+    expect(unreadNotificationsForTeam(workspace.notifications, workspace.currentUser.id, 'projects', workspace.teams.map((team) => team.id))
+      .filter((item) => item.type === 'team-message').map((item) => item.messageId)).toEqual([sent.messages[0].id]);
+    expect(unreadNotificationsForTeam(workspace.notifications, workspace.currentUser.id, 'cybersecurity', workspace.teams.map((team) => team.id))
+      .filter((item) => item.type === 'team-message')).toHaveLength(0);
+
+    workspace = await api.markNotificationRead(notification!.id);
+    expect(workspace.messages.find((item) => item.id === sent.messages[0].id)?.status).toBe('read');
+    expect(workspace.notifications.find((item) => item.id === notification!.id)?.readAt).toBeDefined();
+  });
+
+  it('switches an HTTP quarter from the cached snapshot without another request', async () => {
+    const api = new HttpWorkspaceApi();
+    (api as unknown as { cachedWorkspace: Workspace }).cachedWorkspace = structuredClone(initialWorkspace);
+    const fetchMock = vi.spyOn(globalThis, 'fetch');
+
+    const historical = await api.getWorkspace('2026-q2');
+
+    expect(historical.quarter.id).toBe('2026-q2');
+    expect(fetchMock).not.toHaveBeenCalled();
+    fetchMock.mockRestore();
   });
 
   it('only includes unread incoming messages in the L10 starting context', () => {

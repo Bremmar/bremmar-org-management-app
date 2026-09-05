@@ -275,6 +275,10 @@ const transfers: IssueTransfer[] = [
 
 const notifications: Notification[] = [
   {
+    id: 'notification-message-projects-kickoff', recipientTeamId: 'leadership', type: 'team-message', title: 'New message from Projects',
+    message: 'Security review needed for the next kickoff', messageId: 'message-projects-kickoff', teamId: 'leadership', createdAt: daysAgo(1),
+  },
+  {
     id: 'notification-transfer-projects-leadership', recipientUserId: 'ava-khan', type: 'issue-transfer-requested', title: 'Issue transferred to Leadership',
     message: 'Projects sent “The customer kickoff needs a cybersecurity review” to Leadership. Accept or reject it before the next L10.', issueId: 'issue-transfer-pending', transferId: 'transfer-projects-leadership', teamId: 'leadership', createdAt: daysAgo(2),
   },

@@ -357,12 +357,15 @@ export interface IssueTransfer {
 
 export interface Notification {
   id: string;
-  recipientUserId: string;
+  /** User-specific notices keep their individual recipient. Team notices use recipientTeamId. */
+  recipientUserId?: string;
+  recipientTeamId?: string;
   type: 'issue-transfer-requested' | 'issue-transfer-decided' | 'team-message' | 'issue-escalation' | 'system';
   title: string;
   message: string;
   issueId?: string;
   transferId?: string;
+  messageId?: string;
   teamId?: string;
   createdAt: string;
   readAt?: string;
