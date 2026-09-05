@@ -72,6 +72,9 @@ Consult the [Cosmos DB partitioning guidance](https://learn.microsoft.com/en-us/
 - Keep authorization and domain transitions in server-side services, not only in React components.
 - Add or update tests for every behavior change, especially role checks, cross-team access, meeting transitions, quarter boundaries, and import validation.
 - Before handoff, run the repository's available formatting, linting, type-check, build, and test commands. Do not invent commands when no package manifest or scripts exist; establish and document them as part of scaffolding.
+- Always give tests, builds, linters, formatters, migrations, and other potentially long-running commands an explicit finite wall-clock timeout. For example, use `timeout --signal=TERM --kill-after=30s 10m npm test` rather than an unbounded `npm test`; choose a shorter or longer limit appropriate to the command and state it in the handoff when relevant.
+- Treat the terminal tool's wait/yield duration as separate from the process timeout: a short poll interval does not stop the underlying command. If a command reaches its deadline, terminate it, capture the last output, report the timeout, and investigate or ask before retrying. Do not leave a test or build process running unattended.
+- Do not start watch mode, development servers, emulators, or other persistent processes unless the task requires them; when required, run them as a bounded session and stop them after collecting the needed result.
 - Use safe, non-destructive repository operations. Prefer `apply_patch` for edits and do not reset, delete, or overwrite unrelated user work.
 - Keep generated files, local settings, credentials, and environment-specific values out of source control unless explicitly required.
 - Update documentation when adding an API, Azure resource, permission, environment variable, migration rule, or operational dependency.
