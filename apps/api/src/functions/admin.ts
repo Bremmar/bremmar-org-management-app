@@ -142,6 +142,21 @@ async function upsertMembershipHandler(request: HttpRequest, _context: Invocatio
   }
 }
 
+async function removeMembershipHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
+  const scope = await requestScope(request);
+  if (isResponse(scope)) return scope;
+  const { principal, repository } = scope;
+  const teamId = request.params.teamId;
+  const userId = request.params.userId;
+  if (!teamId || !userId) return { status: 422, jsonBody: { error: 'teamId and userId are required', code: 'VALIDATION' } };
+  try {
+    const membership = await repository.removeMembership(teamId, userId, principal.userId, expectedVersion(request));
+    return responseWithEtag(membership, `W/\"${membership.version}\"`);
+  } catch (error) {
+    return repositoryErrorResponse(error);
+  }
+}
+
 async function updateAgeSettingsHandler(request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
   const scope = await requestScope(request);
   if (isResponse(scope)) return scope;
@@ -195,6 +210,7 @@ app.http('adminUpdateTeam', { methods: ['PATCH'], authLevel: 'anonymous', route:
 app.http('adminCreateUser', { methods: ['POST'], authLevel: 'anonymous', route: 'platform-admin/users', handler: createUserHandler });
 app.http('adminUpdateUser', { methods: ['PATCH'], authLevel: 'anonymous', route: 'platform-admin/users/{userId}', handler: updateUserHandler });
 app.http('adminMembership', { methods: ['PUT'], authLevel: 'anonymous', route: 'platform-admin/memberships', handler: upsertMembershipHandler });
+app.http('adminRemoveMembership', { methods: ['DELETE'], authLevel: 'anonymous', route: 'platform-admin/memberships/{teamId}/{userId}', handler: removeMembershipHandler });
 app.http('adminAgingSettings', { methods: ['PUT'], authLevel: 'anonymous', route: 'platform-admin/settings/aging', handler: updateAgeSettingsHandler });
 app.http('adminEnvironmentAccess', { methods: ['GET'], authLevel: 'anonymous', route: 'platform-admin/environment-access', handler: environmentAccessHandler });
 app.http('adminUpdateEnvironmentAccess', { methods: ['PATCH'], authLevel: 'anonymous', route: 'platform-admin/environment-access/{userId}', handler: updateEnvironmentAccessHandler });

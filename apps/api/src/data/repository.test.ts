@@ -56,8 +56,29 @@ test('PlatformAdmin can administer configuration without receiving work-data acc
 
   const snapshot = await repository.getAdminSnapshot(user.id);
   assert.equal(snapshot.users.some((candidate) => candidate.id === user.id), true);
+  assert.equal(snapshot.metrics.length > 0, true);
+  assert.equal(snapshot.meetings.length > 0, true);
+  const regenerated = await repository.generateMeetings('projects', user.id);
+  assert.equal(regenerated.meetings.length, 4);
   await rejectsWithCode(repository.getTeamWorkspace('projects', user.id), 'FORBIDDEN');
   await rejectsWithCode(repository.getCompanyOverview(user.id), 'FORBIDDEN');
+});
+
+test('Team Owners can manage their team roster but cannot grant platform or OrgAdmin access', async () => {
+  const repository = new MemoryWorkspaceRepository();
+
+  const added = await repository.upsertMembership({ userId: 'priya-shah', teamId: 'projects', role: 'Viewer' }, 'marcus-lee');
+  assert.deepEqual({ role: added.role, active: added.active, version: added.version }, { role: 'Viewer', active: true, version: 1 });
+  const promoted = await repository.upsertMembership({ userId: 'priya-shah', teamId: 'projects', role: 'TeamLead' }, 'marcus-lee');
+  assert.equal(promoted.version, 2);
+
+  await rejectsWithCode(repository.upsertMembership({ userId: 'priya-shah', teamId: 'projects', role: 'OrgAdmin' }, 'marcus-lee'), 'FORBIDDEN');
+  await rejectsWithCode(repository.upsertMembership({ userId: 'ava-khan', teamId: 'cybersecurity', role: 'Viewer' }, 'marcus-lee'), 'FORBIDDEN');
+
+  const removed = await repository.removeMembership('projects', 'priya-shah', 'marcus-lee', promoted.version);
+  assert.deepEqual({ active: removed.active, version: removed.version }, { active: false, version: 3 });
+  assert.equal((await repository.getAdminSnapshot('ava-khan')).memberships.some((membership) => membership.id === removed.id), false);
+  assert.equal(repository.exportWorkspaceRecords().some((record) => record.kind === 'auditEvent' && 'action' in record && record.action === 'Removed team member'), true);
 });
 
 test('created directory users use the Entra object ID as their stable application key', async () => {

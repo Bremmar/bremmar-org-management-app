@@ -92,6 +92,8 @@ export interface AdminSnapshot {
   users: UserProfile[];
   memberships: TeamMembership[];
   settings: IssueAgeSettings;
+  metrics: ScorecardMetricRecord[];
+  meetings: MeetingRecord[];
   audit: AuditEventRecord[];
   etag: string;
 }
@@ -254,6 +256,7 @@ export interface WorkspaceRepository {
   createUser(input: CreateUserInput, actorId: string): Promise<UserProfile>;
   updateUser(userId: string, input: UpdateUserInput, actorId: string, expectedVersion?: number): Promise<UserProfile>;
   upsertMembership(input: { userId: string; teamId: string; role: TeamMembership['role'] }, actorId: string): Promise<TeamMembership>;
+  removeMembership(teamId: string, userId: string, actorId: string, expectedVersion?: number): Promise<TeamMembership>;
   updateAgeSettings(settings: IssueAgeSettings, actorId: string, expectedVersion?: number): Promise<IssueAgeSettings>;
   updateUserProfile(input: { name?: string; email?: string; avatarDataUrl?: string | null }, actorId: string, expectedVersion?: number): Promise<UserProfile>;
 }
@@ -903,6 +906,22 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     return user;
   }
 
+  protected requireMembershipAdmin(teamId: string, actorId: string) {
+    const actor = this.requireUser(actorId);
+    if (canAdministerPlatform(actor.platformCapabilities)) return actor;
+    const membership = this.membership(teamId, actorId);
+    if (!membership || !canManageTeam(membership.role)) throw new RepositoryError('FORBIDDEN', 'Only the team owner can manage this team’s members.');
+    return actor;
+  }
+
+  protected requireMeetingAdministration(teamId: string, actorId: string) {
+    const actor = this.requireUser(actorId);
+    if (canAdministerPlatform(actor.platformCapabilities)) return actor;
+    const membership = this.membership(teamId, actorId);
+    if (!membership || !canManageTeam(membership.role)) throw new RepositoryError('FORBIDDEN', 'Only the team owner can regenerate this team’s meetings.');
+    return actor;
+  }
+
   protected canReadTeam(teamId: string, userId: string) {
     return this.visibleTeamIds(userId).has(teamId);
   }
@@ -1449,7 +1468,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
 
   /* Scorecard definitions and results are team-owned records. */
   async createScorecardMetric(input: { teamId: string; label: string; target: string; unit: string; ownerId: string }, actorId: string) {
-    this.requireWrite(input.teamId, actorId);
+    this.requireMembershipAdmin(input.teamId, actorId);
     const team = this.team(input.teamId);
     if (!team) throw new RepositoryError('NOT_FOUND', 'Team not found.');
     if (team.nodeType !== 'operational') throw new RepositoryError('VALIDATION', 'Grouping-only teams cannot own measurables.');
@@ -1468,7 +1487,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
   async updateScorecardMetric(metricId: string, input: Partial<Pick<ScorecardMetricRecord, 'label' | 'target' | 'unit' | 'ownerId'>>, actorId: string, expectedVersion?: number) {
     const metric = this.metrics.find((item) => item.id === metricId);
     if (!metric) throw new RepositoryError('NOT_FOUND', 'Measurable not found.');
-    this.requireWrite(metric.teamId, actorId);
+    this.requireMembershipAdmin(metric.teamId, actorId);
     assertExpectedVersion(metric.version, expectedVersion);
     if (input.label !== undefined) assertText(input.label, 'Measurable label');
     if (input.target !== undefined) assertText(input.target, 'Measurable target');
@@ -2381,7 +2400,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
   }
 
   async generateMeetings(teamId: string, actorId: string): Promise<MeetingGenerationResult> {
-    this.requireWrite(teamId, actorId);
+    this.requireMeetingAdministration(teamId, actorId);
     const team = this.team(teamId);
     if (!team) throw new RepositoryError('NOT_FOUND', 'Team not found.');
     if (team.nodeType !== 'operational') throw new RepositoryError('VALIDATION', 'Grouping-only teams cannot own L10 meetings.');
@@ -2570,7 +2589,7 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
 
   async getAdminSnapshot(actorId: string): Promise<AdminSnapshot> {
     this.requireAdmin(actorId);
-    return { teams: clone(this.teams), users: clone(this.users), memberships: clone(this.memberships), settings: { ...clone(this.settings), version: this.settingsVersion }, audit: clone(this.audit), etag: etagFor([...this.teams, ...this.users, ...this.memberships, ...this.audit]) };
+    return { teams: clone(this.teams.filter((team) => team.active)), users: clone(this.users.filter((user) => user.active)), memberships: clone(this.memberships.filter((membership) => membership.active)), settings: { ...clone(this.settings), version: this.settingsVersion }, metrics: clone(this.metrics), meetings: clone(this.meetings), audit: clone(this.audit), etag: etagFor([...this.teams, ...this.users, ...this.memberships, ...this.metrics, ...this.meetings, ...this.audit]) };
   }
 
   async createTeam(input: CreateTeamInput, actorId: string) {
@@ -2689,10 +2708,12 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
   }
 
   async upsertMembership(input: { userId: string; teamId: string; role: TeamMembership['role'] }, actorId: string) {
-    this.requireAdmin(actorId);
+    this.requireMembershipAdmin(input.teamId, actorId);
     this.requireUser(input.userId);
     if (!this.team(input.teamId)) throw new RepositoryError('NOT_FOUND', 'Team not found.');
     if (!['TeamLead', 'Member', 'Viewer', 'OrgAdmin'].includes(input.role)) throw new RepositoryError('VALIDATION', 'Invalid team role.');
+    const actor = this.requireUser(actorId);
+    if (!canAdministerPlatform(actor.platformCapabilities) && input.role === 'OrgAdmin') throw new RepositoryError('FORBIDDEN', 'Only a Platform Admin can assign the OrgAdmin role.');
     const existing = this.memberships.find((membership) => membership.userId === input.userId && membership.teamId === input.teamId);
     if (existing) {
       existing.role = input.role;
@@ -2707,6 +2728,19 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     membership.updatedBy = actorId;
     this.memberships.push(membership);
     this.recordAudit(actorId, 'Created membership', membership.id, `Assigned ${input.userId} to ${input.teamId} as ${input.role}.`, 'membership');
+    return clone(membership);
+  }
+
+  async removeMembership(teamId: string, userId: string, actorId: string, expectedVersion?: number) {
+    this.requireMembershipAdmin(teamId, actorId);
+    this.requireUser(userId);
+    if (!this.team(teamId)) throw new RepositoryError('NOT_FOUND', 'Team not found.');
+    const membership = this.memberships.find((candidate) => candidate.teamId === teamId && candidate.userId === userId && candidate.active);
+    if (!membership) throw new RepositoryError('NOT_FOUND', 'Active team membership not found.');
+    assertExpectedVersion(membership.version, expectedVersion);
+    const timestamp = nowIso();
+    Object.assign(membership, { active: false, updatedAt: timestamp, updatedBy: actorId, version: membership.version + 1 });
+    this.recordAudit(actorId, 'Removed team member', membership.id, `Removed ${userId} from ${teamId}.`, 'membership');
     return clone(membership);
   }
 
@@ -3299,15 +3333,22 @@ export class CosmosWorkspaceRepository extends MemoryWorkspaceRepository {
     if (!actor) throw new RepositoryError('FORBIDDEN', 'The user is not active in this organization.');
     if (!canAdministerPlatform(actor.platformCapabilities) && (await this.getLeadershipMembership(actorId))?.role !== 'OrgAdmin') throw new RepositoryError('FORBIDDEN', 'OrgAdmin authorization is required.');
     const [teams, users, memberships, settingsRecords, audit] = await Promise.all([this.getTeams(), this.orgRecords<UserProfile>('user'), this.orgRecords<TeamMembership>('teamMembership'), this.orgRecords<IssueAgeSettingsRecord>('issueAgeSettings'), this.orgRecords<AuditEventRecord>('auditEvent')]);
+    const teamConfiguration = await Promise.all(teams.map(async (team) => ({
+      metrics: await this.teamRecords<ScorecardMetricRecord>(team.teamId, 'scorecardMetric'),
+      meetings: await this.teamRecords<MeetingRecord>(team.teamId, 'meeting'),
+    })));
+    const metrics = teamConfiguration.flatMap((configuration) => configuration.metrics);
+    const meetings = teamConfiguration.flatMap((configuration) => configuration.meetings);
     const settingsRecord = settingsRecords[0];
     const settings = settingsRecord ? { agingDays: settingsRecord.agingDays, staleDays: settingsRecord.staleDays, criticalDays: settingsRecord.criticalDays, version: settingsRecord.version } : clone(DEFAULT_ISSUE_AGE_SETTINGS);
-    return this.publicValue({ teams, users: clone(users.filter((user) => user.active)), memberships: clone(memberships.filter((membership) => membership.active)), settings, audit: clone(audit), etag: etagFor([...teams, ...users, ...memberships, ...audit, ...(settingsRecord ? [settingsRecord] : [])]) });
+    return this.publicValue({ teams, users: clone(users.filter((user) => user.active)), memberships: clone(memberships.filter((membership) => membership.active)), settings, metrics: clone(metrics), meetings: clone(meetings), audit: clone(audit), etag: etagFor([...teams, ...users, ...memberships, ...metrics, ...meetings, ...audit, ...(settingsRecord ? [settingsRecord] : [])]) });
   }
   async createTeam(input: CreateTeamInput, actorId: string) { return this.withMutation(actorId, () => super.createTeam(input, actorId)); }
   async updateTeam(teamId: string, input: Partial<Pick<TeamRecord, 'name' | 'shortName' | 'description' | 'parentTeamId' | 'nodeType' | 'meetingCadence' | 'meetingDay' | 'meetingTime' | 'accent' | 'initials' | 'meetingSections' | 'escalationUserIds' | 'active'>>, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateTeam(teamId, input, actorId, expectedVersion)); }
   async createUser(input: CreateUserInput, actorId: string) { return this.withMutation(actorId, () => super.createUser(input, actorId)); }
   async updateUser(userId: string, input: UpdateUserInput, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateUser(userId, input, actorId, expectedVersion)); }
   async upsertMembership(input: { userId: string; teamId: string; role: TeamMembership['role'] }, actorId: string) { return this.withMutation(actorId, () => super.upsertMembership(input, actorId)); }
+  async removeMembership(teamId: string, userId: string, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.removeMembership(teamId, userId, actorId, expectedVersion)); }
   async updateAgeSettings(settings: IssueAgeSettings, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateAgeSettings(settings, actorId, expectedVersion)); }
   async updateUserProfile(input: { name?: string; email?: string; avatarDataUrl?: string | null }, actorId: string, expectedVersion?: number) { return this.withMutation(actorId, () => super.updateUserProfile(input, actorId, expectedVersion)); }
 }

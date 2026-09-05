@@ -53,12 +53,19 @@ each later commit. CI checks out the full Git history so the number remains
 deterministic; `VITE_BUILD_NUMBER` and `VITE_BUILD_DATE` can be supplied for a
 release build that needs an explicit value.
 
-Platform administrators can configure each team’s L10 from Admin → Configure.
-They can enable or disable optional sections, set each section’s duration in
-whole minutes, and use the up/down controls to save the meeting order. IDS and
-Conclude remain enabled and every supported section is validated server-side.
-The saved configuration drives the live agenda, timing, overdue calculation,
-new meeting occurrences, and meeting history for that team.
+Administration is organised into Workspace Administration, Manage Workspace
+Members, Test Environment Access, and User Administration. Workspace
+Administration holds the team hierarchy, cadence, L10 section order and
+durations, meeting regeneration, Scorecard measurable definitions, and legacy
+Issue thresholds. The saved configuration drives the live agenda, timing,
+overdue calculation, new meeting occurrences, and meeting history for that
+team. IDS and Conclude remain enabled and every supported section is validated
+server-side. Platform Admins can manage every section; Team Owners can manage
+the rosters and meeting generation for teams they own. Roster changes use
+`PUT /api/platform-admin/memberships` and
+`DELETE /api/platform-admin/memberships/{teamId}/{userId}`; the API authorizes
+the actor against the selected team, so the route name does not grant access
+by itself.
 
 If Azure Functions Core Tools is installed, copy
 `apps/api/local.settings.sample.json` to `local.settings.json`, keep
@@ -68,17 +75,20 @@ If Azure Functions Core Tools is installed, copy
 ## Weekly scorecards and To-Do rollover
 
 Scorecard definitions and Monday-start weekly results are stored in the owning
-Cosmos `team:{teamId}` partition. The API exposes:
+Cosmos `team:{teamId}` partition. Definitions are maintained in Workspace
+Administration; the Scorecard screen is intentionally limited to entering and
+reviewing weekly actuals and statuses. The API exposes:
 
 - `POST /api/teams/{teamId}/scorecard/metrics`
 - `PATCH /api/scorecard/metrics/{metricId}`
 - `PUT /api/scorecard/metrics/{metricId}/weeks/{weekStartDate}`
 
-TeamLead, Member, and existing OrgAdmin team access can write these records;
-Viewer and Leadership-only access is read-only. L10 reads the result matching
-the meeting’s `weekStartDate`, while the Scorecard screen owns weekly entry and
-history. Teams with the Scorecard section disabled have no Scorecard navigation
-or L10 Scorecard content until an administrator enables it.
+TeamLead, OrgAdmin, and Platform Admin access can maintain definitions for the
+team; Member and Viewer access is read-only for definitions. Weekly results
+remain team-scoped writes for the existing meeting workflow. L10 reads the
+result matching the meeting’s `weekStartDate`, while the Scorecard screen owns
+weekly entry and history. Teams with the Scorecard section disabled have no
+Scorecard navigation or L10 Scorecard content until an administrator enables it.
 
 ## Meeting history, cadence, and AI recap
 
@@ -87,11 +97,11 @@ recurrence preserves the selected day of month and clamps month-end meetings
 to the last valid day. Four upcoming occurrences are kept for every
 operational team. Every occurrence stores its `scheduledDate`, `scheduledTime`,
 and nominal `recurrenceDate`; a one-off move changes only the selected open
-occurrence. The Meeting prep and Live L10 screens also provide a Generate
-meetings action. It removes future unstarted/open occurrences for that team,
-preserves started, completed, and skipped history, and creates the next four
-occurrences from the saved cadence day/date, frequency, and time. Team editors
-can update or generate it through:
+occurrence. Workspace Administration provides the Regenerate L10 meetings
+action. It removes future unstarted/open occurrences for that team, preserves
+started, completed, and skipped history, and creates the next four occurrences
+from the saved cadence day/date, frequency, and time. Platform Admins and Team
+Owners can generate meetings for teams they own. The API exposes:
 
 - `PATCH /api/teams/{teamId}/meetings/{meetingId}`
 - `POST /api/teams/{teamId}/meetings/generate`

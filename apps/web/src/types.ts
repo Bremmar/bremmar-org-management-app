@@ -51,6 +51,16 @@ export interface EnvironmentAccess {
   version: number;
 }
 
+export interface AdminSnapshot {
+  teams: Team[];
+  users: User[];
+  memberships: TeamMembership[];
+  settings: IssueAgeSettings;
+  metrics: ScorecardMetric[];
+  meetings: MeetingInstance[];
+  activity: AuditEvent[];
+}
+
 export type MeetingSection =
   | 'segue'
   | 'scorecard'
@@ -108,6 +118,7 @@ export interface TeamMembership {
   active: boolean;
   createdAt: string;
   updatedAt: string;
+  version?: number;
 }
 
 export interface Quarter {

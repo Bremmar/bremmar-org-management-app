@@ -189,6 +189,26 @@ describe('LocalWorkspaceApi', () => {
     await expect(api.updateRockStatus('rock-service-development', 'off-track')).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
 
+  it('lets a Team Owner manage only their team roster without elevated platform roles', async () => {
+    const seed = structuredClone(initialWorkspace);
+    seed.currentUser = seed.users.find((user) => user.id === 'marcus-lee')!;
+    const api = new LocalWorkspaceApi(seed);
+
+    let workspace = await api.upsertMembership({ userId: 'priya-shah', teamId: 'projects', role: 'Viewer' });
+    const added = workspace.memberships.find((membership) => membership.teamId === 'projects' && membership.userId === 'priya-shah')!;
+    expect(added.role).toBe('Viewer');
+    expect(added.active).toBe(true);
+
+    workspace = await api.upsertMembership({ userId: 'priya-shah', teamId: 'projects', role: 'TeamLead' });
+    const promoted = workspace.memberships.find((membership) => membership.teamId === 'projects' && membership.userId === 'priya-shah')!;
+    expect(promoted.role).toBe('TeamLead');
+    await expect(api.upsertMembership({ userId: 'priya-shah', teamId: 'projects', role: 'OrgAdmin' })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(api.upsertMembership({ userId: 'ava-khan', teamId: 'cybersecurity', role: 'Viewer' })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+    workspace = await api.removeMembership('projects', 'priya-shah', promoted.version);
+    expect(workspace.memberships.find((membership) => membership.teamId === 'projects' && membership.userId === 'priya-shah')?.active).toBe(false);
+  });
+
   it('lets administrators edit another local user with version and duplicate-email checks', async () => {
     const api = new LocalWorkspaceApi();
     const before = (await api.getWorkspace()).users.find((user) => user.id === 'marcus-lee')!;
@@ -373,7 +393,11 @@ describe('LocalWorkspaceApi', () => {
     await expect(viewerApi.createScorecardMetric({ teamId: 'projects', label: 'Viewer metric', target: '1', unit: 'item', ownerId: 'maya-green' })).rejects.toMatchObject({ code: 'FORBIDDEN' });
 
     const leadershipApi = new LocalWorkspaceApi();
-    await expect(leadershipApi.updateScorecardMetric('metric-kickoffs', { target: '95%' })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    const platformUpdated = await leadershipApi.updateScorecardMetric('metric-kickoffs', { target: '95%' });
+    expect(platformUpdated.metrics.find((metric) => metric.id === 'metric-kickoffs')?.target).toBe('95%');
+    const platformWeek = platformUpdated.meetings.find((meeting) => meeting.teamId === 'projects')?.weekStartDate;
+    expect(platformWeek).toBeDefined();
+    await expect(leadershipApi.upsertScorecardResult('metric-kickoffs', platformWeek!, { actual: '1', status: 'on-track' })).rejects.toMatchObject({ code: 'FORBIDDEN' });
 
     const groupingSeed = structuredClone(initialWorkspace);
     groupingSeed.teams.push({ ...groupingSeed.teams[0], id: 'grouping-only', name: 'Grouping Only', shortName: 'Group', nodeType: 'grouping', parentTeamId: 'leadership', memberCount: 1 });

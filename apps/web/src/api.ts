@@ -3,6 +3,7 @@ import { averageMeetingRating, defaultMeetingSections, isValidMeetingRating, mee
 import { richTextToPlainText, sanitizeRichText, sanitizeTodoNotes } from './richText';
 import type {
   CompanyOverview,
+  AdminSnapshot,
   AuditEntityType,
   AuditEvent,
   EnvironmentAccess,
@@ -121,7 +122,9 @@ export interface WorkspaceApi {
   createUser(input: Pick<User, 'name' | 'email' | 'accent'> & { platformAdmin?: boolean }): Promise<Workspace>;
   updateUser(userId: string, input: Partial<Pick<User, 'name' | 'email'>> & { platformAdmin?: boolean }, expectedVersion?: number): Promise<Workspace>;
   upsertMembership(input: Pick<TeamMembership, 'userId' | 'teamId' | 'role'>): Promise<Workspace>;
+  removeMembership(teamId: string, userId: string, expectedVersion?: number): Promise<Workspace>;
   updateAgeSettings(settings: IssueAgeSettings): Promise<Workspace>;
+  getAdminSnapshot(): Promise<AdminSnapshot>;
   closeMeeting(teamId: string, recap: string, rating: number, meetingId?: string, attendeeRatings?: MeetingAttendeeRating[]): Promise<Workspace>;
   getMeetingReview(query?: MeetingReviewQuery): Promise<MeetingReviewPage>;
   getMeeting(teamId: string, meetingId: string): Promise<Workspace['meetings'][number]>;
@@ -582,6 +585,12 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     if (!this.workspace.currentUser.platformCapabilities.includes('PlatformAdmin') && !isOrgAdmin) throw new WorkspaceApiError('FORBIDDEN', 'OrgAdmin administration is required.');
   }
 
+  private requireMembershipAdmin(teamId: string) {
+    if (this.workspace.currentUser.platformCapabilities.includes('PlatformAdmin')) return;
+    const membership = this.membership(teamId);
+    if (!membership || (membership.role !== 'TeamLead' && membership.role !== 'OrgAdmin')) throw new WorkspaceApiError('FORBIDDEN', 'Only the team owner can manage this team’s members.');
+  }
+
   private requireVersion(actual: number, expected?: number) {
     if (expected !== undefined && actual !== expected) throw new WorkspaceApiError('CONFLICT', 'This item changed elsewhere. Refresh and try again.');
   }
@@ -1003,7 +1012,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
   }
 
   async createScorecardMetric(input: Pick<ScorecardMetric, 'teamId' | 'label' | 'target' | 'unit' | 'ownerId'>) {
-    this.requireWrite(input.teamId);
+    this.requireMembershipAdmin(input.teamId);
     const team = this.workspace.teams.find((candidate) => candidate.id === input.teamId && candidate.active);
     if (!team) throw new WorkspaceApiError('NOT_FOUND', 'Team not found.');
     if (team.nodeType !== 'operational') throw new WorkspaceApiError('VALIDATION', 'Grouping-only teams cannot own measurables.');
@@ -1018,7 +1027,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
 
   async updateScorecardMetric(metricId: string, input: Partial<Pick<ScorecardMetric, 'label' | 'target' | 'unit' | 'ownerId'>>, expectedVersion?: number) {
     const metric = this.metric(metricId);
-    this.requireWrite(metric.teamId);
+    this.requireMembershipAdmin(metric.teamId);
     this.requireVersion(metric.version, expectedVersion);
     if (input.label !== undefined && !input.label.trim()) throw new WorkspaceApiError('VALIDATION', 'Measurable label is required.');
     if (input.target !== undefined && !input.target.trim()) throw new WorkspaceApiError('VALIDATION', 'Measurable target is required.');
@@ -1695,6 +1704,20 @@ export class LocalWorkspaceApi implements WorkspaceApi {
     return this.result();
   }
 
+  async getAdminSnapshot(): Promise<AdminSnapshot> {
+    this.requireAdmin();
+    const snapshot = cloneWorkspace(this.workspace);
+    return {
+      teams: snapshot.teams.filter((team) => team.active),
+      users: snapshot.users.filter((user) => user.active),
+      memberships: snapshot.memberships.filter((membership) => membership.active),
+      settings: { ...snapshot.settings },
+      metrics: snapshot.metrics,
+      meetings: snapshot.meetings,
+      activity: snapshot.activity,
+    };
+  }
+
   private createUpcomingMeeting(team: Team, scheduledDate: string, template?: Workspace['meetings'][number], idsIssueIds: string[] = []): Workspace['meetings'][number] {
     const sections = meetingSectionsFor(team);
     return {
@@ -1793,7 +1816,7 @@ export class LocalWorkspaceApi implements WorkspaceApi {
   }
 
   async generateMeetings(teamId: string) {
-    this.requireWrite(teamId);
+    this.requireMembershipAdmin(teamId);
     const team = this.workspace.teams.find((candidate) => candidate.id === teamId && candidate.active);
     if (!team) throw new WorkspaceApiError('NOT_FOUND', 'Team not found.');
     if (team.nodeType !== 'operational') throw new WorkspaceApiError('VALIDATION', 'Grouping-only teams cannot own L10 meetings.');
@@ -1924,18 +1947,33 @@ export class LocalWorkspaceApi implements WorkspaceApi {
   }
 
   async upsertMembership(input: Pick<TeamMembership, 'userId' | 'teamId' | 'role'>) {
-    this.requireAdmin();
+    this.requireMembershipAdmin(input.teamId);
     if (!this.workspace.users.some((user) => user.id === input.userId) || !this.workspace.teams.some((team) => team.id === input.teamId)) throw new WorkspaceApiError('VALIDATION', 'User or team not found.');
+    if (!['TeamLead', 'Member', 'Viewer', 'OrgAdmin'].includes(input.role)) throw new WorkspaceApiError('VALIDATION', 'Invalid team role.');
+    if (!this.workspace.currentUser.platformCapabilities.includes('PlatformAdmin') && input.role === 'OrgAdmin') throw new WorkspaceApiError('FORBIDDEN', 'Only a Platform Admin can assign the OrgAdmin role.');
     const existing = this.workspace.memberships.find((membership) => membership.userId === input.userId && membership.teamId === input.teamId);
     if (existing) {
       existing.role = input.role;
       existing.active = true;
       existing.updatedAt = nowIso();
+      existing.version = (existing.version ?? 1) + 1;
     } else {
       const timestamp = nowIso();
-      this.workspace.memberships.push({ ...input, id: `membership-${input.userId}-${input.teamId}`, active: true, createdAt: timestamp, updatedAt: timestamp });
+      this.workspace.memberships.push({ ...input, id: `membership-${input.userId}-${input.teamId}`, active: true, createdAt: timestamp, updatedAt: timestamp, version: 1 });
     }
     this.audit('Updated membership', `${input.userId}:${input.teamId}`, input.role, 'membership');
+    return this.result();
+  }
+
+  async removeMembership(teamId: string, userId: string, expectedVersion?: number) {
+    this.requireMembershipAdmin(teamId);
+    const membership = this.workspace.memberships.find((candidate) => candidate.teamId === teamId && candidate.userId === userId && candidate.active);
+    if (!membership) throw new WorkspaceApiError('NOT_FOUND', 'Active team membership not found.');
+    this.requireVersion(membership.version ?? 1, expectedVersion);
+    membership.active = false;
+    membership.updatedAt = nowIso();
+    membership.version = (membership.version ?? 1) + 1;
+    this.audit('Removed team member', membership.id, `Removed ${userId} from ${teamId}.`, 'membership');
     return this.result();
   }
 
@@ -2126,6 +2164,17 @@ type ApiSnapshot = {
   etag: string;
 };
 
+type ApiAdminSnapshot = {
+  teams: Array<Team & { teamId?: string }>;
+  users: User[];
+  memberships: TeamMembership[];
+  settings: IssueAgeSettings;
+  metrics: ScorecardMetric[];
+  meetings: Workspace['meetings'];
+  audit: ApiAuditEvent[];
+  etag: string;
+};
+
 type QuarterDto = Workspace['quarter'];
 
 type ApiAuditEvent = { id: string; actorId: string; action: string; target: string; detail: string; createdAt: string; eventType?: string; type?: string };
@@ -2184,6 +2233,19 @@ function mapSnapshot(snapshot: ApiSnapshot): Workspace {
     meetings: normalizedMeetings,
     vtos: snapshot.vtos ?? [],
     vtoVersions: snapshot.vtoVersions ?? [],
+    activity: snapshot.audit.map(mapAuditEvent),
+  };
+}
+
+function mapAdminSnapshot(snapshot: ApiAdminSnapshot): AdminSnapshot {
+  const teams = snapshot.teams.map(serverTeam);
+  return {
+    teams,
+    users: snapshot.users,
+    memberships: snapshot.memberships.map(serverMembership),
+    settings: snapshot.settings,
+    metrics: snapshot.metrics,
+    meetings: snapshot.meetings.map((meeting) => normalizeMeeting(meeting, teams.find((team) => team.id === meeting.teamId))),
     activity: snapshot.audit.map(mapAuditEvent),
   };
 }
@@ -2350,6 +2412,10 @@ export class HttpWorkspaceApi implements WorkspaceApi {
     return cloneWorkspace(workspace);
   }
 
+  async getAdminSnapshot(): Promise<AdminSnapshot> {
+    return mapAdminSnapshot(await this.request<ApiAdminSnapshot>('/platform-admin'));
+  }
+
   async getAuditTrail(entityType: AuditEntityType, entityId: string) {
     const events = await this.request<ApiAuditEvent[]>(`/audit/${entityType}/${encodeURIComponent(entityId)}`);
     return events.map(mapAuditEvent);
@@ -2451,6 +2517,7 @@ export class HttpWorkspaceApi implements WorkspaceApi {
   async createUser(input: Pick<User, 'name' | 'email' | 'accent'> & { platformAdmin?: boolean }) { return this.mutate('/platform-admin/users', 'POST', input); }
   async updateUser(userId: string, input: Partial<Pick<User, 'name' | 'email'>> & { platformAdmin?: boolean }, expectedVersion?: number) { return this.mutate(`/platform-admin/users/${encodeURIComponent(userId)}`, 'PATCH', input, expectedVersion); }
   async upsertMembership(input: Pick<TeamMembership, 'userId' | 'teamId' | 'role'>) { return this.mutate('/platform-admin/memberships', 'PUT', input); }
+  async removeMembership(teamId: string, userId: string, expectedVersion?: number) { return this.mutate(`/platform-admin/memberships/${encodeURIComponent(teamId)}/${encodeURIComponent(userId)}`, 'DELETE', undefined, expectedVersion); }
   async updateAgeSettings(settings: IssueAgeSettings) { return this.mutate('/platform-admin/settings/aging', 'PUT', settings); }
   async closeMeeting(teamId: string, recap: string, rating: number, meetingId?: string, attendeeRatings?: MeetingAttendeeRating[]) {
     const workspace = this.cachedWorkspace ?? await this.getWorkspace();
